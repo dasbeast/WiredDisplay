@@ -4,12 +4,16 @@ import CoreVideo
 import ScreenCaptureKit
 
 /// Capture pipeline using SCStream for continuous screen capture.
+/// Can target a specific display (e.g. the virtual extended display).
 final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var isCapturing = false
 
     private var stream: SCStream?
     private var frameIndex: UInt64 = 0
     private let captureQueue = DispatchQueue(label: "wireddisplay.sender.capture", qos: .userInteractive)
+
+    /// The CGDirectDisplayID to capture. If 0, captures the main display.
+    var targetDisplayID: CGDirectDisplayID = 0
 
     var onCapturedFrame: ((CapturedFrame) -> Void)?
     var onError: ((Error) -> Void)?
@@ -29,8 +33,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
             do {
                 try await startSCStream(width: width, height: height, framesPerSecond: framesPerSecond)
             } catch {
-                onError?(error)
-                // Fall back to synthetic capture if ScreenCaptureKit fails
+                print("[CaptureService] SCStream failed: \(error). Falling back to synthetic capture.")
+                onError?(CaptureServiceError.screenCapturePermissionDenied(underlying: error))
                 startSyntheticCapture(width: width, height: height, framesPerSecond: framesPerSecond)
             }
         }
@@ -53,8 +57,18 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - SCStream Setup
 
     private func startSCStream(width: Int, height: Int, framesPerSecond: Int) async throws {
-        let available = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = available.displays.first else {
+        let available = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+
+        // Find the target display — either the virtual display or the main display
+        let display: SCDisplay
+        if targetDisplayID != 0,
+           let targetDisplay = available.displays.first(where: { $0.displayID == targetDisplayID }) {
+            display = targetDisplay
+            print("[CaptureService] Capturing virtual display \(targetDisplayID)")
+        } else if let mainDisplay = available.displays.first {
+            display = mainDisplay
+            print("[CaptureService] Capturing main display \(display.displayID)")
+        } else {
             throw CaptureServiceError.noDisplayAvailable
         }
 
@@ -165,6 +179,16 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-enum CaptureServiceError: Error {
+enum CaptureServiceError: Error, LocalizedError {
     case noDisplayAvailable
+    case screenCapturePermissionDenied(underlying: Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .noDisplayAvailable:
+            return "No display available for capture"
+        case .screenCapturePermissionDenied(let underlying):
+            return "Screen capture failed – grant Screen Recording permission in System Settings > Privacy & Security. (\(underlying.localizedDescription))"
+        }
+    }
 }
