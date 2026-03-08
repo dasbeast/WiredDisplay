@@ -14,6 +14,7 @@ final class ListenerService {
 
     var onStateChange: ((Bool) -> Void)?
     var onEnvelope: ((NetworkEnvelope) -> Void)?
+    var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data) -> Void)?
     var onError: ((Error) -> Void)?
 
     func startListening(port: UInt16 = NetworkProtocol.defaultPort) {
@@ -114,7 +115,7 @@ final class ListenerService {
     }
 
     private func receiveNextChunk(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] content, _, isComplete, error in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024 * 1024) { [weak self] content, _, isComplete, error in
             guard let self else { return }
 
             if let error {
@@ -160,7 +161,7 @@ final class ListenerService {
         while true {
             guard receiveBuffer.count >= 4 else { return }
             let length = Int(readLengthPrefix(from: receiveBuffer))
-            guard length <= NetworkProtocol.maximumEnvelopeBytes else {
+            guard length <= NetworkProtocol.maximumMessageBytes else {
                 receiveBuffer.removeAll(keepingCapacity: false)
                 onError?(ListenerServiceError.messageTooLarge)
                 return
@@ -172,6 +173,18 @@ final class ListenerService {
             let payload = receiveBuffer.subdata(in: 4..<totalLength)
             receiveBuffer.removeSubrange(0..<totalLength)
 
+            // Check if this is a binary video frame (starts with magic bytes)
+            if payload.count >= 4 {
+                let magic = payload.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                if magic == NetworkProtocol.binaryMagic {
+                    if let result = BinaryFrameWire.deserialize(data: payload) {
+                        onBinaryVideoFrame?(result.header, result.sps, result.pps, result.payload)
+                    }
+                    continue
+                }
+            }
+
+            // Otherwise it's a JSON envelope (hello, heartbeat, etc.)
             do {
                 let envelope = try JSONDecoder().decode(NetworkEnvelope.self, from: payload)
                 try NetworkProtocol.validate(version: envelope.version)

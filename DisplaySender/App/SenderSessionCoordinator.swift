@@ -15,6 +15,7 @@ final class SenderSessionCoordinator {
     private let captureService: CaptureService
     private let encoderService: EncoderService
     private let transportService: TransportService
+    private let virtualDisplayService = VirtualDisplayService()
     private let wiredPathMonitor = WiredPathStatusMonitor()
 
     private(set) var state: SessionState = .idle { didSet { onChange?() } }
@@ -174,16 +175,33 @@ final class SenderSessionCoordinator {
     }
 
     /// Starts capture and frame transport after handshake succeeds.
+    /// Creates a virtual display for the extended desktop, then captures it.
     func startSession() {
         guard canStartSession else { return }
         state = .running
+
         let captureWidth = effectiveCaptureWidth()
         let captureHeight = effectiveCaptureHeight()
-        captureService.startCapture(
+
+        // Create virtual display so macOS extends the desktop onto it
+        let virtualDisplayID = virtualDisplayService.createDisplay(
             width: captureWidth,
             height: captureHeight,
-            framesPerSecond: NetworkProtocol.captureFramesPerSecond
+            refreshRate: Double(NetworkProtocol.captureFramesPerSecond)
         )
+
+        // Point capture at the virtual display (or fall back to main display)
+        captureService.targetDisplayID = virtualDisplayID
+
+        // Give macOS a moment to initialize the virtual display before capturing
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, case .running = self.state else { return }
+            self.captureService.startCapture(
+                width: captureWidth,
+                height: captureHeight,
+                framesPerSecond: NetworkProtocol.captureFramesPerSecond
+            )
+        }
     }
 
     /// Stops sender session and resets services to idle placeholders.
@@ -191,6 +209,7 @@ final class SenderSessionCoordinator {
         shouldMaintainConnection = false
         stopHeartbeatTimers()
         captureService.stopCapture()
+        virtualDisplayService.destroyDisplay()
         transportService.disconnect()
         state = .idle
         sentFramesPerSecond = nil
@@ -232,24 +251,14 @@ final class SenderSessionCoordinator {
         Task.detached(priority: .userInitiated) { [weak self, capturedFrame] in
             let encodedFrame = encoderService.encode(frame: capturedFrame)
 
-            do {
-                let encodedPayload = try JSONEncoder().encode(encodedFrame)
-                await MainActor.run {
-                    guard let self else { return }
-                    defer { self.isFrameEncodeInFlight = false }
+            await MainActor.run {
+                guard let self else { return }
+                defer { self.isFrameEncodeInFlight = false }
 
-                    guard case .running = self.state else { return }
-                    let packet = VideoPacket(metadata: encodedFrame.metadata, payload: encodedPayload)
-                    self.transportService.send(packet)
-                    self.sentFrameCount += 1
-                    self.updateOutboundMetrics(payloadByteCount: encodedPayload.count)
-                }
-            } catch {
-                await MainActor.run {
-                    guard let self else { return }
-                    self.isFrameEncodeInFlight = false
-                    self.lastErrorMessage = error.localizedDescription
-                }
+                guard case .running = self.state else { return }
+                self.transportService.sendVideoFrame(encodedFrame)
+                self.sentFrameCount += 1
+                self.updateOutboundMetrics(payloadByteCount: encodedFrame.payload.count)
             }
         }
     }
@@ -353,6 +362,7 @@ final class SenderSessionCoordinator {
         state = .connecting
         stopHeartbeatTimers()
         captureService.stopCapture()
+        virtualDisplayService.destroyDisplay()
         transportService.disconnect()
 
         guard shouldMaintainConnection, let host = desiredHost else { return }

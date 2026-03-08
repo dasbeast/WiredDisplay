@@ -25,6 +25,11 @@ final class DecoderService {
             )
         }
 
+        return decodeEncodedFrame(encodedFrame)
+    }
+
+    /// Decodes an EncodedFrame directly (used by binary video frame path).
+    func decodeEncodedFrame(_ encodedFrame: EncodedFrame) -> DecodedFrame {
         switch encodedFrame.codec {
         case .rawBGRA:
             return DecodedFrame(
@@ -47,8 +52,9 @@ final class DecoderService {
                         pixelFormat: .bgra8
                     )
                 }
+                print("[DecoderService] H.264 decode returned nil for frame \(encodedFrame.metadata.frameIndex)")
             } catch {
-                _ = error
+                print("[DecoderService] H.264 decode failed for frame \(encodedFrame.metadata.frameIndex): \(error)")
             }
 
             return DecodedFrame(

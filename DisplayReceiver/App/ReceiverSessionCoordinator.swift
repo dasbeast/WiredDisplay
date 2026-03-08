@@ -80,6 +80,13 @@ final class ReceiverSessionCoordinator {
             }
         }
 
+        listenerService.onBinaryVideoFrame = { [weak self] header, sps, pps, payload in
+            guard let self else { return }
+            Task { @MainActor in
+                self.handleBinaryVideoFrame(header: header, sps: sps, pps: pps, payload: payload)
+            }
+        }
+
         listenerService.onError = { [weak self] error in
             guard let self else { return }
             Task { @MainActor in
@@ -162,6 +169,39 @@ final class ReceiverSessionCoordinator {
             lastErrorMessage = error.localizedDescription
             state = .failed(error.localizedDescription)
         }
+    }
+
+    private func handleBinaryVideoFrame(header: BinaryFrameHeader, sps: Data?, pps: Data?, payload: Data) {
+        let metadata = FrameMetadata(
+            frameIndex: header.frameIndex,
+            timestampNanoseconds: header.timestampNanoseconds,
+            width: header.width,
+            height: header.height,
+            isKeyFrame: header.isKeyFrame
+        )
+
+        updateFrameTimingMetrics(from: metadata)
+        updateInboundMetrics(payloadByteCount: payload.count)
+
+        let encodedFrame = EncodedFrame(
+            metadata: metadata,
+            codec: header.codec,
+            payload: payload,
+            isKeyFrame: header.isKeyFrame,
+            sourceBytesPerRow: header.bytesPerRow,
+            sourcePixelFormat: header.pixelFormat,
+            targetBitrateKbps: 20_000,
+            targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
+            h264SPS: sps,
+            h264PPS: pps
+        )
+
+        let decodedFrame = decoderService.decodeEncodedFrame(encodedFrame)
+        let (renderableFrame, renderSource) = makeRenderableFrame(from: decodedFrame)
+        renderService.render(frame: renderableFrame)
+        renderSourceDescription = renderSource
+        replacedBeforeRenderCount = RenderFrameStore.shared.replacedFramesCount()
+        receivedFrameCount += 1
     }
 
     private func updateFrameTimingMetrics(from metadata: FrameMetadata) {

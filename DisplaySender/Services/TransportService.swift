@@ -64,27 +64,21 @@ final class TransportService {
         connection.start(queue: queue)
     }
 
-    /// Placeholder legacy send path kept for compatibility while callers migrate to envelope-based sends.
-    func send(_ packet: VideoPacket) {
-        do {
-            let envelope = try NetworkEnvelope.make(
-                type: .videoFrame,
-                sequenceNumber: nextSequenceNumber,
-                payload: packet
-            )
-            nextSequenceNumber += 1
-
-            let isKeyFrame: Bool
-            if let encoded = try? JSONDecoder().decode(EncodedFrame.self, from: packet.payload) {
-                isKeyFrame = encoded.isKeyFrame
-            } else {
-                isKeyFrame = packet.metadata.isKeyFrame
-            }
-
-            try queueEnvelopeForSend(envelope, isKeyFrame: isKeyFrame)
-        } catch {
-            onError?(error)
+    /// Sends an encoded video frame using the binary wire format (no JSON/base64 for payload data).
+    func sendVideoFrame(_ encodedFrame: EncodedFrame) {
+        guard let binaryData = BinaryFrameWire.serialize(encodedFrame: encodedFrame) else {
+            onError?(TransportServiceError.serializationFailed)
+            return
         }
+
+        guard binaryData.count <= NetworkProtocol.maximumMessageBytes else {
+            onError?(TransportServiceError.messageTooLarge)
+            return
+        }
+
+        let framedData = wrapLengthPrefix(binaryData)
+        enqueueOutboundFrame(OutboundFrame(data: framedData, isKeyFrame: encodedFrame.isKeyFrame))
+        flushPendingIfPossible()
     }
 
     func sendHello(senderName: String, targetWidth: Int, targetHeight: Int) {
@@ -184,7 +178,7 @@ final class TransportService {
     }
 
     private func receiveNextChunk(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] content, _, isComplete, error in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024 * 1024) { [weak self] content, _, isComplete, error in
             guard let self else { return }
 
             if let error {
@@ -213,7 +207,7 @@ final class TransportService {
         while true {
             guard receiveBuffer.count >= 4 else { return }
             let length = Int(readLengthPrefix(from: receiveBuffer))
-            guard length <= NetworkProtocol.maximumEnvelopeBytes else {
+            guard length <= NetworkProtocol.maximumMessageBytes else {
                 receiveBuffer.removeAll(keepingCapacity: false)
                 onError?(TransportServiceError.messageTooLarge)
                 return
@@ -254,4 +248,5 @@ enum TransportServiceError: Error {
     case invalidEndpoint
     case notConnected
     case messageTooLarge
+    case serializationFailed
 }

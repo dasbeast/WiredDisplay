@@ -24,8 +24,9 @@ final class EncoderService {
             if let encoded = try encodeWithVideoToolbox(pixelBuffer: pixelBuffer, frame: frame) {
                 return encoded
             }
+            print("[EncoderService] H.264 encode returned nil for frame \(frame.metadata.frameIndex)")
         } catch {
-            _ = error
+            print("[EncoderService] H.264 encode failed for frame \(frame.metadata.frameIndex): \(error)")
         }
 
         return makeRawEncodedFrame(from: frame)
