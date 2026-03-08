@@ -1,0 +1,755 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		DEE850E92F5D0D2500C44CD5 /* FrameMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE850A02F5D0A9300C44CD5 /* FrameMetadata.swift */; };
+		DEE850EA2F5D0D2500C44CD5 /* FrameMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE850A02F5D0A9300C44CD5 /* FrameMetadata.swift */; };
+		DEE850EB2F5D0D2500C44CD5 /* FrameMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE850A02F5D0A9300C44CD5 /* FrameMetadata.swift */; };
+		DEE850EC2F5D0D2C00C44CD5 /* VideoPacket.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE850A12F5D0A9300C44CD5 /* VideoPacket.swift */; };
+		DEE850ED2F5D0D2C00C44CD5 /* VideoPacket.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE850A12F5D0A9300C44CD5 /* VideoPacket.swift */; };
+		DEE850EE2F5D0D2C00C44CD5 /* VideoPacket.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE850A12F5D0A9300C44CD5 /* VideoPacket.swift */; };
+		DEE850EF2F5D0D3200C44CD5 /* NetworkProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE850A22F5D0A9400C44CD5 /* NetworkProtocol.swift */; };
+		DEE850F02F5D0D3200C44CD5 /* NetworkProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE850A22F5D0A9400C44CD5 /* NetworkProtocol.swift */; };
+		DEE850F12F5D0D3200C44CD5 /* NetworkProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE850A22F5D0A9400C44CD5 /* NetworkProtocol.swift */; };
+		DEE850F42F5D0D9600C44CD5 /* ScreenCaptureKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEE850F32F5D0D9600C44CD5 /* ScreenCaptureKit.framework */; };
+		DEE850F62F5D0DA400C44CD5 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEE850F52F5D0DA400C44CD5 /* VideoToolbox.framework */; };
+		DEE850F82F5D0DB500C44CD5 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEE850F72F5D0DB500C44CD5 /* Network.framework */; };
+		DEE850F92F5D0DCB00C44CD5 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEE850F52F5D0DA400C44CD5 /* VideoToolbox.framework */; };
+		DEE850FA2F5D0DD500C44CD5 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEE850F72F5D0DB500C44CD5 /* Network.framework */; };
+		DEE850FC2F5D0DDE00C44CD5 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEE850FB2F5D0DDE00C44CD5 /* Metal.framework */; };
+		DEE850FE2F5D0DE700C44CD5 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DEE850FD2F5D0DE700C44CD5 /* MetalKit.framework */; };
+		DEE8512A2F5D135200C44CD5 /* NetworkDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851292F5D135200C44CD5 /* NetworkDiagnostics.swift */; };
+		DEE8512B2F5D135200C44CD5 /* NetworkDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851292F5D135200C44CD5 /* NetworkDiagnostics.swift */; };
+		DEE8512C2F5D135200C44CD5 /* NetworkDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851292F5D135200C44CD5 /* NetworkDiagnostics.swift */; };
+		DEE8512E2F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */; };
+		DEE8512F2F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */; };
+		DEE851302F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		DEE8508A2F5D094C00C44CD5 /* WiredDisplay.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WiredDisplay.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DEE850A02F5D0A9300C44CD5 /* FrameMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameMetadata.swift; sourceTree = "<group>"; };
+		DEE850A12F5D0A9300C44CD5 /* VideoPacket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPacket.swift; sourceTree = "<group>"; };
+		DEE850A22F5D0A9400C44CD5 /* NetworkProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkProtocol.swift; sourceTree = "<group>"; };
+		DEE850A32F5D0AA300C44CD5 /* DisplaySenderApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplaySenderApp.swift; sourceTree = "<group>"; };
+		DEE850A42F5D0AA400C44CD5 /* SenderRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderRootView.swift; sourceTree = "<group>"; };
+		DEE850A52F5D0AA500C44CD5 /* CaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureService.swift; sourceTree = "<group>"; };
+		DEE850A62F5D0AA500C44CD5 /* EncoderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncoderService.swift; sourceTree = "<group>"; };
+		DEE850A72F5D0AA500C44CD5 /* TransportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransportService.swift; sourceTree = "<group>"; };
+		DEE850A82F5D0AB300C44CD5 /* DisplayReceiverApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayReceiverApp.swift; sourceTree = "<group>"; };
+		DEE850A92F5D0AB400C44CD5 /* ReceiverRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiverRootView.swift; sourceTree = "<group>"; };
+		DEE850AA2F5D0AB400C44CD5 /* ListenerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListenerService.swift; sourceTree = "<group>"; };
+		DEE850AB2F5D0AB400C44CD5 /* DecoderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecoderService.swift; sourceTree = "<group>"; };
+		DEE850AC2F5D0AB400C44CD5 /* RenderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenderService.swift; sourceTree = "<group>"; };
+		DEE850B12F5D0C4900C44CD5 /* DisplayReceiver.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DisplayReceiver.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DEE850CC2F5D0C6400C44CD5 /* DisplaySender.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DisplaySender.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DEE850F32F5D0D9600C44CD5 /* ScreenCaptureKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ScreenCaptureKit.framework; path = System/Library/Frameworks/ScreenCaptureKit.framework; sourceTree = SDKROOT; };
+		DEE850F52F5D0DA400C44CD5 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
+		DEE850F72F5D0DB500C44CD5 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		DEE850FB2F5D0DDE00C44CD5 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		DEE850FD2F5D0DE700C44CD5 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
+		DEE851292F5D135200C44CD5 /* NetworkDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDiagnostics.swift; sourceTree = "<group>"; };
+		DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoFrameTypes.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		DEE8508C2F5D094C00C44CD5 /* WiredDisplay */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WiredDisplay;
+			sourceTree = "<group>";
+		};
+		DEE850B22F5D0C4900C44CD5 /* DisplayReceiver */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = DisplayReceiver;
+			sourceTree = "<group>";
+		};
+		DEE850CD2F5D0C6400C44CD5 /* DisplaySender */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = DisplaySender;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		DEE850872F5D094C00C44CD5 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DEE850AE2F5D0C4900C44CD5 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DEE850F92F5D0DCB00C44CD5 /* VideoToolbox.framework in Frameworks */,
+				DEE850FE2F5D0DE700C44CD5 /* MetalKit.framework in Frameworks */,
+				DEE850FC2F5D0DDE00C44CD5 /* Metal.framework in Frameworks */,
+				DEE850FA2F5D0DD500C44CD5 /* Network.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DEE850C92F5D0C6400C44CD5 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DEE850F62F5D0DA400C44CD5 /* VideoToolbox.framework in Frameworks */,
+				DEE850F42F5D0D9600C44CD5 /* ScreenCaptureKit.framework in Frameworks */,
+				DEE850F82F5D0DB500C44CD5 /* Network.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		DEE850812F5D094C00C44CD5 = {
+			isa = PBXGroup;
+			children = (
+				DEE8508C2F5D094C00C44CD5 /* WiredDisplay */,
+				DEE850B22F5D0C4900C44CD5 /* DisplayReceiver */,
+				DEE850CD2F5D0C6400C44CD5 /* DisplaySender */,
+				DEE8508B2F5D094C00C44CD5 /* Products */,
+				DEE850982F5D0A7C00C44CD5 /* DisplaySender */,
+				DEE850992F5D0A7C00C44CD5 /* DisplayReceiver */,
+				DEE8509A2F5D0A7C00C44CD5 /* Shared */,
+				DEE850F22F5D0D9600C44CD5 /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		DEE8508B2F5D094C00C44CD5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				DEE8508A2F5D094C00C44CD5 /* WiredDisplay.app */,
+				DEE850B12F5D0C4900C44CD5 /* DisplayReceiver.app */,
+				DEE850CC2F5D0C6400C44CD5 /* DisplaySender.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		DEE850982F5D0A7C00C44CD5 /* DisplaySender */ = {
+			isa = PBXGroup;
+			children = (
+				DEE8509B2F5D0A8100C44CD5 /* App */,
+				DEE8509C2F5D0A8200C44CD5 /* Services */,
+			);
+			path = DisplaySender;
+			sourceTree = "<group>";
+		};
+		DEE850992F5D0A7C00C44CD5 /* DisplayReceiver */ = {
+			isa = PBXGroup;
+			children = (
+				DEE8509D2F5D0A8200C44CD5 /* App */,
+				DEE8509E2F5D0A8200C44CD5 /* Services */,
+			);
+			path = DisplayReceiver;
+			sourceTree = "<group>";
+		};
+		DEE8509A2F5D0A7C00C44CD5 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				DEE8509F2F5D0A8200C44CD5 /* Protocol */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		DEE8509B2F5D0A8100C44CD5 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				DEE850A32F5D0AA300C44CD5 /* DisplaySenderApp.swift */,
+				DEE850A42F5D0AA400C44CD5 /* SenderRootView.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		DEE8509C2F5D0A8200C44CD5 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				DEE850A52F5D0AA500C44CD5 /* CaptureService.swift */,
+				DEE850A62F5D0AA500C44CD5 /* EncoderService.swift */,
+				DEE850A72F5D0AA500C44CD5 /* TransportService.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		DEE8509D2F5D0A8200C44CD5 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				DEE850A82F5D0AB300C44CD5 /* DisplayReceiverApp.swift */,
+				DEE850A92F5D0AB400C44CD5 /* ReceiverRootView.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		DEE8509E2F5D0A8200C44CD5 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				DEE850AA2F5D0AB400C44CD5 /* ListenerService.swift */,
+				DEE850AB2F5D0AB400C44CD5 /* DecoderService.swift */,
+				DEE850AC2F5D0AB400C44CD5 /* RenderService.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		DEE8509F2F5D0A8200C44CD5 /* Protocol */ = {
+			isa = PBXGroup;
+			children = (
+				DEE850A02F5D0A9300C44CD5 /* FrameMetadata.swift */,
+				DEE850A12F5D0A9300C44CD5 /* VideoPacket.swift */,
+				DEE850A22F5D0A9400C44CD5 /* NetworkProtocol.swift */,
+				DEE851292F5D135200C44CD5 /* NetworkDiagnostics.swift */,
+				DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */,
+			);
+			path = Protocol;
+			sourceTree = "<group>";
+		};
+		DEE850F22F5D0D9600C44CD5 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				DEE850FD2F5D0DE700C44CD5 /* MetalKit.framework */,
+				DEE850FB2F5D0DDE00C44CD5 /* Metal.framework */,
+				DEE850F72F5D0DB500C44CD5 /* Network.framework */,
+				DEE850F52F5D0DA400C44CD5 /* VideoToolbox.framework */,
+				DEE850F32F5D0D9600C44CD5 /* ScreenCaptureKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		DEE850892F5D094C00C44CD5 /* WiredDisplay */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DEE850952F5D094E00C44CD5 /* Build configuration list for PBXNativeTarget "WiredDisplay" */;
+			buildPhases = (
+				DEE850862F5D094C00C44CD5 /* Sources */,
+				DEE850872F5D094C00C44CD5 /* Frameworks */,
+				DEE850882F5D094C00C44CD5 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				DEE8508C2F5D094C00C44CD5 /* WiredDisplay */,
+			);
+			name = WiredDisplay;
+			packageProductDependencies = (
+			);
+			productName = WiredDisplay;
+			productReference = DEE8508A2F5D094C00C44CD5 /* WiredDisplay.app */;
+			productType = "com.apple.product-type.application";
+		};
+		DEE850B02F5D0C4900C44CD5 /* DisplayReceiver */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DEE850B92F5D0C4A00C44CD5 /* Build configuration list for PBXNativeTarget "DisplayReceiver" */;
+			buildPhases = (
+				DEE850AD2F5D0C4900C44CD5 /* Sources */,
+				DEE850AE2F5D0C4900C44CD5 /* Frameworks */,
+				DEE850AF2F5D0C4900C44CD5 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				DEE850B22F5D0C4900C44CD5 /* DisplayReceiver */,
+			);
+			name = DisplayReceiver;
+			packageProductDependencies = (
+			);
+			productName = DisplayReceiver;
+			productReference = DEE850B12F5D0C4900C44CD5 /* DisplayReceiver.app */;
+			productType = "com.apple.product-type.application";
+		};
+		DEE850CB2F5D0C6400C44CD5 /* DisplaySender */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DEE850D42F5D0C6500C44CD5 /* Build configuration list for PBXNativeTarget "DisplaySender" */;
+			buildPhases = (
+				DEE850C82F5D0C6400C44CD5 /* Sources */,
+				DEE850C92F5D0C6400C44CD5 /* Frameworks */,
+				DEE850CA2F5D0C6400C44CD5 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				DEE850CD2F5D0C6400C44CD5 /* DisplaySender */,
+			);
+			name = DisplaySender;
+			packageProductDependencies = (
+			);
+			productName = DisplaySender;
+			productReference = DEE850CC2F5D0C6400C44CD5 /* DisplaySender.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		DEE850822F5D094C00C44CD5 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2630;
+				LastUpgradeCheck = 2630;
+				TargetAttributes = {
+					DEE850892F5D094C00C44CD5 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					DEE850B02F5D0C4900C44CD5 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					DEE850CB2F5D0C6400C44CD5 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+				};
+			};
+			buildConfigurationList = DEE850852F5D094C00C44CD5 /* Build configuration list for PBXProject "WiredDisplay" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = DEE850812F5D094C00C44CD5;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = DEE8508B2F5D094C00C44CD5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				DEE850892F5D094C00C44CD5 /* WiredDisplay */,
+				DEE850B02F5D0C4900C44CD5 /* DisplayReceiver */,
+				DEE850CB2F5D0C6400C44CD5 /* DisplaySender */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		DEE850882F5D094C00C44CD5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DEE850AF2F5D0C4900C44CD5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DEE850CA2F5D0C6400C44CD5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		DEE850862F5D094C00C44CD5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DEE8512F2F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */,
+				DEE850E92F5D0D2500C44CD5 /* FrameMetadata.swift in Sources */,
+				DEE8512C2F5D135200C44CD5 /* NetworkDiagnostics.swift in Sources */,
+				DEE850EF2F5D0D3200C44CD5 /* NetworkProtocol.swift in Sources */,
+				DEE850EC2F5D0D2C00C44CD5 /* VideoPacket.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DEE850AD2F5D0C4900C44CD5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DEE8512A2F5D135200C44CD5 /* NetworkDiagnostics.swift in Sources */,
+				DEE8512E2F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */,
+				DEE850EA2F5D0D2500C44CD5 /* FrameMetadata.swift in Sources */,
+				DEE850ED2F5D0D2C00C44CD5 /* VideoPacket.swift in Sources */,
+				DEE850F02F5D0D3200C44CD5 /* NetworkProtocol.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DEE850C82F5D0C6400C44CD5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DEE850EB2F5D0D2500C44CD5 /* FrameMetadata.swift in Sources */,
+				DEE850EE2F5D0D2C00C44CD5 /* VideoPacket.swift in Sources */,
+				DEE850F12F5D0D3200C44CD5 /* NetworkProtocol.swift in Sources */,
+				DEE8512B2F5D135200C44CD5 /* NetworkDiagnostics.swift in Sources */,
+				DEE851302F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		DEE850932F5D094E00C44CD5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 4V28UB843Z;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		DEE850942F5D094E00C44CD5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 4V28UB843Z;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		DEE850962F5D094E00C44CD5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4V28UB843Z;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = BK.WiredDisplay;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		DEE850972F5D094E00C44CD5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4V28UB843Z;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = BK.WiredDisplay;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		DEE850BA2F5D0C4A00C44CD5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = DisplayReceiver/DisplayReceiver.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4V28UB843Z;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = BK.DisplayReceiver;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		DEE850BB2F5D0C4A00C44CD5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = DisplayReceiver/DisplayReceiver.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4V28UB843Z;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = BK.DisplayReceiver;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		DEE850D52F5D0C6500C44CD5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = DisplaySender/DisplaySender.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4V28UB843Z;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = BK.DisplaySender;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		DEE850D62F5D0C6500C44CD5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = DisplaySender/DisplaySender.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4V28UB843Z;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = BK.DisplaySender;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		DEE850852F5D094C00C44CD5 /* Build configuration list for PBXProject "WiredDisplay" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DEE850932F5D094E00C44CD5 /* Debug */,
+				DEE850942F5D094E00C44CD5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DEE850952F5D094E00C44CD5 /* Build configuration list for PBXNativeTarget "WiredDisplay" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DEE850962F5D094E00C44CD5 /* Debug */,
+				DEE850972F5D094E00C44CD5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DEE850B92F5D0C4A00C44CD5 /* Build configuration list for PBXNativeTarget "DisplayReceiver" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DEE850BA2F5D0C4A00C44CD5 /* Debug */,
+				DEE850BB2F5D0C4A00C44CD5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DEE850D42F5D0C6500C44CD5 /* Build configuration list for PBXNativeTarget "DisplaySender" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DEE850D52F5D0C6500C44CD5 /* Debug */,
+				DEE850D62F5D0C6500C44CD5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = DEE850822F5D094C00C44CD5 /* Project object */;
+}

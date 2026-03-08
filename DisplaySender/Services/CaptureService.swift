@@ -1,0 +1,170 @@
+import Foundation
+import CoreMedia
+import CoreVideo
+import ScreenCaptureKit
+
+/// Capture pipeline using SCStream for continuous screen capture.
+final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
+    private(set) var isCapturing = false
+
+    private var stream: SCStream?
+    private var frameIndex: UInt64 = 0
+    private let captureQueue = DispatchQueue(label: "wireddisplay.sender.capture", qos: .userInteractive)
+
+    var onCapturedFrame: ((CapturedFrame) -> Void)?
+    var onError: ((Error) -> Void)?
+
+    func startCapture(width: Int, height: Int, framesPerSecond: Int = 30) {
+        stopCapture()
+
+        isCapturing = true
+        frameIndex = 0
+
+        if NetworkProtocol.forceSyntheticCaptureForDiagnostics {
+            startSyntheticCapture(width: width, height: height, framesPerSecond: framesPerSecond)
+            return
+        }
+
+        Task {
+            do {
+                try await startSCStream(width: width, height: height, framesPerSecond: framesPerSecond)
+            } catch {
+                onError?(error)
+                // Fall back to synthetic capture if ScreenCaptureKit fails
+                startSyntheticCapture(width: width, height: height, framesPerSecond: framesPerSecond)
+            }
+        }
+    }
+
+    func stopCapture() {
+        isCapturing = false
+
+        if let stream {
+            self.stream = nil
+            Task {
+                try? await stream.stopCapture()
+            }
+        }
+
+        syntheticTimer?.cancel()
+        syntheticTimer = nil
+    }
+
+    // MARK: - SCStream Setup
+
+    private func startSCStream(width: Int, height: Int, framesPerSecond: Int) async throws {
+        let available = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = available.displays.first else {
+            throw CaptureServiceError.noDisplayAvailable
+        }
+
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        let configuration = SCStreamConfiguration()
+        configuration.width = width
+        configuration.height = height
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(framesPerSecond, 1)))
+        configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        configuration.queueDepth = 3
+        configuration.showsCursor = true
+
+        let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
+        try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+        try await newStream.startCapture()
+
+        self.stream = newStream
+    }
+
+    // MARK: - SCStreamOutput
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard isCapturing, type == .screen else { return }
+        guard sampleBuffer.isValid else { return }
+        guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
+
+        let frameWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let frameHeight = CVPixelBufferGetHeight(pixelBuffer)
+        guard frameWidth > 0, frameHeight > 0 else { return }
+
+        let currentIndex = frameIndex
+        frameIndex += 1
+
+        let metadata = FrameMetadata(
+            frameIndex: currentIndex,
+            timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            width: frameWidth,
+            height: frameHeight,
+            isKeyFrame: currentIndex % 60 == 0
+        )
+
+        let frame = copyCapturedFrame(from: pixelBuffer, metadata: metadata)
+        onCapturedFrame?(frame)
+    }
+
+    // MARK: - SCStreamDelegate
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        isCapturing = false
+        onError?(error)
+    }
+
+    // MARK: - Pixel Buffer Copy
+
+    private func copyCapturedFrame(from pixelBuffer: CVPixelBuffer, metadata: FrameMetadata) -> CapturedFrame {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            return CapturedFrame(metadata: metadata, rawData: Data(), bytesPerRow: max(1, metadata.width * 4), pixelFormat: .bgra8)
+        }
+
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let totalByteCount = max(0, bytesPerRow * height)
+
+        let rawData = Data(bytes: baseAddress, count: totalByteCount)
+        return CapturedFrame(metadata: metadata, rawData: rawData, bytesPerRow: bytesPerRow, pixelFormat: .bgra8)
+    }
+
+    // MARK: - Synthetic Fallback
+
+    private var syntheticTimer: DispatchSourceTimer?
+
+    private func startSyntheticCapture(width: Int, height: Int, framesPerSecond: Int) {
+        let queue = DispatchQueue(label: "wireddisplay.sender.capture.synthetic")
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        let interval = max(1, framesPerSecond)
+
+        timer.schedule(deadline: .now(), repeating: .milliseconds(1000 / interval))
+        timer.setEventHandler { [weak self] in
+            guard let self, self.isCapturing else { return }
+
+            let metadata = FrameMetadata(
+                frameIndex: self.frameIndex,
+                timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                width: width,
+                height: height,
+                isKeyFrame: self.frameIndex % UInt64(interval) == 0
+            )
+
+            let bytesPerRow = max(1, width * 4)
+            let byteCount = bytesPerRow * height
+            let rawBytes = Data(repeating: UInt8(self.frameIndex % 255), count: max(0, byteCount))
+            self.onCapturedFrame?(
+                CapturedFrame(
+                    metadata: metadata,
+                    rawData: rawBytes,
+                    bytesPerRow: bytesPerRow,
+                    pixelFormat: .bgra8
+                )
+            )
+            self.frameIndex += 1
+        }
+
+        syntheticTimer = timer
+        timer.resume()
+    }
+}
+
+enum CaptureServiceError: Error {
+    case noDisplayAvailable
+}
