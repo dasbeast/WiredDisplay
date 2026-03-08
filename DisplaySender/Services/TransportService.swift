@@ -36,9 +36,6 @@ final class TransportService {
         }
 
         let parameters = NWParameters.tcp
-        if shouldForceWiredEthernet(forHost: host) {
-            parameters.requiredInterfaceType = .wiredEthernet
-        }
 
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
         self.connection = connection
@@ -65,12 +62,6 @@ final class TransportService {
         }
 
         connection.start(queue: queue)
-    }
-
-    private func shouldForceWiredEthernet(forHost host: String) -> Bool {
-        guard NetworkProtocol.allowLoopbackForLocalTesting else { return true }
-        let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized != "127.0.0.1" && normalized != "localhost"
     }
 
     /// Placeholder legacy send path kept for compatibility while callers migrate to envelope-based sends.

@@ -22,9 +22,6 @@ final class ListenerService {
         do {
             let nwPort = try NWEndpoint.Port(rawValue: port).unwrapOrThrow()
             let parameters = NWParameters.tcp
-            if !NetworkProtocol.allowLoopbackForLocalTesting {
-                parameters.requiredInterfaceType = .wiredEthernet
-            }
             parameters.allowLocalEndpointReuse = true
 
             let listener = try NWListener(using: parameters, on: nwPort)

@@ -67,9 +67,12 @@ enum NetworkDiagnostics {
     }
 }
 
-/// Tracks whether a wired Ethernet route is currently available.
+/// Tracks whether a wired path (Ethernet or Thunderbolt Bridge) is currently available.
+/// Thunderbolt Bridge does not register as .wiredEthernet in Network.framework,
+/// so we monitor all paths and check for any non-wifi, non-cellular interface,
+/// or look for bridge/thunderbolt interface names in the system interfaces.
 final class WiredPathStatusMonitor {
-    private let monitor = NWPathMonitor(requiredInterfaceType: .wiredEthernet)
+    private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "wireddisplay.network.wiredpath")
 
     private(set) var isStarted = false
@@ -80,7 +83,8 @@ final class WiredPathStatusMonitor {
         isStarted = true
 
         monitor.pathUpdateHandler = { [weak self] path in
-            self?.onUpdate?(path.status == .satisfied)
+            let hasWired = self?.detectWiredPath(path) ?? false
+            self?.onUpdate?(hasWired)
         }
 
         monitor.start(queue: queue)
@@ -90,5 +94,36 @@ final class WiredPathStatusMonitor {
         guard isStarted else { return }
         monitor.cancel()
         isStarted = false
+    }
+
+    private func detectWiredPath(_ path: NWPath) -> Bool {
+        guard path.status == .satisfied else { return false }
+
+        // Check if any available interface is wired (ethernet or bridge/thunderbolt)
+        for interface in path.availableInterfaces {
+            switch interface.type {
+            case .wiredEthernet:
+                return true
+            case .other:
+                // Thunderbolt Bridge shows up as type .other with name like "bridge0"
+                let name = interface.name.lowercased()
+                if name.hasPrefix("bridge") || name.hasPrefix("thunder") || name.hasPrefix("en") {
+                    return true
+                }
+            default:
+                continue
+            }
+        }
+
+        // Also check system interfaces for bridge/thunderbolt addresses
+        let interfaces = NetworkDiagnostics.localIPv4Addresses()
+        for iface in interfaces {
+            let name = iface.interfaceName.lowercased()
+            if name.hasPrefix("bridge") || name.hasPrefix("en") {
+                return true
+            }
+        }
+
+        return false
     }
 }
