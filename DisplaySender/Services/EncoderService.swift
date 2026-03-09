@@ -8,6 +8,10 @@ final class EncoderService {
     private var compressionSession: VTCompressionSession?
     private var configuredWidth = 0
     private var configuredHeight = 0
+    private var encodedFrameCount: UInt64 = 0
+    /// Cached SPS/PPS from the last key frame so we can send them with every frame.
+    private var lastSPS: Data?
+    private var lastPPS: Data?
 
     deinit {
         invalidateSession()
@@ -139,6 +143,9 @@ final class EncoderService {
         compressionSession = nil
         configuredWidth = 0
         configuredHeight = 0
+        encodedFrameCount = 0
+        lastSPS = nil
+        lastPPS = nil
     }
 
     private func makePixelBuffer(from frame: CapturedFrame) throws -> CVPixelBuffer {
@@ -195,12 +202,19 @@ final class EncoderService {
         let pts = CMTime(value: Int64(frame.metadata.frameIndex), timescale: 60)
         let duration = CMTime(value: 1, timescale: 60)
 
+        // Force key frame on first frame and every keyFrameIntervalSeconds
+        let keyFrameInterval = UInt64(NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds)
+        let forceKeyFrame = encodedFrameCount == 0 || encodedFrameCount % keyFrameInterval == 0
+        let frameProps: CFDictionary? = forceKeyFrame ? [
+            kVTEncodeFrameOptionKey_ForceKeyFrame: true as CFBoolean
+        ] as CFDictionary : nil
+
         let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: pts,
             duration: duration,
-            frameProperties: nil,
+            frameProperties: frameProps,
             sourceFrameRefcon: refcon,
             infoFlagsOut: &flags
         )
@@ -215,7 +229,33 @@ final class EncoderService {
             throw callbackError
         }
 
-        return callbackContext.output
+        if var output = callbackContext.output {
+            encodedFrameCount += 1
+
+            // Cache SPS/PPS from key frames
+            if output.h264SPS != nil { lastSPS = output.h264SPS }
+            if output.h264PPS != nil { lastPPS = output.h264PPS }
+
+            // Always attach cached SPS/PPS so the decoder can initialize at any point
+            if output.h264SPS == nil || output.h264PPS == nil {
+                output = EncodedFrame(
+                    metadata: output.metadata,
+                    codec: output.codec,
+                    payload: output.payload,
+                    isKeyFrame: output.isKeyFrame,
+                    sourceBytesPerRow: output.sourceBytesPerRow,
+                    sourcePixelFormat: output.sourcePixelFormat,
+                    targetBitrateKbps: output.targetBitrateKbps,
+                    targetFramesPerSecond: output.targetFramesPerSecond,
+                    h264SPS: lastSPS,
+                    h264PPS: lastPPS
+                )
+            }
+
+            return output
+        }
+
+        return nil
     }
 }
 

@@ -5,8 +5,11 @@ import SwiftUI
 struct SenderRootView: View {
     @State private var coordinator = SenderSessionCoordinator()
 
-    @State private var receiverHostInput = ""
-    @State private var portInput = String(NetworkProtocol.defaultPort)
+    private static let savedHostKey = "lastReceiverHost"
+    private static let savedPortKey = "lastReceiverPort"
+
+    @State private var receiverHostInput = UserDefaults.standard.string(forKey: SenderRootView.savedHostKey) ?? ""
+    @State private var portInput = UserDefaults.standard.string(forKey: SenderRootView.savedPortKey) ?? String(NetworkProtocol.defaultPort)
     @State private var widthInput = "2560"
     @State private var heightInput = "1440"
 
@@ -107,6 +110,10 @@ struct SenderRootView: View {
     private func connect() {
         guard !receiverHostInput.isEmpty else { return }
         guard let port = UInt16(portInput), let width = Int(widthInput), let height = Int(heightInput) else { return }
+
+        // Save for next launch
+        UserDefaults.standard.set(receiverHostInput, forKey: Self.savedHostKey)
+        UserDefaults.standard.set(portInput, forKey: Self.savedPortKey)
 
         coordinator.connect(
             receiverHost: receiverHostInput,
