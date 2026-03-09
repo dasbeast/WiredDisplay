@@ -9,7 +9,7 @@ final class VirtualDisplayService {
 
     /// Creates a virtual display with the given resolution.
     /// macOS will treat this as a real extended display that apps can use.
-    func createDisplay(width: Int, height: Int, refreshRate: Double = 30, hiDPI: Bool = false) -> CGDirectDisplayID {
+    func createDisplay(width: Int, height: Int, refreshRate: Double = 60, hiDPI: Bool = true) -> CGDirectDisplayID {
         destroyDisplay()
 
         let newID = VirtualDisplayBridge.createVirtualDisplay(

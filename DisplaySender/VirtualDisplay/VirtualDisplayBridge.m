@@ -23,8 +23,9 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
     descriptor.vendorID = 0x1234;
     descriptor.productID = 0x5678;
     descriptor.serialNum = 0x0001;
-    descriptor.maxPixelsWide = width;
-    descriptor.maxPixelsHigh = height;
+    // Advertise a larger max so macOS can expose higher modes in "Show all resolutions".
+    descriptor.maxPixelsWide = MAX(width, 5120);
+    descriptor.maxPixelsHigh = MAX(height, 2880);
     // ~27" display physical size
     descriptor.sizeInMillimeters = CGSizeMake(597, 336);
     // sRGB color primaries
@@ -53,18 +54,50 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
 
     NSMutableArray<CGVirtualDisplayMode *> *modes = [NSMutableArray array];
 
-    // Primary mode at requested resolution
+    // Put requested mode first so it is selected by default.
     CGVirtualDisplayMode *primaryMode = [[CGVirtualDisplayMode alloc] initWithWidth:width
-                                                                            height:height
-                                                                       refreshRate:refreshRate];
+                                                                              height:height
+                                                                         refreshRate:refreshRate];
     [modes addObject:primaryMode];
 
-    // Add a lower resolution mode as fallback
-    if (width > 1920) {
-        CGVirtualDisplayMode *fallbackMode = [[CGVirtualDisplayMode alloc] initWithWidth:1920
-                                                                                 height:1080
-                                                                            refreshRate:refreshRate];
-        [modes addObject:fallbackMode];
+    // Additional common 16:9 modes for "Show all resolutions".
+    static const unsigned int kPresetModes[][2] = {
+        {5120, 2880},
+        {4096, 2304},
+        {3840, 2160},
+        {3200, 1800},
+        {3008, 1692},
+        {2880, 1620},
+        {2560, 1440},
+        {2304, 1296},
+        {2048, 1152},
+        {1920, 1080},
+        {1680, 945},
+        {1600, 900},
+        {1366, 768},
+        {1280, 720}
+    };
+
+    NSMutableSet<NSString *> *seen = [NSMutableSet setWithObject:[NSString stringWithFormat:@"%ux%u", width, height]];
+    const size_t presetCount = sizeof(kPresetModes) / sizeof(kPresetModes[0]);
+    for (size_t i = 0; i < presetCount; i++) {
+        const unsigned int candidateWidth = kPresetModes[i][0];
+        const unsigned int candidateHeight = kPresetModes[i][1];
+
+        if (candidateWidth > descriptor.maxPixelsWide || candidateHeight > descriptor.maxPixelsHigh) {
+            continue;
+        }
+
+        NSString *key = [NSString stringWithFormat:@"%ux%u", candidateWidth, candidateHeight];
+        if ([seen containsObject:key]) {
+            continue;
+        }
+        [seen addObject:key];
+
+        CGVirtualDisplayMode *mode = [[CGVirtualDisplayMode alloc] initWithWidth:candidateWidth
+                                                                           height:candidateHeight
+                                                                      refreshRate:refreshRate];
+        [modes addObject:mode];
     }
 
     settings.modes = modes;
