@@ -89,7 +89,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.height = height
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(framesPerSecond, 1)))
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
-        configuration.queueDepth = 3
+        configuration.queueDepth = 2
         configuration.showsCursor = true
 
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)

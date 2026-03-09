@@ -9,10 +9,10 @@ enum NetworkProtocol {
     static let heartbeatIntervalSeconds: TimeInterval = 1.0
     static let heartbeatTimeoutSeconds: TimeInterval = 5.0
     static let reconnectDelaySeconds: TimeInterval = 2.0
-    static let maxPendingOutboundFrames: Int = 4
-    static let targetFramesPerSecond: Int = 30
+    static let maxPendingOutboundFrames: Int = 2
+    static let targetFramesPerSecond: Int = 60
     static let keyFrameIntervalSeconds: Int = 4
-    static let captureFramesPerSecond: Int = 30
+    static let captureFramesPerSecond: Int = 60
     static let targetVideoBitrateBps: Int = 40_000_000
     static let allowLoopbackForLocalTesting: Bool = true
     static let preferRawFrameTransportForDiagnostics: Bool = false
