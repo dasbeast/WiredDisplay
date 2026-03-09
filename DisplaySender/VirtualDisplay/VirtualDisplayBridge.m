@@ -50,7 +50,9 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
 
     // Configure display modes
     CGVirtualDisplaySettings *settings = [[CGVirtualDisplaySettings alloc] init];
-    settings.hiDPI = hiDPI ? 1 : 0;
+    // Force Retina/HiDPI backing for sharper text and UI rendering.
+    const BOOL effectiveHiDPI = YES;
+    settings.hiDPI = effectiveHiDPI ? 1 : 0;
 
     NSMutableArray<CGVirtualDisplayMode *> *modes = [NSMutableArray array];
 
@@ -61,6 +63,8 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
     [modes addObject:primaryMode];
 
     // Additional common 16:9 modes for "Show all resolutions".
+    // Only advertise modes at or above the requested base size so the default
+    // mode does not land on a softer, lower-resolution setting.
     static const unsigned int kPresetModes[][2] = {
         {5120, 2880},
         {4096, 2304},
@@ -88,6 +92,10 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
             continue;
         }
 
+        if (candidateWidth < width || candidateHeight < height) {
+            continue;
+        }
+
         NSString *key = [NSString stringWithFormat:@"%ux%u", candidateWidth, candidateHeight];
         if ([seen containsObject:key]) {
             continue;
@@ -109,8 +117,8 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
     }
 
     CGDirectDisplayID displayID = display.displayID;
-    NSLog(@"[VirtualDisplayBridge] Created virtual display %u (%ux%u @ %.0fHz, hiDPI=%d)",
-          displayID, width, height, refreshRate, hiDPI);
+    NSLog(@"[VirtualDisplayBridge] Created virtual display %u (%ux%u @ %.0fHz, hiDPI=%d, requestedHiDPI=%d)",
+          displayID, width, height, refreshRate, effectiveHiDPI, hiDPI);
 
     @synchronized (activeDisplays()) {
         activeDisplays()[@(displayID)] = display;

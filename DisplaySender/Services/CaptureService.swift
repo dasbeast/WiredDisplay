@@ -84,11 +84,44 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+
+        // SCDisplay dimensions are points; SCStreamConfiguration expects pixels.
+        // Capture at backing-pixel resolution to preserve Retina sharpness.
+        let captureScale: Float
+        if #available(macOS 14.0, *) {
+            captureScale = max(1.0, filter.pointPixelScale)
+        } else {
+            captureScale = 1.0
+        }
+
+        let sourcePointsWidth: CGFloat
+        let sourcePointsHeight: CGFloat
+        if #available(macOS 14.0, *) {
+            sourcePointsWidth = max(1.0, filter.contentRect.width)
+            sourcePointsHeight = max(1.0, filter.contentRect.height)
+        } else {
+            sourcePointsWidth = CGFloat(max(1, display.width))
+            sourcePointsHeight = CGFloat(max(1, display.height))
+        }
+
+        let captureWidthPixels = max(1, Int((sourcePointsWidth * CGFloat(captureScale)).rounded()))
+        let captureHeightPixels = max(1, Int((sourcePointsHeight * CGFloat(captureScale)).rounded()))
+
+        print(
+            "[CaptureService] Stream source points=\(Int(sourcePointsWidth))x\(Int(sourcePointsHeight)) " +
+            "scale=\(String(format: "%.2f", captureScale)) -> pixels=\(captureWidthPixels)x\(captureHeightPixels) " +
+            "(requested \(width)x\(height))"
+        )
+
         let configuration = SCStreamConfiguration()
-        configuration.width = width
-        configuration.height = height
+        configuration.width = captureWidthPixels
+        configuration.height = captureHeightPixels
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(framesPerSecond, 1)))
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        configuration.scalesToFit = false
+        if #available(macOS 14.0, *) {
+            configuration.captureResolution = .best
+        }
         configuration.queueDepth = 2
         configuration.showsCursor = true
 
