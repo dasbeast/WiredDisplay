@@ -293,15 +293,29 @@ private let encoderOutputCallback: VTCompressionOutputCallback = { _, sourceFram
         return
     }
 
-    var length = 0
-    var dataPointer: UnsafeMutablePointer<Int8>?
-    let dataStatus = CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length, dataPointerOut: &dataPointer)
-    guard dataStatus == kCMBlockBufferNoErr, let dataPointer else {
-        context.error = EncoderServiceError.blockBufferReadFailed(dataStatus)
+    let payloadLength = CMBlockBufferGetDataLength(blockBuffer)
+    guard payloadLength > 0 else {
+        context.error = EncoderServiceError.emptyEncodedPayload
         return
     }
 
-    let payload = Data(bytes: dataPointer, count: length)
+    var payload = Data(count: payloadLength)
+    let copyStatus = payload.withUnsafeMutableBytes { destinationBytes -> OSStatus in
+        guard let destinationBase = destinationBytes.baseAddress else {
+            return kCMBlockBufferBadCustomBlockSourceErr
+        }
+        return CMBlockBufferCopyDataBytes(
+            blockBuffer,
+            atOffset: 0,
+            dataLength: payloadLength,
+            destination: destinationBase
+        )
+    }
+
+    guard copyStatus == kCMBlockBufferNoErr else {
+        context.error = EncoderServiceError.blockBufferReadFailed(copyStatus)
+        return
+    }
 
     let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]]
     let firstAttachment = attachmentsArray?.first
@@ -368,4 +382,5 @@ enum EncoderServiceError: Error {
     case invalidSampleBuffer
     case missingBlockBuffer
     case blockBufferReadFailed(OSStatus)
+    case emptyEncodedPayload
 }

@@ -69,6 +69,9 @@ final class DecoderService {
 
     private func refreshSessionIfNeeded(from frame: EncodedFrame) throws {
         guard let sps = frame.h264SPS, let pps = frame.h264PPS else {
+            if decompressionSession == nil || formatDescription == nil {
+                throw DecoderServiceError.parameterSetUnavailable
+            }
             return
         }
 
@@ -157,7 +160,9 @@ final class DecoderService {
     }
 
     private func decodeH264(encodedFrame: EncodedFrame) throws -> CVPixelBuffer? {
-        guard let session = decompressionSession, let formatDescription else { return nil }
+        guard let session = decompressionSession, let formatDescription else {
+            throw DecoderServiceError.parameterSetUnavailable
+        }
 
         var blockBuffer: CMBlockBuffer?
         var createStatus = CMBlockBufferCreateWithMemoryBlock(
@@ -222,9 +227,17 @@ final class DecoderService {
             throw DecoderServiceError.decodeFailed(decodeStatus)
         }
 
-        _ = context.semaphore.wait(timeout: .now() + 1.0)
+        let waitResult = context.semaphore.wait(timeout: .now() + 1.0)
+        if waitResult == .timedOut {
+            VTDecompressionSessionWaitForAsynchronousFrames(session)
+        }
+
         if let error = context.error {
             throw error
+        }
+
+        if waitResult == .timedOut, context.pixelBuffer == nil {
+            throw DecoderServiceError.decodeTimedOut
         }
 
         return context.pixelBuffer
@@ -263,4 +276,5 @@ enum DecoderServiceError: Error {
     case blockBufferWriteFailed(OSStatus)
     case sampleBufferCreationFailed(OSStatus)
     case decodeFailed(OSStatus)
+    case decodeTimedOut
 }
