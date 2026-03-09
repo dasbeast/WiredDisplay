@@ -76,7 +76,7 @@ final class EncoderService {
             isKeyFrame: frame.metadata.isKeyFrame,
             sourceBytesPerRow: bytesPerRow,
             sourcePixelFormat: frame.pixelFormat,
-            targetBitrateKbps: 20_000,
+            targetBitrateKbps: NetworkProtocol.targetVideoBitrateBps / 1_000,
             targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
             h264SPS: nil,
             h264PPS: nil
@@ -121,9 +121,11 @@ final class EncoderService {
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: 0.9 as CFNumber)
 
-        let bitrate = 20_000_000 as CFNumber
+        let bitrate = NetworkProtocol.targetVideoBitrateBps as CFNumber
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate)
 
         let fps = NetworkProtocol.targetFramesPerSecond as CFNumber
@@ -367,7 +369,7 @@ private let encoderOutputCallback: VTCompressionOutputCallback = { _, sourceFram
         isKeyFrame: isKeyFrame,
         sourceBytesPerRow: context.frame.bytesPerRow,
         sourcePixelFormat: context.frame.pixelFormat,
-        targetBitrateKbps: 20_000,
+        targetBitrateKbps: NetworkProtocol.targetVideoBitrateBps / 1_000,
         targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
         h264SPS: spsData,
         h264PPS: ppsData

@@ -11,8 +11,9 @@ enum NetworkProtocol {
     static let reconnectDelaySeconds: TimeInterval = 2.0
     static let maxPendingOutboundFrames: Int = 4
     static let targetFramesPerSecond: Int = 30
-    static let keyFrameIntervalSeconds: Int = 2
+    static let keyFrameIntervalSeconds: Int = 4
     static let captureFramesPerSecond: Int = 30
+    static let targetVideoBitrateBps: Int = 40_000_000
     static let allowLoopbackForLocalTesting: Bool = true
     static let preferRawFrameTransportForDiagnostics: Bool = false
     static let rawDiagnosticsMaxWidth: Int = 320
@@ -205,4 +206,3 @@ enum BinaryFrameWire {
         return (header, sps, pps, payload)
     }
 }
-
