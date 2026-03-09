@@ -9,6 +9,7 @@ final class EncoderService {
     private var configuredWidth = 0
     private var configuredHeight = 0
     private var encodedFrameCount: UInt64 = 0
+    private var currentTargetBitrateBps: Int = NetworkProtocol.targetVideoBitrateBps
     /// Cached SPS/PPS from the last key frame so we can send them with every frame.
     private var lastSPS: Data?
     private var lastPPS: Data?
@@ -17,7 +18,7 @@ final class EncoderService {
         invalidateSession()
     }
 
-    func encode(frame: CapturedFrame) -> EncodedFrame {
+    func encode(frame: CapturedFrame) -> EncodedFrame? {
         if NetworkProtocol.preferRawFrameTransportForDiagnostics {
             return makeRawEncodedFrame(from: frame)
         }
@@ -36,13 +37,11 @@ final class EncoderService {
                 print("[EncoderService] H.264 encoded frame \(frame.metadata.frameIndex): \(encoded.payload.count) bytes, keyFrame=\(encoded.isKeyFrame)")
                 return encoded
             }
-            print("[EncoderService] H.264 encode returned nil for frame \(frame.metadata.frameIndex) (semaphore timeout?)")
+            print("[EncoderService] Dropping frame \(frame.metadata.frameIndex): H.264 encode produced no output in time")
         } catch {
-            print("[EncoderService] H.264 encode failed for frame \(frame.metadata.frameIndex): \(error)")
+            print("[EncoderService] Dropping frame \(frame.metadata.frameIndex): H.264 encode failed: \(error)")
         }
-
-        print("[EncoderService] Falling back to raw BGRA for frame \(frame.metadata.frameIndex), rawData=\(frame.rawData.count) bytes")
-        return makeRawEncodedFrame(from: frame)
+        return nil
     }
 
     private func makeRawEncodedFrame(from frame: CapturedFrame) -> EncodedFrame {
@@ -76,7 +75,7 @@ final class EncoderService {
             isKeyFrame: frame.metadata.isKeyFrame,
             sourceBytesPerRow: bytesPerRow,
             sourcePixelFormat: frame.pixelFormat,
-            targetBitrateKbps: NetworkProtocol.targetVideoBitrateBps / 1_000,
+            targetBitrateKbps: currentTargetBitrateBps / 1_000,
             targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
             h264SPS: nil,
             h264PPS: nil
@@ -119,14 +118,29 @@ final class EncoderService {
         configuredHeight = height
         compressionSession = session
 
+        currentTargetBitrateBps = NetworkProtocol.recommendedVideoBitrateBps(
+            width: width,
+            height: height,
+            fps: NetworkProtocol.targetFramesPerSecond
+        )
+
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: 0.9 as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: 0.95 as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber)
 
-        let bitrate = NetworkProtocol.targetVideoBitrateBps as CFNumber
+        let bitrate = NSNumber(value: currentTargetBitrateBps)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate)
+        // Permit short bursts for keyframes while keeping average bitrate bounded.
+        let dataRateBytesPerSecond = NSNumber(value: max(1, (currentTargetBitrateBps * 2) / 8))
+        let dataRateWindowSeconds = NSNumber(value: 1)
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_DataRateLimits,
+            value: [dataRateBytesPerSecond, dataRateWindowSeconds] as CFArray
+        )
 
         let fps = NetworkProtocol.targetFramesPerSecond as CFNumber
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps)
@@ -197,12 +211,16 @@ final class EncoderService {
     private func encodeWithVideoToolbox(pixelBuffer: CVPixelBuffer, frame: CapturedFrame) throws -> EncodedFrame? {
         guard let session = compressionSession else { return nil }
 
-        let callbackContext = EncoderCallbackContext(frame: frame)
+        let callbackContext = EncoderCallbackContext(
+            frame: frame,
+            targetBitrateKbps: max(1, currentTargetBitrateBps / 1_000)
+        )
         let refcon = Unmanaged.passRetained(callbackContext).toOpaque()
 
         var flags = VTEncodeInfoFlags()
-        let pts = CMTime(value: Int64(frame.metadata.frameIndex), timescale: 60)
-        let duration = CMTime(value: 1, timescale: 60)
+        let timescale = CMTimeScale(max(1, NetworkProtocol.targetFramesPerSecond))
+        let pts = CMTime(value: Int64(frame.metadata.frameIndex), timescale: timescale)
+        let duration = CMTime(value: 1, timescale: timescale)
 
         // Force key frame on first frame and every keyFrameIntervalSeconds
         let keyFrameInterval = UInt64(NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds)
@@ -226,7 +244,10 @@ final class EncoderService {
             throw EncoderServiceError.encodeFailed(status)
         }
 
-        _ = callbackContext.semaphore.wait(timeout: .now() + 1.0)
+        let waitResult = callbackContext.semaphore.wait(timeout: .now() + 2.0)
+        if waitResult == .timedOut {
+            throw EncoderServiceError.encodeTimedOut
+        }
         if let callbackError = callbackContext.error {
             throw callbackError
         }
@@ -263,12 +284,14 @@ final class EncoderService {
 
 private final class EncoderCallbackContext {
     let frame: CapturedFrame
+    let targetBitrateKbps: Int
     let semaphore = DispatchSemaphore(value: 0)
     var output: EncodedFrame?
     var error: Error?
 
-    init(frame: CapturedFrame) {
+    init(frame: CapturedFrame, targetBitrateKbps: Int) {
         self.frame = frame
+        self.targetBitrateKbps = targetBitrateKbps
     }
 }
 
@@ -369,7 +392,7 @@ private let encoderOutputCallback: VTCompressionOutputCallback = { _, sourceFram
         isKeyFrame: isKeyFrame,
         sourceBytesPerRow: context.frame.bytesPerRow,
         sourcePixelFormat: context.frame.pixelFormat,
-        targetBitrateKbps: NetworkProtocol.targetVideoBitrateBps / 1_000,
+        targetBitrateKbps: context.targetBitrateKbps,
         targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
         h264SPS: spsData,
         h264PPS: ppsData
@@ -385,4 +408,5 @@ enum EncoderServiceError: Error {
     case missingBlockBuffer
     case blockBufferReadFailed(OSStatus)
     case emptyEncodedPayload
+    case encodeTimedOut
 }

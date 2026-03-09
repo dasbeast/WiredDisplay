@@ -11,17 +11,29 @@ enum NetworkProtocol {
     static let reconnectDelaySeconds: TimeInterval = 2.0
     static let maxPendingOutboundFrames: Int = 2
     static let targetFramesPerSecond: Int = 60
-    static let keyFrameIntervalSeconds: Int = 4
+    static let keyFrameIntervalSeconds: Int = 8
     static let captureFramesPerSecond: Int = 60
-    static let targetVideoBitrateBps: Int = 40_000_000
-    // Keep real-time capture/encode within bounds that avoid VT encode timeouts
-    // and oversized raw-fallback frames on high-DPI virtual displays.
-    static let maxCapturePixelsAtTargetFPS: Int = 8_294_400 // 3840x2160
+    static let targetVideoBitrateBps: Int = 65_000_000
+    static let minVideoBitrateBps: Int = 22_000_000
+    static let maxVideoBitrateBps: Int = 110_000_000
+    // H.264 realtime encode is unstable above roughly 4096x2304 on many systems.
+    // Keep HiDPI capture, then downscale to this pixel budget for stable 60 fps.
+    static let maxCapturePixelsAtTargetFPS: Int = 9_437_184 // 4096x2304
     static let allowLoopbackForLocalTesting: Bool = true
     static let preferRawFrameTransportForDiagnostics: Bool = false
     static let rawDiagnosticsMaxWidth: Int = 320
     static let rawDiagnosticsMaxHeight: Int = 180
     static let forceSyntheticCaptureForDiagnostics: Bool = false
+
+    /// Heuristic bitrate target tuned for desktop text/UI clarity at low latency.
+    static func recommendedVideoBitrateBps(width: Int, height: Int, fps: Int) -> Int {
+        let safeWidth = max(1, width)
+        let safeHeight = max(1, height)
+        let safeFPS = max(1, fps)
+        let pixelsPerSecond = Double(safeWidth * safeHeight * safeFPS)
+        let target = Int(pixelsPerSecond * 0.10) // bits-per-pixel-per-frame heuristic
+        return min(max(target, minVideoBitrateBps), maxVideoBitrateBps)
+    }
 
     // MARK: - Binary Wire Format for Video Frames
     // Layout: [4-byte magic][1-byte type][4-byte header-length][header-JSON][payload-bytes]
