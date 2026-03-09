@@ -180,6 +180,10 @@ final class ReceiverSessionCoordinator {
             isKeyFrame: header.isKeyFrame
         )
 
+        if header.frameIndex % 30 == 0 {
+            print("[Receiver] Binary frame \(header.frameIndex): \(header.width)x\(header.height), codec=\(header.codec), payload=\(payload.count) bytes, sps=\(sps?.count ?? 0), pps=\(pps?.count ?? 0)")
+        }
+
         updateFrameTimingMetrics(from: metadata)
         updateInboundMetrics(payloadByteCount: payload.count)
 
@@ -198,6 +202,11 @@ final class ReceiverSessionCoordinator {
 
         let decodedFrame = decoderService.decodeEncodedFrame(encodedFrame)
         let (renderableFrame, renderSource) = makeRenderableFrame(from: decodedFrame)
+
+        if header.frameIndex % 30 == 0 {
+            print("[Receiver] Rendered frame \(header.frameIndex): source=\(renderSource), hasPB=\(renderableFrame.pixelBuffer != nil), hasData=\(renderableFrame.pixelData != nil), bpr=\(renderableFrame.bytesPerRow)")
+        }
+
         renderService.render(frame: renderableFrame)
         renderSourceDescription = renderSource
         replacedBeforeRenderCount = RenderFrameStore.shared.replacedFramesCount()

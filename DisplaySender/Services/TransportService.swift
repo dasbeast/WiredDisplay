@@ -67,13 +67,19 @@ final class TransportService {
     /// Sends an encoded video frame using the binary wire format (no JSON/base64 for payload data).
     func sendVideoFrame(_ encodedFrame: EncodedFrame) {
         guard let binaryData = BinaryFrameWire.serialize(encodedFrame: encodedFrame) else {
+            print("[Transport] Failed to serialize frame \(encodedFrame.metadata.frameIndex)")
             onError?(TransportServiceError.serializationFailed)
             return
         }
 
         guard binaryData.count <= NetworkProtocol.maximumMessageBytes else {
+            print("[Transport] Frame \(encodedFrame.metadata.frameIndex) too large: \(binaryData.count) bytes (limit: \(NetworkProtocol.maximumMessageBytes))")
             onError?(TransportServiceError.messageTooLarge)
             return
+        }
+
+        if encodedFrame.metadata.frameIndex % 30 == 0 {
+            print("[Transport] Sending frame \(encodedFrame.metadata.frameIndex): codec=\(encodedFrame.codec), wireSize=\(binaryData.count) bytes, connected=\(isConnected)")
         }
 
         let framedData = wrapLengthPrefix(binaryData)

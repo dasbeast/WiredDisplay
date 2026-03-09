@@ -212,7 +212,7 @@ final class DecoderService {
         let decodeStatus = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sampleBuffer,
-            flags: [._EnableAsynchronousDecompression],
+            flags: [],
             frameRefcon: refcon,
             infoFlagsOut: &flagsOut
         )
@@ -222,7 +222,7 @@ final class DecoderService {
             throw DecoderServiceError.decodeFailed(decodeStatus)
         }
 
-        _ = context.semaphore.wait(timeout: .now() + 0.2)
+        _ = context.semaphore.wait(timeout: .now() + 1.0)
         if let error = context.error {
             throw error
         }

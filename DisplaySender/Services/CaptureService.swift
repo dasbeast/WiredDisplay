@@ -59,12 +59,23 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     private func startSCStream(width: Int, height: Int, framesPerSecond: Int) async throws {
         let available = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
 
+        print("[CaptureService] Available displays: \(available.displays.map { "ID=\($0.displayID) \($0.width)x\($0.height)" })")
+        print("[CaptureService] Target display ID: \(targetDisplayID)")
+
         // Find the target display — either the virtual display or the main display
         let display: SCDisplay
         if targetDisplayID != 0,
            let targetDisplay = available.displays.first(where: { $0.displayID == targetDisplayID }) {
             display = targetDisplay
-            print("[CaptureService] Capturing virtual display \(targetDisplayID)")
+            print("[CaptureService] Found target virtual display \(targetDisplayID): \(display.width)x\(display.height)")
+        } else if targetDisplayID != 0 {
+            print("[CaptureService] WARNING: Target display \(targetDisplayID) not found in SCShareableContent! Falling back to main display.")
+            if let mainDisplay = available.displays.first {
+                display = mainDisplay
+                print("[CaptureService] Using main display \(display.displayID) instead")
+            } else {
+                throw CaptureServiceError.noDisplayAvailable
+            }
         } else if let mainDisplay = available.displays.first {
             display = mainDisplay
             print("[CaptureService] Capturing main display \(display.displayID)")
@@ -110,7 +121,15 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
             isKeyFrame: currentIndex % 60 == 0
         )
 
-        let frame = copyCapturedFrame(from: pixelBuffer, metadata: metadata)
+        // Pass CVPixelBuffer directly to avoid expensive copy for H.264 encoding
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let frame = CapturedFrame(
+            metadata: metadata,
+            rawData: Data(),
+            bytesPerRow: bytesPerRow,
+            pixelFormat: .bgra8,
+            pixelBuffer: pixelBuffer
+        )
         onCapturedFrame?(frame)
     }
 
@@ -119,24 +138,6 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         isCapturing = false
         onError?(error)
-    }
-
-    // MARK: - Pixel Buffer Copy
-
-    private func copyCapturedFrame(from pixelBuffer: CVPixelBuffer, metadata: FrameMetadata) -> CapturedFrame {
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
-            return CapturedFrame(metadata: metadata, rawData: Data(), bytesPerRow: max(1, metadata.width * 4), pixelFormat: .bgra8)
-        }
-
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let totalByteCount = max(0, bytesPerRow * height)
-
-        let rawData = Data(bytes: baseAddress, count: totalByteCount)
-        return CapturedFrame(metadata: metadata, rawData: rawData, bytesPerRow: bytesPerRow, pixelFormat: .bgra8)
     }
 
     // MARK: - Synthetic Fallback

@@ -19,26 +19,58 @@ final class EncoderService {
         }
 
         do {
-            let pixelBuffer = try makePixelBuffer(from: frame)
+            let pixelBuffer: CVPixelBuffer
+            if let pb = frame.pixelBuffer {
+                // Use the CVPixelBuffer directly from SCStream — no copy needed
+                pixelBuffer = pb
+            } else {
+                // Fallback: reconstruct pixel buffer from raw data (synthetic frames)
+                pixelBuffer = try makePixelBuffer(from: frame)
+            }
             try configureSessionIfNeeded(width: frame.metadata.width, height: frame.metadata.height)
             if let encoded = try encodeWithVideoToolbox(pixelBuffer: pixelBuffer, frame: frame) {
+                print("[EncoderService] H.264 encoded frame \(frame.metadata.frameIndex): \(encoded.payload.count) bytes, keyFrame=\(encoded.isKeyFrame)")
                 return encoded
             }
-            print("[EncoderService] H.264 encode returned nil for frame \(frame.metadata.frameIndex)")
+            print("[EncoderService] H.264 encode returned nil for frame \(frame.metadata.frameIndex) (semaphore timeout?)")
         } catch {
             print("[EncoderService] H.264 encode failed for frame \(frame.metadata.frameIndex): \(error)")
         }
 
+        print("[EncoderService] Falling back to raw BGRA for frame \(frame.metadata.frameIndex), rawData=\(frame.rawData.count) bytes")
         return makeRawEncodedFrame(from: frame)
     }
 
     private func makeRawEncodedFrame(from frame: CapturedFrame) -> EncodedFrame {
-        EncodedFrame(
+        // Extract raw data from the pixel buffer if rawData is empty
+        let rawData: Data
+        let bytesPerRow: Int
+        if !frame.rawData.isEmpty {
+            rawData = frame.rawData
+            bytesPerRow = frame.bytesPerRow
+        } else if let pb = frame.pixelBuffer {
+            CVPixelBufferLockBaseAddress(pb, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+            if let base = CVPixelBufferGetBaseAddress(pb) {
+                let bpr = CVPixelBufferGetBytesPerRow(pb)
+                let height = CVPixelBufferGetHeight(pb)
+                rawData = Data(bytes: base, count: bpr * height)
+                bytesPerRow = bpr
+            } else {
+                rawData = frame.rawData
+                bytesPerRow = frame.bytesPerRow
+            }
+        } else {
+            rawData = frame.rawData
+            bytesPerRow = frame.bytesPerRow
+        }
+
+        return EncodedFrame(
             metadata: frame.metadata,
             codec: .rawBGRA,
-            payload: frame.rawData,
+            payload: rawData,
             isKeyFrame: frame.metadata.isKeyFrame,
-            sourceBytesPerRow: frame.bytesPerRow,
+            sourceBytesPerRow: bytesPerRow,
             sourcePixelFormat: frame.pixelFormat,
             targetBitrateKbps: 20_000,
             targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
@@ -54,6 +86,13 @@ final class EncoderService {
 
         invalidateSession()
 
+        let sourceAttributes: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as [String: Any]
+        ]
+
         var newSession: VTCompressionSession?
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -61,7 +100,7 @@ final class EncoderService {
             height: Int32(height),
             codecType: kCMVideoCodecType_H264,
             encoderSpecification: nil,
-            imageBufferAttributes: nil,
+            imageBufferAttributes: sourceAttributes as CFDictionary,
             compressedDataAllocator: nil,
             outputCallback: encoderOutputCallback,
             refcon: nil,
@@ -171,7 +210,7 @@ final class EncoderService {
             throw EncoderServiceError.encodeFailed(status)
         }
 
-        _ = callbackContext.semaphore.wait(timeout: .now() + 0.2)
+        _ = callbackContext.semaphore.wait(timeout: .now() + 1.0)
         if let callbackError = callbackContext.error {
             throw callbackError
         }

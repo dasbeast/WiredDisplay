@@ -13,11 +13,21 @@ enum VideoCodec: String, Codable, Sendable {
 }
 
 /// Raw frame emitted by capture pipeline before compression.
-struct CapturedFrame: Sendable {
+struct CapturedFrame: @unchecked Sendable {
     let metadata: FrameMetadata
     let rawData: Data
     let bytesPerRow: Int
     let pixelFormat: PixelFormat
+    /// Optional direct pixel buffer reference for efficient H.264 encoding.
+    let pixelBuffer: CVPixelBuffer?
+
+    init(metadata: FrameMetadata, rawData: Data, bytesPerRow: Int, pixelFormat: PixelFormat, pixelBuffer: CVPixelBuffer? = nil) {
+        self.metadata = metadata
+        self.rawData = rawData
+        self.bytesPerRow = bytesPerRow
+        self.pixelFormat = pixelFormat
+        self.pixelBuffer = pixelBuffer
+    }
 }
 
 /// Encoded frame contract for sender -> receiver payload handling.

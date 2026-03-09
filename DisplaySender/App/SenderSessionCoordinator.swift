@@ -53,7 +53,9 @@ final class SenderSessionCoordinator {
     private var outboundWindowStartNanoseconds: UInt64?
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
-    private var isFrameEncodeInFlight = false
+    /// Lock used to gate frame encoding — only one frame encodes at a time.
+    /// Uses tryLock() from the capture queue; skips if an encode is already in progress.
+    private let encodeLock = NSLock()
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -66,10 +68,27 @@ final class SenderSessionCoordinator {
 
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
+        let encoder = encoderService
+        let encodeLock = self.encodeLock
         captureService.onCapturedFrame = { [weak self] frame in
-            guard let self else { return }
-            Task { @MainActor in
-                self.handleCapturedFrame(frame)
+            guard self != nil else { return }
+
+            // Try to acquire the encode lock — skip frame if another encode is in flight
+            guard encodeLock.try() else { return }
+            defer { encodeLock.unlock() }
+
+            if frame.metadata.frameIndex % 30 == 0 {
+                print("[Sender] Captured frame \(frame.metadata.frameIndex): \(frame.metadata.width)x\(frame.metadata.height), hasPB=\(frame.pixelBuffer != nil)")
+            }
+
+            // Encode on the capture queue while the CVPixelBuffer is still valid
+            let encodedFrame = encoder.encode(frame: frame)
+
+            Task { @MainActor [weak self] in
+                guard let self, case .running = self.state else { return }
+                self.transportService.sendVideoFrame(encodedFrame)
+                self.sentFrameCount += 1
+                self.updateOutboundMetrics(payloadByteCount: encodedFrame.payload.count)
             }
         }
 
@@ -165,7 +184,6 @@ final class SenderSessionCoordinator {
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
-        isFrameEncodeInFlight = false
         configuredEndpointSummary = "\(receiverHost):\(port)"
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
@@ -183,6 +201,8 @@ final class SenderSessionCoordinator {
         let captureWidth = effectiveCaptureWidth()
         let captureHeight = effectiveCaptureHeight()
 
+        print("[Sender] Starting session: \(captureWidth)x\(captureHeight)")
+
         // Create virtual display so macOS extends the desktop onto it
         let virtualDisplayID = virtualDisplayService.createDisplay(
             width: captureWidth,
@@ -190,12 +210,15 @@ final class SenderSessionCoordinator {
             refreshRate: Double(NetworkProtocol.captureFramesPerSecond)
         )
 
+        print("[Sender] Virtual display created with ID: \(virtualDisplayID)")
+
         // Point capture at the virtual display (or fall back to main display)
         captureService.targetDisplayID = virtualDisplayID
 
         // Give macOS a moment to initialize the virtual display before capturing
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self, case .running = self.state else { return }
+            print("[Sender] Starting capture on display \(virtualDisplayID)")
             self.captureService.startCapture(
                 width: captureWidth,
                 height: captureHeight,
@@ -218,7 +241,6 @@ final class SenderSessionCoordinator {
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
-        isFrameEncodeInFlight = false
     }
 
     /// Sends one manual synthetic frame for pipeline smoke testing.
@@ -238,30 +260,12 @@ final class SenderSessionCoordinator {
             bytesPerRow: bytesPerRow,
             pixelFormat: .bgra8
         )
-        handleCapturedFrame(synthetic)
+        let encodedFrame = encoderService.encode(frame: synthetic)
+        transportService.sendVideoFrame(encodedFrame)
+        sentFrameCount += 1
     }
 
-    private func handleCapturedFrame(_ capturedFrame: CapturedFrame) {
-        guard case .running = state else { return }
-        guard !isFrameEncodeInFlight else { return }
-        isFrameEncodeInFlight = true
-
-        let encoderService = self.encoderService
-
-        Task.detached(priority: .userInitiated) { [weak self, capturedFrame] in
-            let encodedFrame = encoderService.encode(frame: capturedFrame)
-
-            await MainActor.run {
-                guard let self else { return }
-                defer { self.isFrameEncodeInFlight = false }
-
-                guard case .running = self.state else { return }
-                self.transportService.sendVideoFrame(encodedFrame)
-                self.sentFrameCount += 1
-                self.updateOutboundMetrics(payloadByteCount: encodedFrame.payload.count)
-            }
-        }
-    }
+    // MARK: - Frame Pipeline
 
     private func updateOutboundMetrics(payloadByteCount: Int) {
         let now = DispatchTime.now().uptimeNanoseconds
