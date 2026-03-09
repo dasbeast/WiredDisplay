@@ -104,13 +104,28 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
             sourcePointsHeight = CGFloat(max(1, display.height))
         }
 
-        let captureWidthPixels = max(1, Int((sourcePointsWidth * CGFloat(captureScale)).rounded()))
-        let captureHeightPixels = max(1, Int((sourcePointsHeight * CGFloat(captureScale)).rounded()))
+        var captureWidthPixels = max(1, Int((sourcePointsWidth * CGFloat(captureScale)).rounded()))
+        var captureHeightPixels = max(1, Int((sourcePointsHeight * CGFloat(captureScale)).rounded()))
+
+        // Bound capture resolution for stable real-time encoding at target FPS.
+        let pixelBudget = max(1, NetworkProtocol.maxCapturePixelsAtTargetFPS)
+        let totalPixels = captureWidthPixels * captureHeightPixels
+        if totalPixels > pixelBudget {
+            let downscale = sqrt(Double(pixelBudget) / Double(totalPixels))
+            captureWidthPixels = max(1, Int(Double(captureWidthPixels) * downscale))
+            captureHeightPixels = max(1, Int(Double(captureHeightPixels) * downscale))
+        }
+
+        // H.264 encoders are generally happiest with even dimensions.
+        if captureWidthPixels % 2 != 0 { captureWidthPixels -= 1 }
+        if captureHeightPixels % 2 != 0 { captureHeightPixels -= 1 }
+        captureWidthPixels = max(2, captureWidthPixels)
+        captureHeightPixels = max(2, captureHeightPixels)
 
         print(
             "[CaptureService] Stream source points=\(Int(sourcePointsWidth))x\(Int(sourcePointsHeight)) " +
             "scale=\(String(format: "%.2f", captureScale)) -> pixels=\(captureWidthPixels)x\(captureHeightPixels) " +
-            "(requested \(width)x\(height))"
+            "(requested \(width)x\(height), budget \(pixelBudget) px)"
         )
 
         let configuration = SCStreamConfiguration()

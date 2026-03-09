@@ -14,6 +14,9 @@ enum NetworkProtocol {
     static let keyFrameIntervalSeconds: Int = 4
     static let captureFramesPerSecond: Int = 60
     static let targetVideoBitrateBps: Int = 40_000_000
+    // Keep real-time capture/encode within bounds that avoid VT encode timeouts
+    // and oversized raw-fallback frames on high-DPI virtual displays.
+    static let maxCapturePixelsAtTargetFPS: Int = 8_294_400 // 3840x2160
     static let allowLoopbackForLocalTesting: Bool = true
     static let preferRawFrameTransportForDiagnostics: Bool = false
     static let rawDiagnosticsMaxWidth: Int = 320
