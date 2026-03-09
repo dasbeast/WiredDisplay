@@ -117,7 +117,6 @@ final class DecoderService {
 
         cachedSPS = sps
         cachedPPS = pps
-        formatDescription = validFormat
         try rebuildDecompressionSession(format: validFormat)
     }
 
@@ -148,6 +147,7 @@ final class DecoderService {
             throw DecoderServiceError.decompressionSessionCreationFailed(status)
         }
 
+        formatDescription = format
         decompressionSession = sessionOut
     }
 
