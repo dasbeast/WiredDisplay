@@ -152,6 +152,9 @@ final class SenderSessionCoordinator {
         transportService.onDroppedFrameCountChange = { [weak self] count in
             guard let self else { return }
             Task { @MainActor in
+                if count > self.droppedOutboundFrameCount {
+                    self.encoderService.requestKeyFrame()
+                }
                 self.droppedOutboundFrameCount = count
             }
         }

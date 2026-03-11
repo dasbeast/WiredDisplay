@@ -19,9 +19,9 @@ enum NetworkProtocol {
     static let targetVideoBitrateBps: Int = 300_000_000
     static let minVideoBitrateBps: Int = 50_000_000
     static let maxVideoBitrateBps: Int = 2_000_000_000  // 2 Gbps – well within Thunderbolt 3 limits
-    // HEVC hardware encoding is stable at 5K (5120x2880) and beyond on Apple Silicon.
-    // A HiDPI virtual display at 2560x1440 logical captures at 5120x2880 physical (14.7 MP).
-    static let maxCapturePixelsAtTargetFPS: Int = 22_118_400 // 5120x2880 × ~1.5 headroom for 6K
+    // The current sender uses H.264, which is much less tolerant of 5K real-time capture.
+    // Cap physical capture around 4K to keep VideoToolbox on a stable encoder path.
+    static let maxCapturePixelsAtTargetFPS: Int = 8_294_400 // 3840x2160
     static let allowLoopbackForLocalTesting: Bool = true
     static let preferRawFrameTransportForDiagnostics: Bool = false
     static let rawDiagnosticsMaxWidth: Int = 320

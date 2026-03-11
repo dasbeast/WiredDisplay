@@ -12,12 +12,20 @@ final class EncoderService {
     private var configuredHeight = 0
     private var encodedFrameCount: UInt64 = 0
     private var currentTargetBitrateBps: Int = NetworkProtocol.targetVideoBitrateBps
+    private let stateLock = NSLock()
+    private var forceNextKeyFrame = false
     /// Cached SPS/PPS from the last key frame so we can send them with every frame.
     private var lastSPS: Data?
     private var lastPPS: Data?
 
     deinit {
         invalidateSession()
+    }
+
+    func requestKeyFrame() {
+        stateLock.lock()
+        forceNextKeyFrame = true
+        stateLock.unlock()
     }
 
     func encode(frame: CapturedFrame) -> EncodedFrame? {
@@ -126,34 +134,46 @@ final class EncoderService {
             fps: NetworkProtocol.targetFramesPerSecond
         )
 
-        // H.264 encoder configured for near-lossless retina quality over Thunderbolt.
-        // Thunderbolt 3 = 40 Gbps, so we use quality-first encoding with generous bitrate.
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
-        // Quality 0.99: near-lossless for UI/text, sharp edges, small fonts.
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: 0.99 as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber)
+        // H.264 encoder configured for near-lossless display streaming over Thunderbolt.
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue, label: "RealTime")
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse, label: "AllowFrameReordering")
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel, label: "ProfileLevel")
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC, label: "H264EntropyMode")
 
-        // Set high bitrate target — Thunderbolt can easily handle this.
-        let bitrate = NSNumber(value: currentTargetBitrateBps)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate)
-        // Very generous burst allowance for keyframes (4x average).
-        let dataRateBytesPerSecond = NSNumber(value: max(1, (currentTargetBitrateBps * 4) / 8))
-        let dataRateWindowSeconds = NSNumber(value: 1)
-        VTSessionSetProperty(
+        // Prefer quality-driven mode when the active encoder supports it.
+        let qualityStatus = setCompressionProperty(
             session,
-            key: kVTCompressionPropertyKey_DataRateLimits,
-            value: [dataRateBytesPerSecond, dataRateWindowSeconds] as CFArray
+            key: kVTCompressionPropertyKey_Quality,
+            value: 0.99 as CFNumber,
+            label: "Quality"
         )
+        if qualityStatus != noErr {
+            let bitrate = NSNumber(value: currentTargetBitrateBps)
+            setCompressionProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate, label: "AverageBitRate")
+            let dataRateBytesPerSecond = NSNumber(value: max(1, (currentTargetBitrateBps * 4) / 8))
+            let dataRateWindowSeconds = NSNumber(value: 1)
+            setCompressionProperty(
+                session,
+                key: kVTCompressionPropertyKey_DataRateLimits,
+                value: [dataRateBytesPerSecond, dataRateWindowSeconds] as CFArray,
+                label: "DataRateLimits"
+            )
+        }
+
+        // Allow one frame of buffering so the callback can arrive on the next submission.
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber, label: "MaxFrameDelayCount")
 
         let fps = NetworkProtocol.targetFramesPerSecond as CFNumber
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps)
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps, label: "ExpectedFrameRate")
         let keyFrameInterval = (NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds) as CFNumber
         let keyFrameIntervalDuration = NetworkProtocol.keyFrameIntervalSeconds as CFNumber
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: keyFrameInterval)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: keyFrameIntervalDuration)
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: keyFrameInterval, label: "MaxKeyFrameInterval")
+        setCompressionProperty(
+            session,
+            key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+            value: keyFrameIntervalDuration,
+            label: "MaxKeyFrameIntervalDuration"
+        )
 
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
@@ -230,7 +250,7 @@ final class EncoderService {
 
         // Force key frame on first frame and every keyFrameIntervalSeconds
         let keyFrameInterval = UInt64(NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds)
-        let forceKeyFrame = encodedFrameCount == 0 || encodedFrameCount % keyFrameInterval == 0
+        let forceKeyFrame = consumeForcedKeyFrame() || encodedFrameCount == 0 || encodedFrameCount % keyFrameInterval == 0
         let frameProps: CFDictionary? = forceKeyFrame ? [
             kVTEncodeFrameOptionKey_ForceKeyFrame: true as CFBoolean
         ] as CFDictionary : nil
@@ -250,7 +270,13 @@ final class EncoderService {
             throw EncoderServiceError.encodeFailed(status)
         }
 
-        let waitResult = callbackContext.semaphore.wait(timeout: .now() + 2.0)
+        var waitResult = callbackContext.semaphore.wait(timeout: .now() + 2.0)
+        if waitResult == .timedOut {
+            // Some H.264 encoder paths retain the first submitted frame until the session
+            // is explicitly asked to complete pending work.
+            VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+            waitResult = callbackContext.semaphore.wait(timeout: .now() + 0.5)
+        }
         if waitResult == .timedOut {
             throw EncoderServiceError.encodeTimedOut
         }
@@ -285,6 +311,31 @@ final class EncoderService {
         }
 
         return nil
+    }
+
+    private func consumeForcedKeyFrame() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let shouldForce = forceNextKeyFrame
+        forceNextKeyFrame = false
+        return shouldForce
+    }
+
+    @discardableResult
+    private func setCompressionProperty(
+        _ session: VTSession,
+        key: CFString,
+        value: CFTypeRef,
+        label: String
+    ) -> OSStatus {
+        let status = VTSessionSetProperty(session, key: key, value: value)
+        guard status != noErr else { return status }
+
+        print(
+            "[EncoderService] Compression property \(label) unsupported/failed " +
+            "at \(configuredWidth)x\(configuredHeight): \(status)"
+        )
+        return status
     }
 }
 
