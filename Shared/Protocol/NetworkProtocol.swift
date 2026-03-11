@@ -19,9 +19,10 @@ enum NetworkProtocol {
     static let targetVideoBitrateBps: Int = 300_000_000
     static let minVideoBitrateBps: Int = 50_000_000
     static let maxVideoBitrateBps: Int = 2_000_000_000  // 2 Gbps – well within Thunderbolt 3 limits
-    // The current sender uses H.264, which is much less tolerant of 5K real-time capture.
-    // Cap physical capture around 4K to keep VideoToolbox on a stable encoder path.
-    static let maxCapturePixelsAtTargetFPS: Int = 8_294_400 // 3840x2160
+    // Diagnostic cap for H.264 stability testing.
+    // Force physical capture down to 1080p-class resolution to see whether inter-frame
+    // decode failures are caused by large-frame real-time encoding pressure.
+    static let maxCapturePixelsAtTargetFPS: Int = 2_073_600 // 1920x1080
     static let allowLoopbackForLocalTesting: Bool = true
     static let preferRawFrameTransportForDiagnostics: Bool = false
     static let rawDiagnosticsMaxWidth: Int = 320

@@ -36,8 +36,8 @@ final class EncoderService {
         do {
             let pixelBuffer: CVPixelBuffer
             if let pb = frame.pixelBuffer {
-                // Use the CVPixelBuffer directly from SCStream — no copy needed
-                pixelBuffer = pb
+                // Make an owned copy before handing the buffer to the asynchronous encoder.
+                pixelBuffer = try makePixelBufferCopy(from: pb)
             } else {
                 // Fallback: reconstruct pixel buffer from raw data (synthetic frames)
                 pixelBuffer = try makePixelBuffer(from: frame)
@@ -219,6 +219,56 @@ final class EncoderService {
                 let dstPtr = baseAddress.advanced(by: dstOffset)
                 memcpy(dstPtr, srcPtr, min(frame.bytesPerRow, destinationBytesPerRow))
             }
+        }
+
+        return pixelBuffer
+    }
+
+    private func makePixelBufferCopy(from source: CVPixelBuffer) throws -> CVPixelBuffer {
+        let width = CVPixelBufferGetWidth(source)
+        let height = CVPixelBufferGetHeight(source)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(source)
+
+        var pixelBuffer: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferMetalCompatibilityKey: true,
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true
+        ]
+
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            pixelFormat,
+            attrs as CFDictionary,
+            &pixelBuffer
+        )
+
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw EncoderServiceError.pixelBufferCreationFailed
+        }
+
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+
+        guard let sourceBaseAddress = CVPixelBufferGetBaseAddress(source),
+              let destinationBaseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            throw EncoderServiceError.pixelBufferBaseAddressUnavailable
+        }
+
+        let sourceBytesPerRow = CVPixelBufferGetBytesPerRow(source)
+        let destinationBytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        for row in 0..<height {
+            let sourceOffset = row * sourceBytesPerRow
+            let destinationOffset = row * destinationBytesPerRow
+            let sourcePointer = sourceBaseAddress.advanced(by: sourceOffset)
+            let destinationPointer = destinationBaseAddress.advanced(by: destinationOffset)
+            memcpy(destinationPointer, sourcePointer, min(sourceBytesPerRow, destinationBytesPerRow))
         }
 
         return pixelBuffer
