@@ -7,6 +7,8 @@ import VideoToolbox
 final class DecoderService {
     private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
+    private var awaitingH264KeyFrame = false
+    private var awaitingHEVCKeyFrame = false
     // Cached parameter sets for H.264 (SPS + PPS)
     private var cachedH264SPS: Data?
     private var cachedH264PPS: Data?
@@ -46,9 +48,19 @@ final class DecoderService {
             )
 
         case .h264AVCC:
+            if awaitingH264KeyFrame && !encodedFrame.isKeyFrame {
+                return DecodedFrame(
+                    metadata: encodedFrame.metadata,
+                    pixelBuffer: nil,
+                    pixelData: nil,
+                    bytesPerRow: 0,
+                    pixelFormat: .bgra8
+                )
+            }
             do {
                 try refreshH264SessionIfNeeded(from: encodedFrame)
                 if let pixelBuffer = try decodeCompressedFrame(encodedFrame: encodedFrame) {
+                    awaitingH264KeyFrame = false
                     return DecodedFrame(
                         metadata: encodedFrame.metadata,
                         pixelBuffer: pixelBuffer,
@@ -59,21 +71,33 @@ final class DecoderService {
                 }
                 print("[DecoderService] H.264 decode returned nil for frame \(encodedFrame.metadata.frameIndex)")
             } catch {
+                awaitingH264KeyFrame = true
+                invalidateSession()
                 print("[DecoderService] H.264 decode failed for frame \(encodedFrame.metadata.frameIndex): \(error)")
             }
 
             return DecodedFrame(
                 metadata: encodedFrame.metadata,
                 pixelBuffer: nil,
-                pixelData: encodedFrame.payload,
-                bytesPerRow: encodedFrame.sourceBytesPerRow,
+                pixelData: nil,
+                bytesPerRow: 0,
                 pixelFormat: encodedFrame.sourcePixelFormat
             )
 
         case .hevcAVCC:
+            if awaitingHEVCKeyFrame && !encodedFrame.isKeyFrame {
+                return DecodedFrame(
+                    metadata: encodedFrame.metadata,
+                    pixelBuffer: nil,
+                    pixelData: nil,
+                    bytesPerRow: 0,
+                    pixelFormat: .bgra8
+                )
+            }
             do {
                 try refreshHEVCSessionIfNeeded(from: encodedFrame)
                 if let pixelBuffer = try decodeCompressedFrame(encodedFrame: encodedFrame) {
+                    awaitingHEVCKeyFrame = false
                     return DecodedFrame(
                         metadata: encodedFrame.metadata,
                         pixelBuffer: pixelBuffer,
@@ -84,14 +108,16 @@ final class DecoderService {
                 }
                 print("[DecoderService] HEVC decode returned nil for frame \(encodedFrame.metadata.frameIndex)")
             } catch {
+                awaitingHEVCKeyFrame = true
+                invalidateSession()
                 print("[DecoderService] HEVC decode failed for frame \(encodedFrame.metadata.frameIndex): \(error)")
             }
 
             return DecodedFrame(
                 metadata: encodedFrame.metadata,
                 pixelBuffer: nil,
-                pixelData: encodedFrame.payload,
-                bytesPerRow: encodedFrame.sourceBytesPerRow,
+                pixelData: nil,
+                bytesPerRow: 0,
                 pixelFormat: encodedFrame.sourcePixelFormat
             )
         }

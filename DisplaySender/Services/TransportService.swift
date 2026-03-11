@@ -17,6 +17,7 @@ final class TransportService {
     }
 
     private var pendingOutboundFrames: [OutboundFrame] = []
+    private var awaitingKeyFrameAfterDrop = false
     private var sendInFlight = false
     private(set) var droppedOutboundFrameCount: UInt64 = 0 {
         didSet { onDroppedFrameCountChange?(droppedOutboundFrameCount) }
@@ -129,6 +130,7 @@ final class TransportService {
         connection = nil
         receiveBuffer.removeAll(keepingCapacity: false)
         pendingOutboundFrames.removeAll(keepingCapacity: false)
+        awaitingKeyFrameAfterDrop = false
         sendInFlight = false
         droppedOutboundFrameCount = 0
 
@@ -148,14 +150,19 @@ final class TransportService {
     }
 
     private func enqueueOutboundFrame(_ frame: OutboundFrame) {
+        if awaitingKeyFrameAfterDrop && !frame.isKeyFrame {
+            droppedOutboundFrameCount += 1
+            return
+        }
+
         if pendingOutboundFrames.count >= NetworkProtocol.maxPendingOutboundFrames {
-            if let dropIndex = pendingOutboundFrames.firstIndex(where: { !$0.isKeyFrame }) {
-                pendingOutboundFrames.remove(at: dropIndex)
-                droppedOutboundFrameCount += 1
-            } else if !pendingOutboundFrames.isEmpty {
-                pendingOutboundFrames.removeFirst()
-                droppedOutboundFrameCount += 1
-            }
+            pendingOutboundFrames.removeAll(keepingCapacity: true)
+            awaitingKeyFrameAfterDrop = true
+            droppedOutboundFrameCount += 1
+        }
+
+        if frame.isKeyFrame {
+            awaitingKeyFrameAfterDrop = false
         }
 
         pendingOutboundFrames.append(frame)

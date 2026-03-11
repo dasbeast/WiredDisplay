@@ -134,31 +134,21 @@ final class EncoderService {
             fps: NetworkProtocol.targetFramesPerSecond
         )
 
-        // H.264 encoder configured for near-lossless display streaming over Thunderbolt.
+        // H.264 encoder configured for stable real-time display streaming over Thunderbolt.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue, label: "RealTime")
         setCompressionProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse, label: "AllowFrameReordering")
         setCompressionProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel, label: "ProfileLevel")
         setCompressionProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC, label: "H264EntropyMode")
-
-        // Prefer quality-driven mode when the active encoder supports it.
-        let qualityStatus = setCompressionProperty(
+        let bitrate = NSNumber(value: currentTargetBitrateBps)
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate, label: "AverageBitRate")
+        let dataRateBytesPerSecond = NSNumber(value: max(1, (currentTargetBitrateBps * 4) / 8))
+        let dataRateWindowSeconds = NSNumber(value: 1)
+        setCompressionProperty(
             session,
-            key: kVTCompressionPropertyKey_Quality,
-            value: 0.99 as CFNumber,
-            label: "Quality"
+            key: kVTCompressionPropertyKey_DataRateLimits,
+            value: [dataRateBytesPerSecond, dataRateWindowSeconds] as CFArray,
+            label: "DataRateLimits"
         )
-        if qualityStatus != noErr {
-            let bitrate = NSNumber(value: currentTargetBitrateBps)
-            setCompressionProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate, label: "AverageBitRate")
-            let dataRateBytesPerSecond = NSNumber(value: max(1, (currentTargetBitrateBps * 4) / 8))
-            let dataRateWindowSeconds = NSNumber(value: 1)
-            setCompressionProperty(
-                session,
-                key: kVTCompressionPropertyKey_DataRateLimits,
-                value: [dataRateBytesPerSecond, dataRateWindowSeconds] as CFArray,
-                label: "DataRateLimits"
-            )
-        }
 
         // Allow one frame of buffering so the callback can arrive on the next submission.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber, label: "MaxFrameDelayCount")
