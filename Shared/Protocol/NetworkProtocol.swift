@@ -4,34 +4,39 @@ import Foundation
 enum NetworkProtocol {
     static let protocolVersion: UInt16 = 1
     static let defaultPort: UInt16 = 50999
-    static let maximumEnvelopeBytes: Int = 16_777_216  // 16 MB – H.264 key frames can be large
-    static let maximumMessageBytes: Int = 33_554_432  // 32 MB – binary framed messages
+    static let maximumEnvelopeBytes: Int = 134_217_728  // 128 MB – HEVC key frames at high bitrate
+    static let maximumMessageBytes: Int = 134_217_728  // 128 MB – binary framed messages
     static let heartbeatIntervalSeconds: TimeInterval = 1.0
     static let heartbeatTimeoutSeconds: TimeInterval = 5.0
     static let reconnectDelaySeconds: TimeInterval = 2.0
-    static let maxPendingOutboundFrames: Int = 2
+    static let maxPendingOutboundFrames: Int = 3
+    static let transportReceiveChunkBytes: Int = 2 * 1024 * 1024  // 2 MB – reduces syscall overhead for high-throughput HEVC stream
     static let targetFramesPerSecond: Int = 60
-    static let keyFrameIntervalSeconds: Int = 8
+    static let keyFrameIntervalSeconds: Int = 4
     static let captureFramesPerSecond: Int = 60
-    static let targetVideoBitrateBps: Int = 65_000_000
-    static let minVideoBitrateBps: Int = 22_000_000
-    static let maxVideoBitrateBps: Int = 110_000_000
-    // H.264 realtime encode is unstable above roughly 4096x2304 on many systems.
-    // Keep HiDPI capture, then downscale to this pixel budget for stable 60 fps.
-    static let maxCapturePixelsAtTargetFPS: Int = 9_437_184 // 4096x2304
+    // HEVC (H.265) encoder target: ~300 Mbps for near-lossless retina quality over Thunderbolt.
+    // Thunderbolt 3 provides 40,000 Mbps — we use at most 5% of available bandwidth.
+    static let targetVideoBitrateBps: Int = 300_000_000
+    static let minVideoBitrateBps: Int = 50_000_000
+    static let maxVideoBitrateBps: Int = 2_000_000_000  // 2 Gbps – well within Thunderbolt 3 limits
+    // HEVC hardware encoding is stable at 5K (5120x2880) and beyond on Apple Silicon.
+    // A HiDPI virtual display at 2560x1440 logical captures at 5120x2880 physical (14.7 MP).
+    static let maxCapturePixelsAtTargetFPS: Int = 22_118_400 // 5120x2880 × ~1.5 headroom for 6K
     static let allowLoopbackForLocalTesting: Bool = true
     static let preferRawFrameTransportForDiagnostics: Bool = false
     static let rawDiagnosticsMaxWidth: Int = 320
     static let rawDiagnosticsMaxHeight: Int = 180
     static let forceSyntheticCaptureForDiagnostics: Bool = false
 
-    /// Heuristic bitrate target tuned for desktop text/UI clarity at low latency.
+    /// Heuristic bitrate target tuned for near-lossless retina UI content over Thunderbolt.
+    /// Uses 0.20 bits-per-pixel-per-frame — 2× higher than the old H.264 setting —
+    /// to achieve perceptually lossless HEVC quality for text, icons, and sharp edges.
     static func recommendedVideoBitrateBps(width: Int, height: Int, fps: Int) -> Int {
         let safeWidth = max(1, width)
         let safeHeight = max(1, height)
         let safeFPS = max(1, fps)
         let pixelsPerSecond = Double(safeWidth * safeHeight * safeFPS)
-        let target = Int(pixelsPerSecond * 0.10) // bits-per-pixel-per-frame heuristic
+        let target = Int(pixelsPerSecond * 0.20) // bits-per-pixel-per-frame heuristic
         return min(max(target, minVideoBitrateBps), maxVideoBitrateBps)
     }
 
@@ -134,13 +139,17 @@ struct BinaryFrameHeader: Codable, Sendable {
     let payloadLength: Int
     let spsLength: Int
     let ppsLength: Int
+    /// HEVC-only: Video Parameter Set byte count. Nil/absent for H.264 (treated as 0).
+    let vpsLength: Int?
 }
 
 /// Helpers to serialize/deserialize the binary wire format.
 enum BinaryFrameWire {
     /// Serialize an EncodedFrame into binary wire format (no base64).
-    /// Layout: [4-byte magic][1-byte reserved][4-byte header-length][header-JSON][SPS-bytes][PPS-bytes][payload-bytes]
+    /// Layout: [4-byte magic][1-byte reserved][4-byte header-length][header-JSON][VPS-bytes][SPS-bytes][PPS-bytes][payload-bytes]
+    /// VPS is HEVC-only; for H.264 vpsLength is 0 and no VPS bytes are written.
     static func serialize(encodedFrame: EncodedFrame) -> Data? {
+        let vpsData = encodedFrame.hevcVPS ?? Data()
         let spsData = encodedFrame.h264SPS ?? Data()
         let ppsData = encodedFrame.h264PPS ?? Data()
 
@@ -155,13 +164,14 @@ enum BinaryFrameWire {
             pixelFormat: encodedFrame.sourcePixelFormat,
             payloadLength: encodedFrame.payload.count,
             spsLength: spsData.count,
-            ppsLength: ppsData.count
+            ppsLength: ppsData.count,
+            vpsLength: vpsData.isEmpty ? nil : vpsData.count
         )
 
         guard let headerJSON = try? JSONEncoder().encode(header) else { return nil }
 
-        // Total: 4 magic + 1 reserved + 4 header-length + headerJSON + sps + pps + payload
-        let totalSize = 4 + 1 + 4 + headerJSON.count + spsData.count + ppsData.count + encodedFrame.payload.count
+        // Total: 4 magic + 1 reserved + 4 header-length + headerJSON + vps + sps + pps + payload
+        let totalSize = 4 + 1 + 4 + headerJSON.count + vpsData.count + spsData.count + ppsData.count + encodedFrame.payload.count
         var data = Data(capacity: totalSize)
 
         // Magic
@@ -178,20 +188,23 @@ enum BinaryFrameWire {
         // Header JSON
         data.append(headerJSON)
 
+        // VPS bytes (HEVC only, may be empty)
+        data.append(vpsData)
+
         // SPS bytes (if any)
         data.append(spsData)
 
         // PPS bytes (if any)
         data.append(ppsData)
 
-        // Payload (H.264 NALUs or raw BGRA)
+        // Payload (HEVC/H.264 NALUs or raw BGRA)
         data.append(encodedFrame.payload)
 
         return data
     }
 
     /// Deserialize binary wire format back into components needed for decoding.
-    static func deserialize(data: Data) -> (header: BinaryFrameHeader, sps: Data?, pps: Data?, payload: Data)? {
+    static func deserialize(data: Data) -> (header: BinaryFrameHeader, vps: Data?, sps: Data?, pps: Data?, payload: Data)? {
         guard data.count >= 9 else { return nil }
 
         // Check magic
@@ -208,16 +221,19 @@ enum BinaryFrameWire {
         let headerData = Data(data[headerStart ..< headerStart + headerLen])
         guard let header = try? JSONDecoder().decode(BinaryFrameHeader.self, from: headerData) else { return nil }
 
+        let vpsLen = header.vpsLength ?? 0
         let afterHeader = headerStart + headerLen
-        let expectedTotal = afterHeader + header.spsLength + header.ppsLength + header.payloadLength
+        let expectedTotal = afterHeader + vpsLen + header.spsLength + header.ppsLength + header.payloadLength
         guard data.count >= expectedTotal else { return nil }
 
-        let sps: Data? = header.spsLength > 0 ? Data(data[afterHeader ..< afterHeader + header.spsLength]) : nil
-        let afterSPS = afterHeader + header.spsLength
+        let vps: Data? = vpsLen > 0 ? Data(data[afterHeader ..< afterHeader + vpsLen]) : nil
+        let afterVPS = afterHeader + vpsLen
+        let sps: Data? = header.spsLength > 0 ? Data(data[afterVPS ..< afterVPS + header.spsLength]) : nil
+        let afterSPS = afterVPS + header.spsLength
         let pps: Data? = header.ppsLength > 0 ? Data(data[afterSPS ..< afterSPS + header.ppsLength]) : nil
         let afterPPS = afterSPS + header.ppsLength
         let payload = Data(data[afterPPS ..< afterPPS + header.payloadLength])
 
-        return (header, sps, pps, payload)
+        return (header, vps, sps, pps, payload)
     }
 }

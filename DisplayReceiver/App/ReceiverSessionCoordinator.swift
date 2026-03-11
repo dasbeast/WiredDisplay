@@ -80,10 +80,10 @@ final class ReceiverSessionCoordinator {
             }
         }
 
-        listenerService.onBinaryVideoFrame = { [weak self] header, sps, pps, payload in
+        listenerService.onBinaryVideoFrame = { [weak self] header, vps, sps, pps, payload in
             guard let self else { return }
             Task { @MainActor in
-                self.handleBinaryVideoFrame(header: header, sps: sps, pps: pps, payload: payload)
+                self.handleBinaryVideoFrame(header: header, vps: vps, sps: sps, pps: pps, payload: payload)
             }
         }
 
@@ -159,10 +159,7 @@ final class ReceiverSessionCoordinator {
                 updateFrameTimingMetrics(from: packet.metadata)
                 updateInboundMetrics(payloadByteCount: packet.payload.count)
                 let decodedFrame = decoderService.decode(packet: packet)
-                let (renderableFrame, renderSource) = makeRenderableFrame(from: decodedFrame)
-                renderService.render(frame: renderableFrame)
-                renderSourceDescription = renderSource
-                replacedBeforeRenderCount = RenderFrameStore.shared.replacedFramesCount()
+                renderDecodedFrame(decodedFrame)
                 receivedFrameCount += 1
             }
         } catch {
@@ -171,7 +168,7 @@ final class ReceiverSessionCoordinator {
         }
     }
 
-    private func handleBinaryVideoFrame(header: BinaryFrameHeader, sps: Data?, pps: Data?, payload: Data) {
+    private func handleBinaryVideoFrame(header: BinaryFrameHeader, vps: Data?, sps: Data?, pps: Data?, payload: Data) {
         let metadata = FrameMetadata(
             frameIndex: header.frameIndex,
             timestampNanoseconds: header.timestampNanoseconds,
@@ -181,13 +178,44 @@ final class ReceiverSessionCoordinator {
         )
 
         if header.frameIndex % 30 == 0 {
-            print("[Receiver] Binary frame \(header.frameIndex): \(header.width)x\(header.height), codec=\(header.codec), payload=\(payload.count) bytes, sps=\(sps?.count ?? 0), pps=\(pps?.count ?? 0)")
+            print("[Receiver] Binary frame \(header.frameIndex): \(header.width)x\(header.height), codec=\(header.codec), payload=\(payload.count) bytes, vps=\(vps?.count ?? 0), sps=\(sps?.count ?? 0), pps=\(pps?.count ?? 0)")
         }
 
         updateFrameTimingMetrics(from: metadata)
         updateInboundMetrics(payloadByteCount: payload.count)
 
-        let encodedFrame = EncodedFrame(
+        let encodedFrame = makeEncodedFrame(
+            metadata: metadata,
+            header: header,
+            vps: vps,
+            sps: sps,
+            pps: pps,
+            payload: payload
+        )
+
+        let decodedFrame = decoderService.decodeEncodedFrame(encodedFrame)
+        let renderSource = renderDecodedFrame(decodedFrame)
+
+        if header.frameIndex % 30 == 0 {
+            let renderableFrame = RenderFrameStore.shared.snapshot()
+            print(
+                "[Receiver] Rendered frame \(header.frameIndex): source=\(renderSource), " +
+                "hasPB=\(renderableFrame?.pixelBuffer != nil), hasData=\(renderableFrame?.pixelData != nil), " +
+                "bpr=\(renderableFrame?.bytesPerRow ?? 0)"
+            )
+        }
+        receivedFrameCount += 1
+    }
+
+    private func makeEncodedFrame(
+        metadata: FrameMetadata,
+        header: BinaryFrameHeader,
+        vps: Data?,
+        sps: Data?,
+        pps: Data?,
+        payload: Data
+    ) -> EncodedFrame {
+        EncodedFrame(
             metadata: metadata,
             codec: header.codec,
             payload: payload,
@@ -197,20 +225,18 @@ final class ReceiverSessionCoordinator {
             targetBitrateKbps: 20_000,
             targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
             h264SPS: sps,
-            h264PPS: pps
+            h264PPS: pps,
+            hevcVPS: vps
         )
+    }
 
-        let decodedFrame = decoderService.decodeEncodedFrame(encodedFrame)
+    @discardableResult
+    private func renderDecodedFrame(_ decodedFrame: DecodedFrame) -> String {
         let (renderableFrame, renderSource) = makeRenderableFrame(from: decodedFrame)
-
-        if header.frameIndex % 30 == 0 {
-            print("[Receiver] Rendered frame \(header.frameIndex): source=\(renderSource), hasPB=\(renderableFrame.pixelBuffer != nil), hasData=\(renderableFrame.pixelData != nil), bpr=\(renderableFrame.bytesPerRow)")
-        }
-
         renderService.render(frame: renderableFrame)
         renderSourceDescription = renderSource
         replacedBeforeRenderCount = RenderFrameStore.shared.replacedFramesCount()
-        receivedFrameCount += 1
+        return renderSource
     }
 
     private func updateFrameTimingMetrics(from metadata: FrameMetadata) {

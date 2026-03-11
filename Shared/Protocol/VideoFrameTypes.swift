@@ -9,6 +9,7 @@ enum PixelFormat: String, Codable, Sendable {
 /// Declares codec intent for encoded frame payloads.
 enum VideoCodec: String, Codable, Sendable {
     case h264AVCC
+    case hevcAVCC
     case rawBGRA
 }
 
@@ -40,8 +41,38 @@ struct EncodedFrame: Codable, Sendable {
     let sourcePixelFormat: PixelFormat
     let targetBitrateKbps: Int
     let targetFramesPerSecond: Int
+    /// H.264 SPS or HEVC SPS parameter set bytes.
     let h264SPS: Data?
+    /// H.264 PPS or HEVC PPS parameter set bytes.
     let h264PPS: Data?
+    /// HEVC-only: Video Parameter Set bytes (nil for H.264).
+    let hevcVPS: Data?
+
+    init(
+        metadata: FrameMetadata,
+        codec: VideoCodec,
+        payload: Data,
+        isKeyFrame: Bool,
+        sourceBytesPerRow: Int,
+        sourcePixelFormat: PixelFormat,
+        targetBitrateKbps: Int,
+        targetFramesPerSecond: Int,
+        h264SPS: Data? = nil,
+        h264PPS: Data? = nil,
+        hevcVPS: Data? = nil
+    ) {
+        self.metadata = metadata
+        self.codec = codec
+        self.payload = payload
+        self.isKeyFrame = isKeyFrame
+        self.sourceBytesPerRow = sourceBytesPerRow
+        self.sourcePixelFormat = sourcePixelFormat
+        self.targetBitrateKbps = targetBitrateKbps
+        self.targetFramesPerSecond = targetFramesPerSecond
+        self.h264SPS = h264SPS
+        self.h264PPS = h264PPS
+        self.hevcVPS = hevcVPS
+    }
 }
 
 /// Decoded frame contract for receiver rendering stage.

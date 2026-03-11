@@ -3,12 +3,17 @@ import CoreMedia
 import CoreVideo
 import VideoToolbox
 
-/// VideoToolbox decoder scaffold with raw fallback.
+/// VideoToolbox decoder — supports HEVC (H.265), H.264, and raw BGRA.
 final class DecoderService {
     private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
-    private var cachedSPS: Data?
-    private var cachedPPS: Data?
+    // Cached parameter sets for H.264 (SPS + PPS)
+    private var cachedH264SPS: Data?
+    private var cachedH264PPS: Data?
+    // Cached parameter sets for HEVC (VPS + SPS + PPS)
+    private var cachedHEVCVPS: Data?
+    private var cachedHEVCSPS: Data?
+    private var cachedHEVCPPS: Data?
 
     deinit {
         invalidateSession()
@@ -42,8 +47,8 @@ final class DecoderService {
 
         case .h264AVCC:
             do {
-                try refreshSessionIfNeeded(from: encodedFrame)
-                if let pixelBuffer = try decodeH264(encodedFrame: encodedFrame) {
+                try refreshH264SessionIfNeeded(from: encodedFrame)
+                if let pixelBuffer = try decodeCompressedFrame(encodedFrame: encodedFrame) {
                     return DecodedFrame(
                         metadata: encodedFrame.metadata,
                         pixelBuffer: pixelBuffer,
@@ -64,10 +69,36 @@ final class DecoderService {
                 bytesPerRow: encodedFrame.sourceBytesPerRow,
                 pixelFormat: encodedFrame.sourcePixelFormat
             )
+
+        case .hevcAVCC:
+            do {
+                try refreshHEVCSessionIfNeeded(from: encodedFrame)
+                if let pixelBuffer = try decodeCompressedFrame(encodedFrame: encodedFrame) {
+                    return DecodedFrame(
+                        metadata: encodedFrame.metadata,
+                        pixelBuffer: pixelBuffer,
+                        pixelData: nil,
+                        bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
+                        pixelFormat: .bgra8
+                    )
+                }
+                print("[DecoderService] HEVC decode returned nil for frame \(encodedFrame.metadata.frameIndex)")
+            } catch {
+                print("[DecoderService] HEVC decode failed for frame \(encodedFrame.metadata.frameIndex): \(error)")
+            }
+
+            return DecodedFrame(
+                metadata: encodedFrame.metadata,
+                pixelBuffer: nil,
+                pixelData: encodedFrame.payload,
+                bytesPerRow: encodedFrame.sourceBytesPerRow,
+                pixelFormat: encodedFrame.sourcePixelFormat
+            )
         }
     }
 
-    private func refreshSessionIfNeeded(from frame: EncodedFrame) throws {
+    /// Rebuilds the H.264 decompression session when SPS/PPS change.
+    private func refreshH264SessionIfNeeded(from frame: EncodedFrame) throws {
         guard let sps = frame.h264SPS, let pps = frame.h264PPS else {
             if decompressionSession == nil || formatDescription == nil {
                 throw DecoderServiceError.parameterSetUnavailable
@@ -76,30 +107,25 @@ final class DecoderService {
         }
 
         let shouldRebuild: Bool
-        if let cachedSPS, let cachedPPS {
-            shouldRebuild = cachedSPS != sps || cachedPPS != pps || decompressionSession == nil || formatDescription == nil
+        if let cachedH264SPS, let cachedH264PPS {
+            shouldRebuild = cachedH264SPS != sps || cachedH264PPS != pps || decompressionSession == nil || formatDescription == nil
         } else {
             shouldRebuild = true
         }
 
-        guard shouldRebuild else {
-            return
-        }
+        guard shouldRebuild else { return }
 
         let parameterSetSizes = [sps.count, pps.count]
-
         var formatDescriptionOut: CMFormatDescription?
         let formatStatus: OSStatus = sps.withUnsafeBytes { spsBytes in
             pps.withUnsafeBytes { ppsBytes in
                 guard let spsBase = spsBytes.baseAddress, let ppsBase = ppsBytes.baseAddress else {
                     return kCMFormatDescriptionError_InvalidParameter
                 }
-
                 let pointers: [UnsafePointer<UInt8>] = [
                     spsBase.assumingMemoryBound(to: UInt8.self),
                     ppsBase.assumingMemoryBound(to: UInt8.self)
                 ]
-
                 return CMVideoFormatDescriptionCreateFromH264ParameterSets(
                     allocator: kCFAllocatorDefault,
                     parameterSetCount: 2,
@@ -115,8 +141,65 @@ final class DecoderService {
             throw DecoderServiceError.formatDescriptionCreationFailed(formatStatus)
         }
 
-        cachedSPS = sps
-        cachedPPS = pps
+        cachedH264SPS = sps
+        cachedH264PPS = pps
+        try rebuildDecompressionSession(format: validFormat)
+    }
+
+    /// Rebuilds the HEVC decompression session when VPS/SPS/PPS change.
+    private func refreshHEVCSessionIfNeeded(from frame: EncodedFrame) throws {
+        guard let vps = frame.hevcVPS, let sps = frame.h264SPS, let pps = frame.h264PPS else {
+            if decompressionSession == nil || formatDescription == nil {
+                throw DecoderServiceError.parameterSetUnavailable
+            }
+            return
+        }
+
+        let shouldRebuild: Bool
+        if let cachedHEVCVPS, let cachedHEVCSPS, let cachedHEVCPPS {
+            shouldRebuild = cachedHEVCVPS != vps || cachedHEVCSPS != sps || cachedHEVCPPS != pps
+                || decompressionSession == nil || formatDescription == nil
+        } else {
+            shouldRebuild = true
+        }
+
+        guard shouldRebuild else { return }
+
+        let parameterSetSizes = [vps.count, sps.count, pps.count]
+        var formatDescriptionOut: CMFormatDescription?
+        let formatStatus: OSStatus = vps.withUnsafeBytes { vpsBytes in
+            sps.withUnsafeBytes { spsBytes in
+                pps.withUnsafeBytes { ppsBytes in
+                    guard let vpsBase = vpsBytes.baseAddress,
+                          let spsBase = spsBytes.baseAddress,
+                          let ppsBase = ppsBytes.baseAddress else {
+                        return kCMFormatDescriptionError_InvalidParameter
+                    }
+                    let pointers: [UnsafePointer<UInt8>] = [
+                        vpsBase.assumingMemoryBound(to: UInt8.self),
+                        spsBase.assumingMemoryBound(to: UInt8.self),
+                        ppsBase.assumingMemoryBound(to: UInt8.self)
+                    ]
+                    return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                        allocator: kCFAllocatorDefault,
+                        parameterSetCount: 3,
+                        parameterSetPointers: pointers,
+                        parameterSetSizes: parameterSetSizes,
+                        nalUnitHeaderLength: 4,
+                        extensions: nil,
+                        formatDescriptionOut: &formatDescriptionOut
+                    )
+                }
+            }
+        }
+
+        guard formatStatus == noErr, let validFormat = formatDescriptionOut else {
+            throw DecoderServiceError.formatDescriptionCreationFailed(formatStatus)
+        }
+
+        cachedHEVCVPS = vps
+        cachedHEVCSPS = sps
+        cachedHEVCPPS = pps
         try rebuildDecompressionSession(format: validFormat)
     }
 
@@ -157,9 +240,14 @@ final class DecoderService {
         }
         decompressionSession = nil
         formatDescription = nil
+        cachedH264SPS = nil
+        cachedH264PPS = nil
+        cachedHEVCVPS = nil
+        cachedHEVCSPS = nil
+        cachedHEVCPPS = nil
     }
 
-    private func decodeH264(encodedFrame: EncodedFrame) throws -> CVPixelBuffer? {
+    private func decodeCompressedFrame(encodedFrame: EncodedFrame) throws -> CVPixelBuffer? {
         guard let session = decompressionSession, let formatDescription else {
             throw DecoderServiceError.parameterSetUnavailable
         }

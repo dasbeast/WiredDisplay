@@ -65,6 +65,19 @@ enum NetworkDiagnostics {
     static func localIPv4Descriptions() -> [String] {
         localIPv4Addresses().map { "\($0.interfaceName): \($0.address)" }
     }
+
+    /// Builds TCP parameters tuned for interactive display streaming.
+    /// `noDelay` disables Nagle coalescing to reduce input-to-photon latency.
+    static func lowLatencyTCPParameters() -> NWParameters {
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.noDelay = true
+        tcpOptions.enableKeepalive = true
+
+        let parameters = NWParameters(tls: nil, tcp: tcpOptions)
+        parameters.includePeerToPeer = false
+        parameters.allowLocalEndpointReuse = true
+        return parameters
+    }
 }
 
 /// Tracks whether a wired path (Ethernet or Thunderbolt Bridge) is currently available.

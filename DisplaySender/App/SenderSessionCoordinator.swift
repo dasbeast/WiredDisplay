@@ -87,9 +87,7 @@ final class SenderSessionCoordinator {
             Task { @MainActor [weak self] in
                 guard let self, case .running = self.state else { return }
                 guard let encodedFrame else { return }
-                self.transportService.sendVideoFrame(encodedFrame)
-                self.sentFrameCount += 1
-                self.updateOutboundMetrics(payloadByteCount: encodedFrame.payload.count)
+                self.pushEncodedFrame(encodedFrame)
             }
         }
 
@@ -262,11 +260,16 @@ final class SenderSessionCoordinator {
             pixelFormat: .bgra8
         )
         guard let encodedFrame = encoderService.encode(frame: synthetic) else { return }
-        transportService.sendVideoFrame(encodedFrame)
-        sentFrameCount += 1
+        pushEncodedFrame(encodedFrame)
     }
 
     // MARK: - Frame Pipeline
+
+    private func pushEncodedFrame(_ encodedFrame: EncodedFrame) {
+        transportService.sendVideoFrame(encodedFrame)
+        sentFrameCount += 1
+        updateOutboundMetrics(payloadByteCount: encodedFrame.payload.count)
+    }
 
     private func updateOutboundMetrics(payloadByteCount: Int) {
         let now = DispatchTime.now().uptimeNanoseconds

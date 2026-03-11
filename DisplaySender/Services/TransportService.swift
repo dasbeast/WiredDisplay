@@ -35,7 +35,7 @@ final class TransportService {
             return
         }
 
-        let parameters = NWParameters.tcp
+        let parameters = NetworkDiagnostics.lowLatencyTCPParameters()
 
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
         self.connection = connection
@@ -184,7 +184,8 @@ final class TransportService {
     }
 
     private func receiveNextChunk(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024 * 1024) { [weak self] content, _, isComplete, error in
+        // Smaller receive chunks reduce burst buffering and help interactive pacing.
+        connection.receive(minimumIncompleteLength: 1, maximumLength: NetworkProtocol.transportReceiveChunkBytes) { [weak self] content, _, isComplete, error in
             guard let self else { return }
 
             if let error {

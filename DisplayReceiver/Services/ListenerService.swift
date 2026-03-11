@@ -14,7 +14,7 @@ final class ListenerService {
 
     var onStateChange: ((Bool) -> Void)?
     var onEnvelope: ((NetworkEnvelope) -> Void)?
-    var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data) -> Void)?
+    var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data?, Data) -> Void)?
     var onError: ((Error) -> Void)?
 
     func startListening(port: UInt16 = NetworkProtocol.defaultPort) {
@@ -22,8 +22,7 @@ final class ListenerService {
 
         do {
             let nwPort = try NWEndpoint.Port(rawValue: port).unwrapOrThrow()
-            let parameters = NWParameters.tcp
-            parameters.allowLocalEndpointReuse = true
+            let parameters = NetworkDiagnostics.lowLatencyTCPParameters()
 
             let listener = try NWListener(using: parameters, on: nwPort)
             self.listener = listener
@@ -115,7 +114,8 @@ final class ListenerService {
     }
 
     private func receiveNextChunk(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024 * 1024) { [weak self] content, _, isComplete, error in
+        // Smaller receive chunks reduce burst buffering and help interactive pacing.
+        connection.receive(minimumIncompleteLength: 1, maximumLength: NetworkProtocol.transportReceiveChunkBytes) { [weak self] content, _, isComplete, error in
             guard let self else { return }
 
             if let error {
@@ -178,7 +178,7 @@ final class ListenerService {
                 let magic = payload.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
                 if magic == NetworkProtocol.binaryMagic {
                     if let result = BinaryFrameWire.deserialize(data: payload) {
-                        onBinaryVideoFrame?(result.header, result.sps, result.pps, result.payload)
+                        onBinaryVideoFrame?(result.header, result.vps, result.sps, result.pps, result.payload)
                     }
                     continue
                 }
