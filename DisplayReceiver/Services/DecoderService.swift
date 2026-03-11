@@ -304,8 +304,13 @@ final class DecoderService {
             throw DecoderServiceError.blockBufferWriteFailed(createStatus)
         }
 
+        let frameRate = max(1, encodedFrame.targetFramesPerSecond)
+        let timescale = CMTimeScale(frameRate)
+        let presentationTimeStamp = CMTime(value: Int64(encodedFrame.metadata.frameIndex), timescale: timescale)
+        let duration = CMTime(value: 1, timescale: timescale)
+
         var sampleBuffer: CMSampleBuffer?
-        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .invalid, decodeTimeStamp: .invalid)
+        var timing = CMSampleTimingInfo(duration: duration, presentationTimeStamp: presentationTimeStamp, decodeTimeStamp: .invalid)
         var sampleSize = encodedFrame.payload.count
 
         let sampleStatus = CMSampleBufferCreateReady(
@@ -322,6 +327,22 @@ final class DecoderService {
 
         guard sampleStatus == noErr, let sampleBuffer else {
             throw DecoderServiceError.sampleBufferCreationFailed(sampleStatus)
+        }
+
+        if let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true) {
+            let attachment = unsafeBitCast(CFArrayGetValueAtIndex(attachmentsArray, 0), to: CFMutableDictionary.self)
+            let notSync: CFBoolean = encodedFrame.isKeyFrame ? false as CFBoolean : true as CFBoolean
+            let dependsOnOthers: CFBoolean = encodedFrame.isKeyFrame ? false as CFBoolean : true as CFBoolean
+            CFDictionarySetValue(
+                attachment,
+                Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(),
+                Unmanaged.passUnretained(notSync).toOpaque()
+            )
+            CFDictionarySetValue(
+                attachment,
+                Unmanaged.passUnretained(kCMSampleAttachmentKey_DependsOnOthers).toOpaque(),
+                Unmanaged.passUnretained(dependsOnOthers).toOpaque()
+            )
         }
 
         let context = DecoderCallbackContext()
