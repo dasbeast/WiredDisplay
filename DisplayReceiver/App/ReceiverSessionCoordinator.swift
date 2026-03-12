@@ -298,9 +298,11 @@ private struct ReceiverRenderedFrameTelemetry {
 private final class ReceiverFrameDecodePipeline {
     private let decoderService: DecoderService
     private let renderService: RenderService
-    private let queue = DispatchQueue(label: "wireddisplay.receiver.decode", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "wireddisplay.receiver.decode", qos: .userInteractive)
     private let generationLock = NSLock()
     private var generation: UInt64 = 0
+    /// Tracks the highest enqueued frame index so the decode worker can skip stale P-frames.
+    private let latestEnqueuedFrameIndex = LatestFrameIndex()
 
     var onFrameReady: ((ReceiverFrameProcessingUpdate) -> Void)?
     var onError: ((Error) -> Void)?
@@ -330,6 +332,7 @@ private final class ReceiverFrameDecodePipeline {
         arrivalNanoseconds: UInt64
     ) {
         let generation = currentGeneration()
+        latestEnqueuedFrameIndex.update(header.frameIndex)
         queue.async { [weak self] in
             self?.processBinaryVideoFrame(
                 header: header,
@@ -347,6 +350,7 @@ private final class ReceiverFrameDecodePipeline {
         generationLock.lock()
         generation &+= 1
         generationLock.unlock()
+        latestEnqueuedFrameIndex.update(0)
     }
 
     private func processVideoEnvelope(
@@ -392,6 +396,12 @@ private final class ReceiverFrameDecodePipeline {
         generation: UInt64
     ) {
         guard isCurrentGeneration(generation) else { return }
+
+        // Skip stale P-frames — if newer frames are already queued, jump ahead.
+        // Always decode keyframes to keep the decoder state valid.
+        if !header.isKeyFrame && header.frameIndex < latestEnqueuedFrameIndex.current() {
+            return
+        }
 
         let metadata = FrameMetadata(
             frameIndex: header.frameIndex,
@@ -548,5 +558,24 @@ private final class ReceiverFrameDecodePipeline {
         let isCurrent = generation == candidate
         generationLock.unlock()
         return isCurrent
+    }
+}
+
+/// Lock-free latest-frame-index tracker for stale-frame skipping.
+private final class LatestFrameIndex: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64 = 0
+
+    func update(_ frameIndex: UInt64) {
+        lock.lock()
+        if frameIndex > value { value = frameIndex }
+        lock.unlock()
+    }
+
+    func current() -> UInt64 {
+        lock.lock()
+        let v = value
+        lock.unlock()
+        return v
     }
 }

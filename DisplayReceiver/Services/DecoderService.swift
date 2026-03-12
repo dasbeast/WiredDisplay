@@ -256,6 +256,9 @@ final class DecoderService {
             throw DecoderServiceError.decompressionSessionCreationFailed(status)
         }
 
+        // Signal real-time priority so VT minimizes decode latency.
+        VTSessionSetProperty(sessionOut, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+
         formatDescription = format
         decompressionSession = sessionOut
     }
@@ -343,7 +346,7 @@ final class DecoderService {
             throw DecoderServiceError.decodeFailed(decodeStatus)
         }
 
-        let waitResult = context.semaphore.wait(timeout: .now() + 1.0)
+        let waitResult = context.semaphore.wait(timeout: .now() + 0.05)
         if waitResult == .timedOut {
             VTDecompressionSessionWaitForAsynchronousFrames(session)
         }

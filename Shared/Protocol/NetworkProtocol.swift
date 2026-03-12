@@ -9,10 +9,10 @@ enum NetworkProtocol {
     static let heartbeatIntervalSeconds: TimeInterval = 1.0
     static let heartbeatTimeoutSeconds: TimeInterval = 5.0
     static let reconnectDelaySeconds: TimeInterval = 2.0
-    static let maxPendingOutboundFrames: Int = 3
+    static let maxPendingOutboundFrames: Int = 8
     static let transportReceiveChunkBytes: Int = 2 * 1024 * 1024  // 2 MB – reduces syscall overhead for high-throughput HEVC stream
     static let targetFramesPerSecond: Int = 60
-    static let keyFrameIntervalSeconds: Int = 4
+    static let keyFrameIntervalSeconds: Int = 1
     static let captureFramesPerSecond: Int = 60
     // HEVC (H.265) encoder target: ~300 Mbps for near-lossless retina quality over Thunderbolt.
     // Thunderbolt 3 provides 40,000 Mbps — we use at most 5% of available bandwidth.

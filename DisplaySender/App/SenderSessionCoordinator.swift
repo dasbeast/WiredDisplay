@@ -235,7 +235,7 @@ final class SenderSessionCoordinator {
         captureService.targetDisplayID = virtualDisplayID
 
         // Give macOS a moment to initialize the virtual display before capturing
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self, case .running = self.state else { return }
             print("[Sender] Starting capture on display \(virtualDisplayID)")
             self.captureService.startCapture(

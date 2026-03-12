@@ -174,14 +174,21 @@ final class TransportService {
             return
         }
 
-        if pendingOutboundFrames.count >= NetworkProtocol.maxPendingOutboundFrames {
-            pendingOutboundFrames.removeAll(keepingCapacity: true)
-            awaitingKeyFrameAfterDrop = true
-            droppedOutboundFrameCount += 1
-        }
-
         if frame.isKeyFrame {
             awaitingKeyFrameAfterDrop = false
+        }
+
+        // When the queue is full, shed the oldest non-keyframes instead of dropping everything.
+        // This preserves recent frames and avoids the costly "drop-all → await keyframe" cascade.
+        while pendingOutboundFrames.count >= NetworkProtocol.maxPendingOutboundFrames {
+            if let dropIndex = pendingOutboundFrames.firstIndex(where: { !$0.isKeyFrame }) {
+                pendingOutboundFrames.remove(at: dropIndex)
+                droppedOutboundFrameCount += 1
+            } else {
+                // All pending frames are keyframes — drop the oldest one.
+                pendingOutboundFrames.removeFirst()
+                droppedOutboundFrameCount += 1
+            }
         }
 
         pendingOutboundFrames.append(frame)
