@@ -38,6 +38,11 @@ struct ReceiverMenuBarView: View {
                     .foregroundStyle(.orange)
             }
 
+            if let powerManagementErrorText = appController.powerManagementErrorText {
+                Text(powerManagementErrorText)
+                    .foregroundStyle(.orange)
+            }
+
             if appController.lastErrorText != "-" {
                 Text(appController.lastErrorText)
                     .foregroundStyle(.red)

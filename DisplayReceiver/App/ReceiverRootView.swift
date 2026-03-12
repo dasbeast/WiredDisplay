@@ -43,6 +43,11 @@ struct ReceiverRootView: View {
                             .foregroundStyle(.orange)
                     }
 
+                    if let powerManagementError = appController.powerManagementErrorText {
+                        Text("Power Error: \(powerManagementError)")
+                            .foregroundStyle(.orange)
+                    }
+
                     if appController.lastErrorText != "-" {
                         Text("Error: \(appController.lastErrorText)")
                             .foregroundStyle(.red)

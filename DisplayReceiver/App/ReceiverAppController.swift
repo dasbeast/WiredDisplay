@@ -16,9 +16,11 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var discoverableName = Host.current().localizedName ?? "DisplayReceiver"
     @Published private(set) var advertisementErrorText: String?
     @Published private(set) var isReceiverWindowVisible = false
+    @Published private(set) var powerManagementErrorText: String?
 
     let coordinator = ReceiverSessionCoordinator()
     let advertisementService = ReceiverAdvertisementService()
+    let powerManagementService = ReceiverPowerManagementService()
 
     private let windowManager = ReceiverStreamWindowManager()
     private var cancellables: Set<AnyCancellable> = []
@@ -45,6 +47,13 @@ final class ReceiverAppController: ObservableObject {
             }
             .store(in: &cancellables)
 
+        powerManagementService.$lastErrorMessage
+            .receive(on: RunLoop.main)
+            .sink { [weak self] message in
+                self?.powerManagementErrorText = message
+            }
+            .store(in: &cancellables)
+
         windowManager.onVisibilityChange = { [weak self] isVisible in
             guard let self else { return }
             Task { @MainActor in
@@ -56,6 +65,7 @@ final class ReceiverAppController: ObservableObject {
     }
 
     func start() {
+        powerManagementService.startPreventingSleep()
         coordinator.startListening(port: NetworkProtocol.defaultPort)
         advertisementService.startAdvertising(
             port: NetworkProtocol.defaultPort,
@@ -82,6 +92,7 @@ final class ReceiverAppController: ObservableObject {
     }
 
     func quitApplication() {
+        powerManagementService.stopPreventingSleep()
         NSApplication.shared.terminate(nil)
     }
 
