@@ -66,6 +66,8 @@ final class TransportService {
     }
 
     /// Sends an encoded video frame using the binary wire format (no JSON/base64 for payload data).
+    /// Thread-safe: serialization happens on the caller's thread; queue mutations are dispatched
+    /// to the internal transport queue so this can be called directly from the capture queue.
     func sendVideoFrame(_ encodedFrame: EncodedFrame) {
         guard let binaryData = BinaryFrameWire.serialize(encodedFrame: encodedFrame) else {
             print("[Transport] Failed to serialize frame \(encodedFrame.metadata.frameIndex)")
@@ -84,8 +86,12 @@ final class TransportService {
         }
 
         let framedData = wrapLengthPrefix(binaryData)
-        enqueueOutboundFrame(OutboundFrame(data: framedData, isKeyFrame: encodedFrame.isKeyFrame))
-        flushPendingIfPossible()
+        let outbound = OutboundFrame(data: framedData, isKeyFrame: encodedFrame.isKeyFrame)
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.enqueueOutboundFrame(outbound)
+            self.flushPendingIfPossible()
+        }
     }
 
     func sendHello(senderName: String, targetWidth: Int, targetHeight: Int) {

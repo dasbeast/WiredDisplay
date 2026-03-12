@@ -18,7 +18,12 @@ final class SenderSessionCoordinator {
     private let virtualDisplayService = VirtualDisplayService()
     private let wiredPathMonitor = WiredPathStatusMonitor()
 
-    private(set) var state: SessionState = .idle { didSet { onChange?() } }
+    private(set) var state: SessionState = .idle {
+        didSet {
+            frameDispatchGate.setRunning(state == .running)
+            onChange?()
+        }
+    }
     private(set) var receiverHost: String = "" { didSet { onChange?() } }
     private(set) var targetWidth: Int = 2560 { didSet { onChange?() } }
     private(set) var targetHeight: Int = 1440 { didSet { onChange?() } }
@@ -56,6 +61,7 @@ final class SenderSessionCoordinator {
     /// Lock used to gate frame encoding — only one frame encodes at a time.
     /// Uses tryLock() from the capture queue; skips if an encode is already in progress.
     private let encodeLock = NSLock()
+    private let frameDispatchGate = SenderFrameDispatchGate()
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -70,8 +76,11 @@ final class SenderSessionCoordinator {
 
         let encoder = encoderService
         let encodeLock = self.encodeLock
+        let transportService = self.transportService
+        let frameDispatchGate = self.frameDispatchGate
         captureService.onCapturedFrame = { [weak self] frame in
             guard self != nil else { return }
+            guard frameDispatchGate.isRunning else { return }
 
             // Try to acquire the encode lock — skip frame if another encode is in flight
             guard encodeLock.try() else { return }
@@ -82,12 +91,13 @@ final class SenderSessionCoordinator {
             }
 
             // Encode on the capture queue while the CVPixelBuffer is still valid
-            let encodedFrame = encoder.encode(frame: frame)
+            guard let encodedFrame = encoder.encode(frame: frame) else { return }
+            guard frameDispatchGate.isRunning else { return }
+
+            transportService.sendVideoFrame(encodedFrame)
 
             Task { @MainActor [weak self] in
-                guard let self, case .running = self.state else { return }
-                guard let encodedFrame else { return }
-                self.pushEncodedFrame(encodedFrame)
+                self?.recordOutboundFrame(encodedFrame)
             }
         }
 
@@ -270,6 +280,10 @@ final class SenderSessionCoordinator {
 
     private func pushEncodedFrame(_ encodedFrame: EncodedFrame) {
         transportService.sendVideoFrame(encodedFrame)
+        recordOutboundFrame(encodedFrame)
+    }
+
+    private func recordOutboundFrame(_ encodedFrame: EncodedFrame) {
         sentFrameCount += 1
         updateOutboundMetrics(payloadByteCount: encodedFrame.payload.count)
     }
@@ -398,5 +412,23 @@ final class SenderSessionCoordinator {
             return min(targetHeight, NetworkProtocol.rawDiagnosticsMaxHeight)
         }
         return targetHeight
+    }
+}
+
+private final class SenderFrameDispatchGate {
+    private let lock = NSLock()
+    private var running = false
+
+    var isRunning: Bool {
+        lock.lock()
+        let currentValue = running
+        lock.unlock()
+        return currentValue
+    }
+
+    func setRunning(_ isRunning: Bool) {
+        lock.lock()
+        running = isRunning
+        lock.unlock()
     }
 }

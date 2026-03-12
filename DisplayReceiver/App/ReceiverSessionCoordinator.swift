@@ -13,6 +13,7 @@ final class ReceiverSessionCoordinator {
     private let listenerService: ListenerService
     private let decoderService: DecoderService
     private let renderService: RenderService
+    private let frameDecodePipeline: ReceiverFrameDecodePipeline
     private let wiredPathMonitor = WiredPathStatusMonitor()
 
     private(set) var state: SessionState = .idle { didSet { onChange?() } }
@@ -49,8 +50,26 @@ final class ReceiverSessionCoordinator {
         self.listenerService = listenerService
         self.decoderService = decoderService
         self.renderService = renderService
+        self.frameDecodePipeline = ReceiverFrameDecodePipeline(
+            decoderService: decoderService,
+            renderService: renderService
+        )
 
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
+
+        frameDecodePipeline.onFrameReady = { [weak self] update in
+            Task { @MainActor [weak self] in
+                self?.applyFrameUpdate(update)
+            }
+        }
+
+        frameDecodePipeline.onError = { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.lastErrorMessage = error.localizedDescription
+                self.state = .failed(error.localizedDescription)
+            }
+        }
 
         wiredPathMonitor.onUpdate = { [weak self] isAvailable in
             guard let self else { return }
@@ -73,7 +92,16 @@ final class ReceiverSessionCoordinator {
             }
         }
 
+        let frameDecodePipeline = self.frameDecodePipeline
         listenerService.onEnvelope = { [weak self] envelope in
+            if envelope.type == .videoFrame {
+                frameDecodePipeline.enqueueVideoEnvelope(
+                    envelope,
+                    arrivalNanoseconds: DispatchTime.now().uptimeNanoseconds
+                )
+                return
+            }
+
             guard let self else { return }
             Task { @MainActor in
                 self.handle(envelope: envelope)
@@ -81,10 +109,15 @@ final class ReceiverSessionCoordinator {
         }
 
         listenerService.onBinaryVideoFrame = { [weak self] header, vps, sps, pps, payload in
-            guard let self else { return }
-            Task { @MainActor in
-                self.handleBinaryVideoFrame(header: header, vps: vps, sps: sps, pps: pps, payload: payload)
-            }
+            guard self != nil else { return }
+            frameDecodePipeline.enqueueBinaryVideoFrame(
+                header: header,
+                vps: vps,
+                sps: sps,
+                pps: pps,
+                payload: payload,
+                arrivalNanoseconds: DispatchTime.now().uptimeNanoseconds
+            )
         }
 
         listenerService.onError = { [weak self] error in
@@ -122,6 +155,7 @@ final class ReceiverSessionCoordinator {
         inboundWindowFrameCount = 0
         inboundWindowPayloadBytes = 0
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
+        frameDecodePipeline.reset()
         RenderFrameStore.shared.reset()
 
         renderService.prepareRenderer()
@@ -130,6 +164,7 @@ final class ReceiverSessionCoordinator {
 
     /// Stops listener and returns receiver pipeline to idle state.
     func stopListening() {
+        frameDecodePipeline.reset()
         listenerService.stopListening()
         state = .idle
     }
@@ -155,12 +190,7 @@ final class ReceiverSessionCoordinator {
                 lastHeartbeatNanoseconds = heartbeat.timestampNanoseconds
                 listenerService.sendHeartbeat()
             case .videoFrame:
-                let packet = try envelope.decodePayload(as: VideoPacket.self)
-                updateFrameTimingMetrics(from: packet.metadata)
-                updateInboundMetrics(payloadByteCount: packet.payload.count)
-                let decodedFrame = decoderService.decode(packet: packet)
-                renderDecodedFrame(decodedFrame)
-                receivedFrameCount += 1
+                break
             }
         } catch {
             lastErrorMessage = error.localizedDescription
@@ -168,7 +198,180 @@ final class ReceiverSessionCoordinator {
         }
     }
 
-    private func handleBinaryVideoFrame(header: BinaryFrameHeader, vps: Data?, sps: Data?, pps: Data?, payload: Data) {
+    private func applyFrameUpdate(_ update: ReceiverFrameProcessingUpdate) {
+        updateFrameTimingMetrics(from: update.metadata, arrivalNanoseconds: update.arrivalNanoseconds)
+        updateInboundMetrics(payloadByteCount: update.payloadByteCount, atNanoseconds: update.arrivalNanoseconds)
+        renderSourceDescription = update.renderSource
+        replacedBeforeRenderCount = update.replacedBeforeRenderCount
+        receivedFrameCount += 1
+    }
+
+    private func updateFrameTimingMetrics(from metadata: FrameMetadata, arrivalNanoseconds: UInt64) {
+        if arrivalNanoseconds >= metadata.timestampNanoseconds {
+            latestFrameLatencyMilliseconds = Double(arrivalNanoseconds - metadata.timestampNanoseconds) / 1_000_000.0
+        } else {
+            latestFrameLatencyMilliseconds = 0
+        }
+
+        if let previousArrival = lastFrameArrivalNanoseconds, arrivalNanoseconds >= previousArrival {
+            let intervalMs = Double(arrivalNanoseconds - previousArrival) / 1_000_000.0
+            let alpha = 0.12
+
+            if let current = smoothedIntervalMilliseconds {
+                let next = (alpha * intervalMs) + ((1.0 - alpha) * current)
+                smoothedIntervalMilliseconds = next
+            } else {
+                smoothedIntervalMilliseconds = intervalMs
+            }
+
+            if let smoothed = smoothedIntervalMilliseconds {
+                let absoluteDeviation = abs(intervalMs - smoothed)
+                if let currentJitter = smoothedJitterMilliseconds {
+                    smoothedJitterMilliseconds = (alpha * absoluteDeviation) + ((1.0 - alpha) * currentJitter)
+                } else {
+                    smoothedJitterMilliseconds = absoluteDeviation
+                }
+            }
+        }
+
+        lastFrameArrivalNanoseconds = arrivalNanoseconds
+        averageFrameIntervalMilliseconds = smoothedIntervalMilliseconds
+        estimatedJitterMilliseconds = smoothedJitterMilliseconds
+    }
+
+    private func updateInboundMetrics(payloadByteCount: Int, atNanoseconds now: UInt64) {
+        if inboundWindowStartNanoseconds == nil {
+            inboundWindowStartNanoseconds = now
+        }
+
+        inboundWindowFrameCount += 1
+        inboundWindowPayloadBytes += UInt64(max(0, payloadByteCount))
+
+        guard let windowStart = inboundWindowStartNanoseconds, now >= windowStart else { return }
+        let elapsedNanoseconds = now - windowStart
+        guard elapsedNanoseconds >= 1_000_000_000 else { return }
+
+        let elapsedSeconds = Double(elapsedNanoseconds) / 1_000_000_000.0
+        receivedFramesPerSecond = Double(inboundWindowFrameCount) / elapsedSeconds
+        receivedMegabitsPerSecond = (Double(inboundWindowPayloadBytes) * 8.0) / elapsedSeconds / 1_000_000.0
+
+        inboundWindowStartNanoseconds = now
+        inboundWindowFrameCount = 0
+        inboundWindowPayloadBytes = 0
+    }
+}
+
+private struct ReceiverFrameProcessingUpdate: Sendable {
+    let metadata: FrameMetadata
+    let payloadByteCount: Int
+    let renderSource: String
+    let replacedBeforeRenderCount: UInt64
+    let arrivalNanoseconds: UInt64
+}
+
+private struct ReceiverRenderResult {
+    let renderSource: String
+    let replacedBeforeRenderCount: UInt64
+    let hasPixelBuffer: Bool
+    let hasPixelData: Bool
+    let bytesPerRow: Int
+}
+
+private final class ReceiverFrameDecodePipeline {
+    private let decoderService: DecoderService
+    private let renderService: RenderService
+    private let queue = DispatchQueue(label: "wireddisplay.receiver.decode", qos: .userInitiated)
+    private let generationLock = NSLock()
+    private var generation: UInt64 = 0
+
+    var onFrameReady: ((ReceiverFrameProcessingUpdate) -> Void)?
+    var onError: ((Error) -> Void)?
+
+    init(decoderService: DecoderService, renderService: RenderService) {
+        self.decoderService = decoderService
+        self.renderService = renderService
+    }
+
+    func enqueueVideoEnvelope(_ envelope: NetworkEnvelope, arrivalNanoseconds: UInt64) {
+        let generation = currentGeneration()
+        queue.async { [weak self] in
+            self?.processVideoEnvelope(
+                envelope,
+                arrivalNanoseconds: arrivalNanoseconds,
+                generation: generation
+            )
+        }
+    }
+
+    func enqueueBinaryVideoFrame(
+        header: BinaryFrameHeader,
+        vps: Data?,
+        sps: Data?,
+        pps: Data?,
+        payload: Data,
+        arrivalNanoseconds: UInt64
+    ) {
+        let generation = currentGeneration()
+        queue.async { [weak self] in
+            self?.processBinaryVideoFrame(
+                header: header,
+                vps: vps,
+                sps: sps,
+                pps: pps,
+                payload: payload,
+                arrivalNanoseconds: arrivalNanoseconds,
+                generation: generation
+            )
+        }
+    }
+
+    func reset() {
+        generationLock.lock()
+        generation &+= 1
+        generationLock.unlock()
+    }
+
+    private func processVideoEnvelope(
+        _ envelope: NetworkEnvelope,
+        arrivalNanoseconds: UInt64,
+        generation: UInt64
+    ) {
+        guard isCurrentGeneration(generation) else { return }
+
+        do {
+            let packet = try envelope.decodePayload(as: VideoPacket.self)
+            let decodedFrame = decoderService.decode(packet: packet)
+            guard isCurrentGeneration(generation) else { return }
+
+            let renderResult = renderDecodedFrame(decodedFrame)
+            guard isCurrentGeneration(generation) else { return }
+
+            onFrameReady?(
+                ReceiverFrameProcessingUpdate(
+                    metadata: packet.metadata,
+                    payloadByteCount: packet.payload.count,
+                    renderSource: renderResult.renderSource,
+                    replacedBeforeRenderCount: renderResult.replacedBeforeRenderCount,
+                    arrivalNanoseconds: arrivalNanoseconds
+                )
+            )
+        } catch {
+            guard isCurrentGeneration(generation) else { return }
+            onError?(error)
+        }
+    }
+
+    private func processBinaryVideoFrame(
+        header: BinaryFrameHeader,
+        vps: Data?,
+        sps: Data?,
+        pps: Data?,
+        payload: Data,
+        arrivalNanoseconds: UInt64,
+        generation: UInt64
+    ) {
+        guard isCurrentGeneration(generation) else { return }
+
         let metadata = FrameMetadata(
             frameIndex: header.frameIndex,
             timestampNanoseconds: header.timestampNanoseconds,
@@ -178,11 +381,12 @@ final class ReceiverSessionCoordinator {
         )
 
         if header.frameIndex % 30 == 0 {
-            print("[Receiver] Binary frame \(header.frameIndex): \(header.width)x\(header.height), codec=\(header.codec), payload=\(payload.count) bytes, vps=\(vps?.count ?? 0), sps=\(sps?.count ?? 0), pps=\(pps?.count ?? 0)")
+            print(
+                "[Receiver] Binary frame \(header.frameIndex): \(header.width)x\(header.height), " +
+                "codec=\(header.codec), payload=\(payload.count) bytes, vps=\(vps?.count ?? 0), " +
+                "sps=\(sps?.count ?? 0), pps=\(pps?.count ?? 0)"
+            )
         }
-
-        updateFrameTimingMetrics(from: metadata)
-        updateInboundMetrics(payloadByteCount: payload.count)
 
         let encodedFrame = makeEncodedFrame(
             metadata: metadata,
@@ -192,19 +396,29 @@ final class ReceiverSessionCoordinator {
             pps: pps,
             payload: payload
         )
-
         let decodedFrame = decoderService.decodeEncodedFrame(encodedFrame)
-        let renderSource = renderDecodedFrame(decodedFrame)
+        guard isCurrentGeneration(generation) else { return }
+
+        let renderResult = renderDecodedFrame(decodedFrame)
+        guard isCurrentGeneration(generation) else { return }
 
         if header.frameIndex % 30 == 0 {
-            let renderableFrame = RenderFrameStore.shared.snapshot()
             print(
-                "[Receiver] Rendered frame \(header.frameIndex): source=\(renderSource), " +
-                "hasPB=\(renderableFrame?.pixelBuffer != nil), hasData=\(renderableFrame?.pixelData != nil), " +
-                "bpr=\(renderableFrame?.bytesPerRow ?? 0)"
+                "[Receiver] Rendered frame \(header.frameIndex): source=\(renderResult.renderSource), " +
+                "hasPB=\(renderResult.hasPixelBuffer), hasData=\(renderResult.hasPixelData), " +
+                "bpr=\(renderResult.bytesPerRow)"
             )
         }
-        receivedFrameCount += 1
+
+        onFrameReady?(
+            ReceiverFrameProcessingUpdate(
+                metadata: metadata,
+                payloadByteCount: payload.count,
+                renderSource: renderResult.renderSource,
+                replacedBeforeRenderCount: renderResult.replacedBeforeRenderCount,
+                arrivalNanoseconds: arrivalNanoseconds
+            )
+        )
     }
 
     private func makeEncodedFrame(
@@ -230,69 +444,17 @@ final class ReceiverSessionCoordinator {
         )
     }
 
-    @discardableResult
-    private func renderDecodedFrame(_ decodedFrame: DecodedFrame) -> String {
+    private func renderDecodedFrame(_ decodedFrame: DecodedFrame) -> ReceiverRenderResult {
         let (renderableFrame, renderSource) = makeRenderableFrame(from: decodedFrame)
         renderService.render(frame: renderableFrame)
-        renderSourceDescription = renderSource
-        replacedBeforeRenderCount = RenderFrameStore.shared.replacedFramesCount()
-        return renderSource
-    }
 
-    private func updateFrameTimingMetrics(from metadata: FrameMetadata) {
-        let now = DispatchTime.now().uptimeNanoseconds
-        if now >= metadata.timestampNanoseconds {
-            latestFrameLatencyMilliseconds = Double(now - metadata.timestampNanoseconds) / 1_000_000.0
-        } else {
-            latestFrameLatencyMilliseconds = 0
-        }
-
-        if let previousArrival = lastFrameArrivalNanoseconds, now >= previousArrival {
-            let intervalMs = Double(now - previousArrival) / 1_000_000.0
-            let alpha = 0.12
-
-            if let current = smoothedIntervalMilliseconds {
-                let next = (alpha * intervalMs) + ((1.0 - alpha) * current)
-                smoothedIntervalMilliseconds = next
-            } else {
-                smoothedIntervalMilliseconds = intervalMs
-            }
-
-            if let smoothed = smoothedIntervalMilliseconds {
-                let absoluteDeviation = abs(intervalMs - smoothed)
-                if let currentJitter = smoothedJitterMilliseconds {
-                    smoothedJitterMilliseconds = (alpha * absoluteDeviation) + ((1.0 - alpha) * currentJitter)
-                } else {
-                    smoothedJitterMilliseconds = absoluteDeviation
-                }
-            }
-        }
-
-        lastFrameArrivalNanoseconds = now
-        averageFrameIntervalMilliseconds = smoothedIntervalMilliseconds
-        estimatedJitterMilliseconds = smoothedJitterMilliseconds
-    }
-
-    private func updateInboundMetrics(payloadByteCount: Int) {
-        let now = DispatchTime.now().uptimeNanoseconds
-        if inboundWindowStartNanoseconds == nil {
-            inboundWindowStartNanoseconds = now
-        }
-
-        inboundWindowFrameCount += 1
-        inboundWindowPayloadBytes += UInt64(max(0, payloadByteCount))
-
-        guard let windowStart = inboundWindowStartNanoseconds, now >= windowStart else { return }
-        let elapsedNanoseconds = now - windowStart
-        guard elapsedNanoseconds >= 1_000_000_000 else { return }
-
-        let elapsedSeconds = Double(elapsedNanoseconds) / 1_000_000_000.0
-        receivedFramesPerSecond = Double(inboundWindowFrameCount) / elapsedSeconds
-        receivedMegabitsPerSecond = (Double(inboundWindowPayloadBytes) * 8.0) / elapsedSeconds / 1_000_000.0
-
-        inboundWindowStartNanoseconds = now
-        inboundWindowFrameCount = 0
-        inboundWindowPayloadBytes = 0
+        return ReceiverRenderResult(
+            renderSource: renderSource,
+            replacedBeforeRenderCount: RenderFrameStore.shared.replacedFramesCount(),
+            hasPixelBuffer: renderableFrame.pixelBuffer != nil,
+            hasPixelData: renderableFrame.pixelData != nil,
+            bytesPerRow: renderableFrame.bytesPerRow
+        )
     }
 
     private func makeRenderableFrame(from frame: DecodedFrame) -> (DecodedFrame, String) {
@@ -348,5 +510,19 @@ final class ReceiverSessionCoordinator {
             bytesPerRow: bytesPerRow,
             pixelFormat: .bgra8
         )
+    }
+
+    private func currentGeneration() -> UInt64 {
+        generationLock.lock()
+        let currentGeneration = generation
+        generationLock.unlock()
+        return currentGeneration
+    }
+
+    private func isCurrentGeneration(_ candidate: UInt64) -> Bool {
+        generationLock.lock()
+        let isCurrent = generation == candidate
+        generationLock.unlock()
+        return isCurrent
     }
 }

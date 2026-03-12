@@ -349,10 +349,15 @@ final class DecoderService {
         let refcon = Unmanaged.passRetained(context).toOpaque()
 
         var flagsOut = VTDecodeInfoFlags()
+        let decodeFlags: VTDecodeFrameFlags = [
+            ._EnableAsynchronousDecompression,
+            ._1xRealTimePlayback
+        ]
+
         let decodeStatus = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sampleBuffer,
-            flags: [],
+            flags: decodeFlags,
             frameRefcon: refcon,
             infoFlagsOut: &flagsOut
         )
