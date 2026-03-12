@@ -10,8 +10,6 @@ struct SenderRootView: View {
 
     @State private var receiverHostInput = UserDefaults.standard.string(forKey: SenderRootView.savedHostKey) ?? ""
     @State private var portInput = UserDefaults.standard.string(forKey: SenderRootView.savedPortKey) ?? String(NetworkProtocol.defaultPort)
-    @State private var widthInput = "2560"
-    @State private var heightInput = "1440"
 
     @State private var stateText = "idle"
     @State private var connectionText = "not_connected"
@@ -25,6 +23,7 @@ struct SenderRootView: View {
     @State private var estimatedDisplayLatencyText = "-"
 
     @State private var endpointSummary = "-"
+    @State private var negotiatedResolutionText = "-"
     @State private var wiredPathSummary = "unknown"
     @State private var wiredWarning = ""
     @State private var interfaceLines: [String] = []
@@ -40,11 +39,9 @@ struct SenderRootView: View {
             GroupBox("Endpoint") {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("Receiver host (e.g. 169.254.x.x)", text: $receiverHostInput)
-                    HStack {
-                        TextField("Port", text: $portInput)
-                        TextField("Width", text: $widthInput)
-                        TextField("Height", text: $heightInput)
-                    }
+                    TextField("Port", text: $portInput)
+                    Text("Resolution: auto-match receiver display")
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -82,6 +79,7 @@ struct SenderRootView: View {
             GroupBox("Diagnostics") {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Configured Endpoint: \(endpointSummary)")
+                    Text("Negotiated Display: \(negotiatedResolutionText)")
                     Text("Wired Path: \(wiredPathSummary)")
                     if !wiredWarning.isEmpty {
                         Text(wiredWarning)
@@ -113,7 +111,7 @@ struct SenderRootView: View {
 
     private func connect() {
         guard !receiverHostInput.isEmpty else { return }
-        guard let port = UInt16(portInput), let width = Int(widthInput), let height = Int(heightInput) else { return }
+        guard let port = UInt16(portInput) else { return }
 
         // Save for next launch
         UserDefaults.standard.set(receiverHostInput, forKey: Self.savedHostKey)
@@ -121,9 +119,7 @@ struct SenderRootView: View {
 
         coordinator.connect(
             receiverHost: receiverHostInput,
-            port: port,
-            targetWidth: width,
-            targetHeight: height
+            port: port
         )
         refreshFromCoordinator()
     }
@@ -141,6 +137,7 @@ struct SenderRootView: View {
         estimatedDisplayLatencyText = formatRate(coordinator.estimatedDisplayLatencyMilliseconds, unit: "ms")
 
         endpointSummary = coordinator.configuredEndpointSummary
+        negotiatedResolutionText = "\(coordinator.targetWidth)x\(coordinator.targetHeight)"
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         wiredWarning = coordinator.wiredPathAvailable ? "" : "No wired route currently available. Verify Thunderbolt Bridge and cable link."
         interfaceLines = coordinator.localInterfaceDescriptions

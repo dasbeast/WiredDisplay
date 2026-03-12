@@ -58,6 +58,7 @@ final class SenderSessionCoordinator {
     private var heartbeatTimeoutTimer: Timer?
     private var lastInboundHeartbeatAt: Date?
     private var estimatedReceiverClockOffsetNanoseconds: Int64?
+    private var targetUsesHiDPI = true
     private var outboundWindowStartNanoseconds: UInt64?
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
@@ -179,6 +180,7 @@ final class SenderSessionCoordinator {
     }
 
     /// Connects to receiver and performs handshake only.
+    /// `targetWidth` / `targetHeight` are retained as a fallback when the receiver cannot report display metrics.
     func connect(
         receiverHost: String,
         port: UInt16 = NetworkProtocol.defaultPort,
@@ -203,6 +205,7 @@ final class SenderSessionCoordinator {
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
+        targetUsesHiDPI = true
         configuredEndpointSummary = "\(receiverHost):\(port)"
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
@@ -226,7 +229,8 @@ final class SenderSessionCoordinator {
         let virtualDisplayID = virtualDisplayService.createDisplay(
             width: captureWidth,
             height: captureHeight,
-            refreshRate: Double(NetworkProtocol.captureFramesPerSecond)
+            refreshRate: Double(NetworkProtocol.captureFramesPerSecond),
+            hiDPI: targetUsesHiDPI
         )
 
         print("[Sender] Virtual display created with ID: \(virtualDisplayID)")
@@ -333,6 +337,7 @@ final class SenderSessionCoordinator {
             case .helloAck:
                 let ack = try envelope.decodePayload(as: HelloAckPayload.self)
                 if ack.accepted {
+                    applyReceiverDisplayMetrics(ack.displayMetrics)
                     state = .connected
                     lastInboundHeartbeatAt = Date()
                     startHeartbeatTimers()
@@ -428,6 +433,26 @@ final class SenderSessionCoordinator {
             return min(targetHeight, NetworkProtocol.rawDiagnosticsMaxHeight)
         }
         return targetHeight
+    }
+
+    private func applyReceiverDisplayMetrics(_ displayMetrics: ReceiverDisplayMetrics?) {
+        guard let displayMetrics else {
+            print("[Sender] Receiver did not advertise display metrics; using fallback \(targetWidth)x\(targetHeight)")
+            return
+        }
+
+        let negotiatedWidth = max(1, displayMetrics.logicalWidth)
+        let negotiatedHeight = max(1, displayMetrics.logicalHeight)
+        targetWidth = negotiatedWidth
+        targetHeight = negotiatedHeight
+        targetUsesHiDPI = displayMetrics.backingScaleFactor > 1.0
+
+        print(
+            "[Sender] Using receiver display metrics: logical=\(negotiatedWidth)x\(negotiatedHeight), " +
+            "pixels=\(displayMetrics.pixelWidth)x\(displayMetrics.pixelHeight), " +
+            "scale=\(String(format: "%.2f", displayMetrics.backingScaleFactor)), " +
+            "hiDPI=\(targetUsesHiDPI)"
+        )
     }
 
     private func updateLatencyMetrics(

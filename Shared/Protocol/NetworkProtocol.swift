@@ -119,8 +119,19 @@ struct NetworkEnvelope: Codable, Sendable {
 struct HelloPayload: Codable, Sendable {
     let senderName: String
     let requestedProtocolVersion: UInt16
+    /// Legacy fallback logical size used when the receiver cannot report its display mode.
     let targetWidth: Int
     let targetHeight: Int
+}
+
+/// Receiver display mode advertised during handshake so the sender can mirror macOS scaling.
+struct ReceiverDisplayMetrics: Codable, Sendable {
+    let logicalWidth: Int
+    let logicalHeight: Int
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let backingScaleFactor: Double
+    let refreshRateHz: Double?
 }
 
 /// Receiver -> sender handshake acknowledgement payload.
@@ -129,6 +140,7 @@ struct HelloAckPayload: Codable, Sendable {
     let acceptedProtocolVersion: UInt16
     let receiverName: String
     let reason: String?
+    let displayMetrics: ReceiverDisplayMetrics?
 }
 
 /// Bidirectional keepalive payload to detect stale links.

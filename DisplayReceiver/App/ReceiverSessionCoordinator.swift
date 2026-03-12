@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Coordinates receiver-side listener, decode, and render lifecycle.
@@ -178,7 +179,11 @@ final class ReceiverSessionCoordinator {
                 let hello = try envelope.decodePayload(as: HelloPayload.self)
                 peerName = hello.senderName
                 if hello.requestedProtocolVersion == NetworkProtocol.protocolVersion {
-                    listenerService.sendHelloAck(accepted: true, reason: nil)
+                    listenerService.sendHelloAck(
+                        accepted: true,
+                        reason: nil,
+                        displayMetrics: currentDisplayMetrics()
+                    )
                     state = .running
                 } else {
                     listenerService.sendHelloAck(accepted: false, reason: "unsupported protocol version")
@@ -269,6 +274,37 @@ final class ReceiverSessionCoordinator {
         inboundWindowStartNanoseconds = now
         inboundWindowFrameCount = 0
         inboundWindowPayloadBytes = 0
+    }
+
+    private func currentDisplayMetrics() -> ReceiverDisplayMetrics? {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+            return nil
+        }
+
+        let logicalFrame = screen.frame
+        let backingFrame = screen.convertRectToBacking(logicalFrame)
+        let logicalWidth = max(1, Int(logicalFrame.width.rounded()))
+        let logicalHeight = max(1, Int(logicalFrame.height.rounded()))
+        let pixelWidth = max(1, Int(backingFrame.width.rounded()))
+        let pixelHeight = max(1, Int(backingFrame.height.rounded()))
+
+        let refreshRateHz: Double?
+        if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+           let mode = CGDisplayCopyDisplayMode(CGDirectDisplayID(screenNumber.uint32Value)) {
+            let reportedRefreshRate = mode.refreshRate
+            refreshRateHz = reportedRefreshRate > 0 ? reportedRefreshRate : nil
+        } else {
+            refreshRateHz = nil
+        }
+
+        return ReceiverDisplayMetrics(
+            logicalWidth: logicalWidth,
+            logicalHeight: logicalHeight,
+            pixelWidth: pixelWidth,
+            pixelHeight: pixelHeight,
+            backingScaleFactor: Double(screen.backingScaleFactor),
+            refreshRateHz: refreshRateHz
+        )
     }
 }
 

@@ -70,12 +70,13 @@ final class ListenerService {
         onStateChange?(false)
     }
 
-    func sendHelloAck(accepted: Bool, reason: String?) {
+    func sendHelloAck(accepted: Bool, reason: String?, displayMetrics: ReceiverDisplayMetrics? = nil) {
         let payload = HelloAckPayload(
             accepted: accepted,
             acceptedProtocolVersion: NetworkProtocol.protocolVersion,
             receiverName: Host.current().localizedName ?? "DisplayReceiver",
-            reason: reason
+            reason: reason,
+            displayMetrics: displayMetrics
         )
 
         do {
