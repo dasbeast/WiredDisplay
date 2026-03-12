@@ -401,7 +401,12 @@ private final class ReceiverFrameDecodePipeline {
             let decodedFrame = decoderService.decode(packet: packet)
             guard isCurrentGeneration(generation) else { return }
 
-            let renderResult = renderDecodedFrame(decodedFrame)
+            guard let renderResult = renderDecodedFrame(decodedFrame) else {
+                if packet.metadata.frameIndex % 30 == 0 {
+                    print("[Receiver] Holding last rendered frame for undecodable frame \(packet.metadata.frameIndex)")
+                }
+                return
+            }
             guard isCurrentGeneration(generation) else { return }
 
             let renderTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
@@ -466,7 +471,12 @@ private final class ReceiverFrameDecodePipeline {
         let decodedFrame = decoderService.decodeEncodedFrame(encodedFrame)
         guard isCurrentGeneration(generation) else { return }
 
-        let renderResult = renderDecodedFrame(decodedFrame)
+        guard let renderResult = renderDecodedFrame(decodedFrame) else {
+            if header.frameIndex % 30 == 0 {
+                print("[Receiver] Holding last rendered frame for undecodable frame \(header.frameIndex)")
+            }
+            return
+        }
         guard isCurrentGeneration(generation) else { return }
 
         let renderTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
@@ -514,8 +524,10 @@ private final class ReceiverFrameDecodePipeline {
         )
     }
 
-    private func renderDecodedFrame(_ decodedFrame: DecodedFrame) -> ReceiverRenderResult {
-        let (renderableFrame, renderSource) = makeRenderableFrame(from: decodedFrame)
+    private func renderDecodedFrame(_ decodedFrame: DecodedFrame) -> ReceiverRenderResult? {
+        guard let (renderableFrame, renderSource) = makeRenderableFrame(from: decodedFrame) else {
+            return nil
+        }
         renderService.render(frame: renderableFrame)
 
         return ReceiverRenderResult(
@@ -527,7 +539,7 @@ private final class ReceiverFrameDecodePipeline {
         )
     }
 
-    private func makeRenderableFrame(from frame: DecodedFrame) -> (DecodedFrame, String) {
+    private func makeRenderableFrame(from frame: DecodedFrame) -> (DecodedFrame, String)? {
         if frame.pixelBuffer != nil {
             return (frame, "decoded_pixel_buffer")
         }
@@ -538,48 +550,7 @@ private final class ReceiverFrameDecodePipeline {
             return (frame, "decoded_bytes")
         }
 
-        return (makeDiagnosticFallbackFrame(from: frame.metadata), "fallback_diagnostic")
-    }
-
-    private func makeDiagnosticFallbackFrame(from metadata: FrameMetadata) -> DecodedFrame {
-        let targetWidth = max(160, min(640, metadata.width))
-        let targetHeight = max(90, min(360, metadata.height))
-        let bytesPerRow = targetWidth * 4
-        var pixels = Data(count: bytesPerRow * targetHeight)
-
-        let phase = UInt8(metadata.frameIndex % 255)
-        pixels.withUnsafeMutableBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-
-            for y in 0..<targetHeight {
-                let yComponent = UInt8((y * 255) / max(1, targetHeight - 1))
-                for x in 0..<targetWidth {
-                    let offset = (y * bytesPerRow) + (x * 4)
-                    let xComponent = UInt8((x * 255) / max(1, targetWidth - 1))
-                    let movingBar = (x / 24 + Int(metadata.frameIndex / 3)) % 2 == 0
-                    base[offset + 0] = movingBar ? phase : xComponent      // B
-                    base[offset + 1] = movingBar ? xComponent : yComponent // G
-                    base[offset + 2] = movingBar ? yComponent : phase      // R
-                    base[offset + 3] = 255                                 // A
-                }
-            }
-        }
-
-        let fallbackMetadata = FrameMetadata(
-            frameIndex: metadata.frameIndex,
-            timestampNanoseconds: metadata.timestampNanoseconds,
-            width: targetWidth,
-            height: targetHeight,
-            isKeyFrame: metadata.isKeyFrame
-        )
-
-        return DecodedFrame(
-            metadata: fallbackMetadata,
-            pixelBuffer: nil,
-            pixelData: pixels,
-            bytesPerRow: bytesPerRow,
-            pixelFormat: .bgra8
-        )
+        return nil
     }
 
     private func currentGeneration() -> UInt64 {

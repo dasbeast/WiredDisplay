@@ -58,6 +58,7 @@ final class SenderSessionCoordinator {
     private var heartbeatTimeoutTimer: Timer?
     private var lastInboundHeartbeatAt: Date?
     private var estimatedReceiverClockOffsetNanoseconds: Int64?
+    private var lastRecoveryKeyFrameRequestAt: Date?
     private var targetUsesHiDPI = true
     private var outboundWindowStartNanoseconds: UInt64?
     private var outboundWindowFrameCount: UInt64 = 0
@@ -166,10 +167,10 @@ final class SenderSessionCoordinator {
 
         transportService.onDroppedFrameCountChange = { [weak self] count in
             guard let self else { return }
-            if count > self.droppedOutboundFrameCount {
-                self.encoderService.requestKeyFrame()
-            }
             Task { @MainActor in
+                if count > self.droppedOutboundFrameCount {
+                    self.requestRecoveryKeyFrameIfNeeded()
+                }
                 self.droppedOutboundFrameCount = count
             }
         }
@@ -202,6 +203,7 @@ final class SenderSessionCoordinator {
         heartbeatRoundTripMilliseconds = nil
         estimatedDisplayLatencyMilliseconds = nil
         estimatedReceiverClockOffsetNanoseconds = nil
+        lastRecoveryKeyFrameRequestAt = nil
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
@@ -263,6 +265,7 @@ final class SenderSessionCoordinator {
         heartbeatRoundTripMilliseconds = nil
         estimatedDisplayLatencyMilliseconds = nil
         estimatedReceiverClockOffsetNanoseconds = nil
+        lastRecoveryKeyFrameRequestAt = nil
         droppedOutboundFrameCount = 0
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
@@ -406,6 +409,7 @@ final class SenderSessionCoordinator {
         heartbeatRoundTripMilliseconds = nil
         estimatedDisplayLatencyMilliseconds = nil
         estimatedReceiverClockOffsetNanoseconds = nil
+        lastRecoveryKeyFrameRequestAt = nil
         stopHeartbeatTimers()
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
@@ -453,6 +457,17 @@ final class SenderSessionCoordinator {
             "scale=\(String(format: "%.2f", displayMetrics.backingScaleFactor)), " +
             "hiDPI=\(targetUsesHiDPI)"
         )
+    }
+
+    private func requestRecoveryKeyFrameIfNeeded() {
+        let now = Date()
+        if let lastRecoveryKeyFrameRequestAt,
+           now.timeIntervalSince(lastRecoveryKeyFrameRequestAt) < Double(NetworkProtocol.keyFrameIntervalSeconds) {
+            return
+        }
+
+        lastRecoveryKeyFrameRequestAt = now
+        encoderService.requestKeyFrame()
     }
 
     private func updateLatencyMetrics(
