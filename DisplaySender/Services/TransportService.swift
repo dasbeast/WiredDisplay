@@ -66,29 +66,35 @@ final class TransportService {
     }
 
     /// Sends an encoded video frame using the binary wire format (no JSON/base64 for payload data).
-    /// Thread-safe: serialization happens on the caller's thread; queue mutations are dispatched
-    /// to the internal transport queue so this can be called directly from the capture queue.
+    /// Thread-safe: the frame is serialized and queued entirely on the transport queue.
     func sendVideoFrame(_ encodedFrame: EncodedFrame) {
-        guard let binaryData = BinaryFrameWire.serialize(encodedFrame: encodedFrame) else {
-            print("[Transport] Failed to serialize frame \(encodedFrame.metadata.frameIndex)")
-            onError?(TransportServiceError.serializationFailed)
-            return
-        }
-
-        guard binaryData.count <= NetworkProtocol.maximumMessageBytes else {
-            print("[Transport] Frame \(encodedFrame.metadata.frameIndex) too large: \(binaryData.count) bytes (limit: \(NetworkProtocol.maximumMessageBytes))")
-            onError?(TransportServiceError.messageTooLarge)
-            return
-        }
-
-        if encodedFrame.metadata.frameIndex % 30 == 0 {
-            print("[Transport] Sending frame \(encodedFrame.metadata.frameIndex): codec=\(encodedFrame.codec), wireSize=\(binaryData.count) bytes, connected=\(isConnected)")
-        }
-
-        let framedData = wrapLengthPrefix(binaryData)
-        let outbound = OutboundFrame(data: framedData, isKeyFrame: encodedFrame.isKeyFrame)
         queue.async { [weak self] in
             guard let self else { return }
+
+            guard let framedData = BinaryFrameWire.serializeFramed(encodedFrame: encodedFrame) else {
+                print("[Transport] Failed to serialize frame \(encodedFrame.metadata.frameIndex)")
+                self.onError?(TransportServiceError.serializationFailed)
+                return
+            }
+
+            let wirePayloadBytes = framedData.count - 4
+            guard wirePayloadBytes <= NetworkProtocol.maximumMessageBytes else {
+                print(
+                    "[Transport] Frame \(encodedFrame.metadata.frameIndex) too large: " +
+                    "\(wirePayloadBytes) bytes (limit: \(NetworkProtocol.maximumMessageBytes))"
+                )
+                self.onError?(TransportServiceError.messageTooLarge)
+                return
+            }
+
+            if encodedFrame.metadata.frameIndex % 30 == 0 {
+                print(
+                    "[Transport] Sending frame \(encodedFrame.metadata.frameIndex): " +
+                    "codec=\(encodedFrame.codec), wireSize=\(wirePayloadBytes) bytes, connected=\(self.isConnected)"
+                )
+            }
+
+            let outbound = OutboundFrame(data: framedData, isKeyFrame: encodedFrame.isKeyFrame)
             self.enqueueOutboundFrame(outbound)
             self.flushPendingIfPossible()
         }

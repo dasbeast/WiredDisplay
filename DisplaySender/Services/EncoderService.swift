@@ -5,17 +5,28 @@ import VideoToolbox
 
 /// VideoToolbox HEVC (H.265) encoder for Sidecar-quality display streaming with raw fallback.
 final class EncoderService {
+    private struct EncodeRequest {
+        let forceKeyFrame: Bool
+        let targetBitrateKbps: Int
+    }
+
     private var compressionSession: VTCompressionSession?
     private var configuredWidth = 0
     private var configuredHeight = 0
+    private var submittedFrameCount: UInt64 = 0
     private var encodedFrameCount: UInt64 = 0
     private var currentTargetBitrateBps: Int = NetworkProtocol.targetVideoBitrateBps
     private let stateLock = NSLock()
     private var forceNextKeyFrame = false
+    private var framesInFlight = 0
+    private let maxFramesInFlight = 3
     /// Cached VPS/SPS/PPS from the last key frame so we can send them with every frame.
     private var lastVPS: Data?
     private var lastSPS: Data?
     private var lastPPS: Data?
+
+    var onEncodedFrame: ((EncodedFrame) -> Void)?
+    var onError: ((Error) -> Void)?
 
     deinit {
         invalidateSession()
@@ -27,30 +38,37 @@ final class EncoderService {
         stateLock.unlock()
     }
 
-    func encode(frame: CapturedFrame) -> EncodedFrame? {
+    @discardableResult
+    func encode(frame: CapturedFrame) -> Bool {
         if NetworkProtocol.preferRawFrameTransportForDiagnostics {
-            return makeRawEncodedFrame(from: frame)
+            onEncodedFrame?(makeRawEncodedFrame(from: frame))
+            return true
         }
 
         do {
-            let pixelBuffer: CVPixelBuffer
-            if let pb = frame.pixelBuffer {
-                // Make an owned copy before handing the buffer to the asynchronous encoder.
-                pixelBuffer = try makePixelBufferCopy(from: pb)
-            } else {
-                // Fallback: reconstruct pixel buffer from raw data (synthetic frames)
-                pixelBuffer = try makePixelBuffer(from: frame)
-            }
             try configureSessionIfNeeded(width: frame.metadata.width, height: frame.metadata.height)
-            if let encoded = try encodeWithVideoToolbox(pixelBuffer: pixelBuffer, frame: frame) {
-                print("[EncoderService] HEVC encoded frame \(frame.metadata.frameIndex): \(encoded.payload.count) bytes, keyFrame=\(encoded.isKeyFrame)")
-                return encoded
-            }
-            print("[EncoderService] Dropping frame \(frame.metadata.frameIndex): HEVC encode produced no output in time")
+            let request = try beginEncodeRequest()
+            let pixelBuffer = try makeInputPixelBuffer(from: frame)
+            try encodeWithVideoToolbox(
+                pixelBuffer: pixelBuffer,
+                frame: frame,
+                request: request
+            )
+            return true
+        } catch EncoderServiceError.tooManyFramesInFlight {
+            return false
         } catch {
-            print("[EncoderService] Dropping frame \(frame.metadata.frameIndex): HEVC encode failed: \(error)")
+            onError?(error)
+            return false
         }
-        return nil
+    }
+
+    private func makeInputPixelBuffer(from frame: CapturedFrame) throws -> CVPixelBuffer {
+        if let pixelBuffer = frame.pixelBuffer {
+            return pixelBuffer
+        }
+
+        return try makePixelBuffer(from: frame)
     }
 
     private func makeRawEncodedFrame(from frame: CapturedFrame) -> EncodedFrame {
@@ -96,6 +114,10 @@ final class EncoderService {
             return
         }
 
+        guard currentFramesInFlight() == 0 else {
+            throw EncoderServiceError.reconfigurationWhileEncoding
+        }
+
         invalidateSession()
 
         // Require hardware-accelerated HEVC encoder (Apple Silicon / T2 chip).
@@ -113,7 +135,7 @@ final class EncoderService {
             encoderSpecification: encoderSpec,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
-            outputCallback: encoderOutputCallback,
+            outputCallback: nil,
             refcon: nil,
             compressionSessionOut: &newSession
         )
@@ -197,7 +219,13 @@ final class EncoderService {
         compressionSession = nil
         configuredWidth = 0
         configuredHeight = 0
+        submittedFrameCount = 0
         encodedFrameCount = 0
+        currentTargetBitrateBps = NetworkProtocol.targetVideoBitrateBps
+        stateLock.lock()
+        framesInFlight = 0
+        forceNextKeyFrame = false
+        stateLock.unlock()
         lastVPS = nil
         lastSPS = nil
         lastPPS = nil
@@ -247,74 +275,42 @@ final class EncoderService {
         return pixelBuffer
     }
 
-    private func makePixelBufferCopy(from source: CVPixelBuffer) throws -> CVPixelBuffer {
-        let width = CVPixelBufferGetWidth(source)
-        let height = CVPixelBufferGetHeight(source)
-        let pixelFormat = CVPixelBufferGetPixelFormatType(source)
+    private func beginEncodeRequest() throws -> EncodeRequest {
+        stateLock.lock()
+        defer { stateLock.unlock() }
 
-        var pixelBuffer: CVPixelBuffer?
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferMetalCompatibilityKey: true,
-            kCVPixelBufferCGImageCompatibilityKey: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: true
-        ]
-
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            width,
-            height,
-            pixelFormat,
-            attrs as CFDictionary,
-            &pixelBuffer
-        )
-
-        guard status == kCVReturnSuccess, let pixelBuffer else {
-            throw EncoderServiceError.pixelBufferCreationFailed
+        guard framesInFlight < maxFramesInFlight else {
+            throw EncoderServiceError.tooManyFramesInFlight
         }
 
-        CVPixelBufferLockBaseAddress(source, .readOnly)
-        CVPixelBufferLockBaseAddress(pixelBuffer, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
-            CVPixelBufferUnlockBaseAddress(source, .readOnly)
-        }
+        let keyFrameInterval = UInt64(NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds)
+        let forceKeyFrame = forceNextKeyFrame
+            || submittedFrameCount == 0
+            || submittedFrameCount % keyFrameInterval == 0
 
-        guard let sourceBaseAddress = CVPixelBufferGetBaseAddress(source),
-              let destinationBaseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
-            throw EncoderServiceError.pixelBufferBaseAddressUnavailable
-        }
+        forceNextKeyFrame = false
+        submittedFrameCount += 1
+        framesInFlight += 1
 
-        let sourceBytesPerRow = CVPixelBufferGetBytesPerRow(source)
-        let destinationBytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        for row in 0..<height {
-            let sourceOffset = row * sourceBytesPerRow
-            let destinationOffset = row * destinationBytesPerRow
-            let sourcePointer = sourceBaseAddress.advanced(by: sourceOffset)
-            let destinationPointer = destinationBaseAddress.advanced(by: destinationOffset)
-            memcpy(destinationPointer, sourcePointer, min(sourceBytesPerRow, destinationBytesPerRow))
-        }
-
-        return pixelBuffer
-    }
-
-    private func encodeWithVideoToolbox(pixelBuffer: CVPixelBuffer, frame: CapturedFrame) throws -> EncodedFrame? {
-        guard let session = compressionSession else { return nil }
-
-        let callbackContext = EncoderCallbackContext(
-            frame: frame,
+        return EncodeRequest(
+            forceKeyFrame: forceKeyFrame,
             targetBitrateKbps: max(1, currentTargetBitrateBps / 1_000)
         )
-        let refcon = Unmanaged.passRetained(callbackContext).toOpaque()
+    }
+
+    private func encodeWithVideoToolbox(
+        pixelBuffer: CVPixelBuffer,
+        frame: CapturedFrame,
+        request: EncodeRequest
+    ) throws {
+        guard let session = compressionSession else { return }
 
         var flags = VTEncodeInfoFlags()
         let timescale = CMTimeScale(max(1, NetworkProtocol.targetFramesPerSecond))
         let pts = CMTime(value: Int64(frame.metadata.frameIndex), timescale: timescale)
         let duration = CMTime(value: 1, timescale: timescale)
 
-        // Force key frame on first frame and every keyFrameIntervalSeconds
-        let keyFrameInterval = UInt64(NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds)
-        let forceKeyFrame = consumeForcedKeyFrame() || encodedFrameCount == 0 || encodedFrameCount % keyFrameInterval == 0
-        let frameProps: CFDictionary? = forceKeyFrame ? [
+        let frameProps: CFDictionary? = request.forceKeyFrame ? [
             kVTEncodeFrameOptionKey_ForceKeyFrame: true as CFBoolean
         ] as CFDictionary : nil
 
@@ -324,67 +320,244 @@ final class EncoderService {
             presentationTimeStamp: pts,
             duration: duration,
             frameProperties: frameProps,
-            sourceFrameRefcon: refcon,
             infoFlagsOut: &flags
-        )
+        ) { [weak self] status, _, sampleBuffer in
+            self?.handleEncodedSample(
+                status: status,
+                sampleBuffer: sampleBuffer,
+                frame: frame,
+                targetBitrateKbps: request.targetBitrateKbps
+            )
+        }
 
         guard status == noErr else {
-            Unmanaged<EncoderCallbackContext>.fromOpaque(refcon).release()
+            finishEncodeRequestWithoutOutput()
             throw EncoderServiceError.encodeFailed(status)
         }
-
-        var waitResult = callbackContext.semaphore.wait(timeout: .now() + 2.0)
-        if waitResult == .timedOut {
-            let completeStatus = VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
-            if completeStatus != noErr {
-                print("[EncoderService] CompleteFrames failed at \(frame.metadata.frameIndex): \(completeStatus)")
-            }
-            waitResult = callbackContext.semaphore.wait(timeout: .now() + 0.5)
-        }
-        if waitResult == .timedOut {
-            throw EncoderServiceError.encodeTimedOut
-        }
-        if let callbackError = callbackContext.error {
-            throw callbackError
-        }
-
-        if var output = callbackContext.output {
-            encodedFrameCount += 1
-
-            // Cache VPS/SPS/PPS from key frames
-            if output.hevcVPS != nil { lastVPS = output.hevcVPS }
-            if output.h264SPS != nil { lastSPS = output.h264SPS }
-            if output.h264PPS != nil { lastPPS = output.h264PPS }
-
-            // Always attach cached VPS/SPS/PPS so the decoder can initialize at any point
-            if output.hevcVPS == nil || output.h264SPS == nil || output.h264PPS == nil {
-                output = EncodedFrame(
-                    metadata: output.metadata,
-                    codec: output.codec,
-                    payload: output.payload,
-                    isKeyFrame: output.isKeyFrame,
-                    sourceBytesPerRow: output.sourceBytesPerRow,
-                    sourcePixelFormat: output.sourcePixelFormat,
-                    targetBitrateKbps: output.targetBitrateKbps,
-                    targetFramesPerSecond: output.targetFramesPerSecond,
-                    h264SPS: lastSPS,
-                    h264PPS: lastPPS,
-                    hevcVPS: lastVPS
-                )
-            }
-
-            return output
-        }
-
-        return nil
     }
 
-    private func consumeForcedKeyFrame() -> Bool {
+    private func handleEncodedSample(
+        status: OSStatus,
+        sampleBuffer: CMSampleBuffer?,
+        frame: CapturedFrame,
+        targetBitrateKbps: Int
+    ) {
+        guard status == noErr else {
+            finishEncodeRequestWithoutOutput()
+            onError?(EncoderServiceError.encodeFailed(status))
+            return
+        }
+
+        guard let sampleBuffer, sampleBuffer.isValid else {
+            finishEncodeRequestWithoutOutput()
+            return
+        }
+
+        do {
+            let encodedFrame = try makeEncodedFrame(
+                from: sampleBuffer,
+                frame: frame,
+                targetBitrateKbps: targetBitrateKbps
+            )
+
+            let finalizedFrame = finishEncodeRequest(with: encodedFrame)
+            if finalizedFrame.metadata.frameIndex % 30 == 0 {
+                print(
+                    "[EncoderService] HEVC encoded frame \(finalizedFrame.metadata.frameIndex): " +
+                    "\(finalizedFrame.payload.count) bytes, keyFrame=\(finalizedFrame.isKeyFrame)"
+                )
+            }
+            onEncodedFrame?(finalizedFrame)
+        } catch {
+            finishEncodeRequestWithoutOutput()
+            onError?(error)
+        }
+    }
+
+    private func makeEncodedFrame(
+        from sampleBuffer: CMSampleBuffer,
+        frame: CapturedFrame,
+        targetBitrateKbps: Int
+    ) throws -> EncodedFrame {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            throw EncoderServiceError.missingBlockBuffer
+        }
+
+        let payloadLength = CMBlockBufferGetDataLength(blockBuffer)
+        guard payloadLength > 0 else {
+            throw EncoderServiceError.emptyEncodedPayload
+        }
+
+        let payload = try makeEncodedPayloadData(
+            sampleBuffer: sampleBuffer,
+            blockBuffer: blockBuffer,
+            payloadLength: payloadLength
+        )
+
+        let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]]
+        let firstAttachment = attachmentsArray?.first
+        let notSync = firstAttachment?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
+        let isKeyFrame = !notSync
+
+        // HEVC parameter sets: VPS (index 0), SPS (index 1), PPS (index 2)
+        // Extract from every frame — the hardware encoder may update parameter sets mid-stream
+        // (especially with EnableLowLatencyRateControl).
+        var vpsData: Data?
+        var spsData: Data?
+        var ppsData: Data?
+
+        if let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            var paramPointer: UnsafePointer<UInt8>?
+            var paramSize = 0
+            var paramCount = 0
+            var nalLength: Int32 = 0
+
+            // VPS — index 0
+            let vpsStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                formatDescription,
+                parameterSetIndex: 0,
+                parameterSetPointerOut: &paramPointer,
+                parameterSetSizeOut: &paramSize,
+                parameterSetCountOut: &paramCount,
+                nalUnitHeaderLengthOut: &nalLength
+            )
+            if vpsStatus == noErr, let ptr = paramPointer {
+                vpsData = Data(bytes: ptr, count: paramSize)
+            }
+
+            // SPS — index 1
+            let spsStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                formatDescription,
+                parameterSetIndex: 1,
+                parameterSetPointerOut: &paramPointer,
+                parameterSetSizeOut: &paramSize,
+                parameterSetCountOut: &paramCount,
+                nalUnitHeaderLengthOut: &nalLength
+            )
+            if spsStatus == noErr, let ptr = paramPointer {
+                spsData = Data(bytes: ptr, count: paramSize)
+            }
+
+            // PPS — index 2
+            let ppsStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                formatDescription,
+                parameterSetIndex: 2,
+                parameterSetPointerOut: &paramPointer,
+                parameterSetSizeOut: &paramSize,
+                parameterSetCountOut: &paramCount,
+                nalUnitHeaderLengthOut: &nalLength
+            )
+            if ppsStatus == noErr, let ptr = paramPointer {
+                ppsData = Data(bytes: ptr, count: paramSize)
+            }
+        }
+
+        return EncodedFrame(
+            metadata: frame.metadata,
+            codec: .hevcAVCC,
+            payload: payload,
+            isKeyFrame: isKeyFrame,
+            sourceBytesPerRow: frame.bytesPerRow,
+            sourcePixelFormat: frame.pixelFormat,
+            targetBitrateKbps: targetBitrateKbps,
+            targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
+            h264SPS: spsData,
+            h264PPS: ppsData,
+            hevcVPS: vpsData
+        )
+    }
+
+    private func makeEncodedPayloadData(
+        sampleBuffer: CMSampleBuffer,
+        blockBuffer: CMBlockBuffer,
+        payloadLength: Int
+    ) throws -> Data {
+        var lengthAtOffset = 0
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+
+        let pointerStatus = CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: &lengthAtOffset,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        )
+
+        if pointerStatus == kCMBlockBufferNoErr,
+           totalLength == payloadLength,
+           let dataPointer {
+            let retainedSampleBuffer = sampleBuffer
+            return Data(
+                bytesNoCopy: UnsafeMutableRawPointer(dataPointer),
+                count: payloadLength,
+                deallocator: .custom { _, _ in
+                    _ = retainedSampleBuffer
+                }
+            )
+        }
+
+        var payload = Data(count: payloadLength)
+        let copyStatus = payload.withUnsafeMutableBytes { destinationBytes -> OSStatus in
+            guard let destinationBase = destinationBytes.baseAddress else {
+                return kCMBlockBufferBadCustomBlockSourceErr
+            }
+            return CMBlockBufferCopyDataBytes(
+                blockBuffer,
+                atOffset: 0,
+                dataLength: payloadLength,
+                destination: destinationBase
+            )
+        }
+
+        guard copyStatus == kCMBlockBufferNoErr else {
+            throw EncoderServiceError.blockBufferReadFailed(copyStatus)
+        }
+
+        return payload
+    }
+
+    private func finishEncodeRequest(with encodedFrame: EncodedFrame) -> EncodedFrame {
         stateLock.lock()
         defer { stateLock.unlock() }
-        let shouldForce = forceNextKeyFrame
-        forceNextKeyFrame = false
-        return shouldForce
+
+        framesInFlight = max(0, framesInFlight - 1)
+        encodedFrameCount += 1
+
+        if encodedFrame.hevcVPS != nil { lastVPS = encodedFrame.hevcVPS }
+        if encodedFrame.h264SPS != nil { lastSPS = encodedFrame.h264SPS }
+        if encodedFrame.h264PPS != nil { lastPPS = encodedFrame.h264PPS }
+
+        if encodedFrame.hevcVPS != nil, encodedFrame.h264SPS != nil, encodedFrame.h264PPS != nil {
+            return encodedFrame
+        }
+
+        return EncodedFrame(
+            metadata: encodedFrame.metadata,
+            codec: encodedFrame.codec,
+            payload: encodedFrame.payload,
+            isKeyFrame: encodedFrame.isKeyFrame,
+            sourceBytesPerRow: encodedFrame.sourceBytesPerRow,
+            sourcePixelFormat: encodedFrame.sourcePixelFormat,
+            targetBitrateKbps: encodedFrame.targetBitrateKbps,
+            targetFramesPerSecond: encodedFrame.targetFramesPerSecond,
+            h264SPS: encodedFrame.h264SPS ?? lastSPS,
+            h264PPS: encodedFrame.h264PPS ?? lastPPS,
+            hevcVPS: encodedFrame.hevcVPS ?? lastVPS
+        )
+    }
+
+    private func finishEncodeRequestWithoutOutput() {
+        stateLock.lock()
+        framesInFlight = max(0, framesInFlight - 1)
+        stateLock.unlock()
+    }
+
+    private func currentFramesInFlight() -> Int {
+        stateLock.lock()
+        let currentCount = framesInFlight
+        stateLock.unlock()
+        return currentCount
     }
 
     @discardableResult
@@ -405,139 +578,6 @@ final class EncoderService {
     }
 }
 
-private final class EncoderCallbackContext {
-    let frame: CapturedFrame
-    let targetBitrateKbps: Int
-    let semaphore = DispatchSemaphore(value: 0)
-    var output: EncodedFrame?
-    var error: Error?
-
-    init(frame: CapturedFrame, targetBitrateKbps: Int) {
-        self.frame = frame
-        self.targetBitrateKbps = targetBitrateKbps
-    }
-}
-
-private let encoderOutputCallback: VTCompressionOutputCallback = { _, sourceFrameRefcon, status, _, sampleBuffer in
-    guard let sourceFrameRefcon else { return }
-    let context = Unmanaged<EncoderCallbackContext>.fromOpaque(sourceFrameRefcon).takeRetainedValue()
-
-    defer {
-        context.semaphore.signal()
-    }
-
-    guard status == noErr else {
-        context.error = EncoderServiceError.encodeFailed(status)
-        return
-    }
-
-    guard let sampleBuffer, sampleBuffer.isValid else {
-        context.error = EncoderServiceError.invalidSampleBuffer
-        return
-    }
-
-    guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
-        context.error = EncoderServiceError.missingBlockBuffer
-        return
-    }
-
-    let payloadLength = CMBlockBufferGetDataLength(blockBuffer)
-    guard payloadLength > 0 else {
-        context.error = EncoderServiceError.emptyEncodedPayload
-        return
-    }
-
-    var payload = Data(count: payloadLength)
-    let copyStatus = payload.withUnsafeMutableBytes { destinationBytes -> OSStatus in
-        guard let destinationBase = destinationBytes.baseAddress else {
-            return kCMBlockBufferBadCustomBlockSourceErr
-        }
-        return CMBlockBufferCopyDataBytes(
-            blockBuffer,
-            atOffset: 0,
-            dataLength: payloadLength,
-            destination: destinationBase
-        )
-    }
-
-    guard copyStatus == kCMBlockBufferNoErr else {
-        context.error = EncoderServiceError.blockBufferReadFailed(copyStatus)
-        return
-    }
-
-    let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]]
-    let firstAttachment = attachmentsArray?.first
-    let notSync = firstAttachment?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
-    let isKeyFrame = !notSync
-
-    // HEVC parameter sets: VPS (index 0), SPS (index 1), PPS (index 2)
-    // Extract from every frame — the hardware encoder may update parameter sets mid-stream
-    // (especially with EnableLowLatencyRateControl).
-    var vpsData: Data?
-    var spsData: Data?
-    var ppsData: Data?
-
-    if let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {
-        var paramPointer: UnsafePointer<UInt8>?
-        var paramSize = 0
-        var paramCount = 0
-        var nalLength: Int32 = 0
-
-        // VPS — index 0
-        let vpsStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-            formatDescription,
-            parameterSetIndex: 0,
-            parameterSetPointerOut: &paramPointer,
-            parameterSetSizeOut: &paramSize,
-            parameterSetCountOut: &paramCount,
-            nalUnitHeaderLengthOut: &nalLength
-        )
-        if vpsStatus == noErr, let ptr = paramPointer {
-            vpsData = Data(bytes: ptr, count: paramSize)
-        }
-
-        // SPS — index 1
-        let spsStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-            formatDescription,
-            parameterSetIndex: 1,
-            parameterSetPointerOut: &paramPointer,
-            parameterSetSizeOut: &paramSize,
-            parameterSetCountOut: &paramCount,
-            nalUnitHeaderLengthOut: &nalLength
-        )
-        if spsStatus == noErr, let ptr = paramPointer {
-            spsData = Data(bytes: ptr, count: paramSize)
-        }
-
-        // PPS — index 2
-        let ppsStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-            formatDescription,
-            parameterSetIndex: 2,
-            parameterSetPointerOut: &paramPointer,
-            parameterSetSizeOut: &paramSize,
-            parameterSetCountOut: &paramCount,
-            nalUnitHeaderLengthOut: &nalLength
-        )
-        if ppsStatus == noErr, let ptr = paramPointer {
-            ppsData = Data(bytes: ptr, count: paramSize)
-        }
-    }
-
-    context.output = EncodedFrame(
-        metadata: context.frame.metadata,
-        codec: .hevcAVCC,
-        payload: payload,
-        isKeyFrame: isKeyFrame,
-        sourceBytesPerRow: context.frame.bytesPerRow,
-        sourcePixelFormat: context.frame.pixelFormat,
-        targetBitrateKbps: context.targetBitrateKbps,
-        targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
-        h264SPS: spsData,
-        h264PPS: ppsData,
-        hevcVPS: vpsData
-    )
-}
-
 enum EncoderServiceError: Error {
     case compressionSessionCreationFailed(OSStatus)
     case pixelBufferCreationFailed
@@ -547,5 +587,6 @@ enum EncoderServiceError: Error {
     case missingBlockBuffer
     case blockBufferReadFailed(OSStatus)
     case emptyEncodedPayload
-    case encodeTimedOut
+    case tooManyFramesInFlight
+    case reconfigurationWhileEncoding
 }

@@ -58,9 +58,6 @@ final class SenderSessionCoordinator {
     private var outboundWindowStartNanoseconds: UInt64?
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
-    /// Lock used to gate frame encoding — only one frame encodes at a time.
-    /// Uses tryLock() from the capture queue; skips if an encode is already in progress.
-    private let encodeLock = NSLock()
     private let frameDispatchGate = SenderFrameDispatchGate()
 
     init(
@@ -75,23 +72,9 @@ final class SenderSessionCoordinator {
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
         let encoder = encoderService
-        let encodeLock = self.encodeLock
         let transportService = self.transportService
         let frameDispatchGate = self.frameDispatchGate
-        captureService.onCapturedFrame = { [weak self] frame in
-            guard self != nil else { return }
-            guard frameDispatchGate.isRunning else { return }
-
-            // Try to acquire the encode lock — skip frame if another encode is in flight
-            guard encodeLock.try() else { return }
-            defer { encodeLock.unlock() }
-
-            if frame.metadata.frameIndex % 30 == 0 {
-                print("[Sender] Captured frame \(frame.metadata.frameIndex): \(frame.metadata.width)x\(frame.metadata.height), hasPB=\(frame.pixelBuffer != nil)")
-            }
-
-            // Encode on the capture queue while the CVPixelBuffer is still valid
-            guard let encodedFrame = encoder.encode(frame: frame) else { return }
+        encoderService.onEncodedFrame = { [weak self] encodedFrame in
             guard frameDispatchGate.isRunning else { return }
 
             transportService.sendVideoFrame(encodedFrame)
@@ -99,6 +82,24 @@ final class SenderSessionCoordinator {
             Task { @MainActor [weak self] in
                 self?.recordOutboundFrame(encodedFrame)
             }
+        }
+
+        encoderService.onError = { [weak self] error in
+            guard let self else { return }
+            Task { @MainActor in
+                self.lastErrorMessage = error.localizedDescription
+            }
+        }
+
+        captureService.onCapturedFrame = { [weak self] frame in
+            guard self != nil else { return }
+            guard frameDispatchGate.isRunning else { return }
+
+            if frame.metadata.frameIndex % 30 == 0 {
+                print("[Sender] Captured frame \(frame.metadata.frameIndex): \(frame.metadata.width)x\(frame.metadata.height), hasPB=\(frame.pixelBuffer != nil)")
+            }
+
+            _ = encoder.encode(frame: frame)
         }
 
         captureService.onError = { [weak self] error in
@@ -272,8 +273,7 @@ final class SenderSessionCoordinator {
             bytesPerRow: bytesPerRow,
             pixelFormat: .bgra8
         )
-        guard let encodedFrame = encoderService.encode(frame: synthetic) else { return }
-        pushEncodedFrame(encodedFrame)
+        _ = encoderService.encode(frame: synthetic)
     }
 
     // MARK: - Frame Pipeline

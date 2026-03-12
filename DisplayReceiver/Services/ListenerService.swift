@@ -170,7 +170,7 @@ final class ListenerService {
             let totalLength = 4 + length
             guard receiveBuffer.count >= totalLength else { return }
 
-            let payload = receiveBuffer.subdata(in: 4..<totalLength)
+            let payload = receiveBuffer[4..<totalLength]
             receiveBuffer.removeSubrange(0..<totalLength)
 
             // Check if this is a binary video frame (starts with magic bytes)

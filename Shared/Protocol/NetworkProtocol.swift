@@ -149,6 +149,15 @@ enum BinaryFrameWire {
     /// Layout: [4-byte magic][1-byte reserved][4-byte header-length][header-JSON][VPS-bytes][SPS-bytes][PPS-bytes][payload-bytes]
     /// VPS is HEVC-only; for H.264 vpsLength is 0 and no VPS bytes are written.
     static func serialize(encodedFrame: EncodedFrame) -> Data? {
+        serialize(encodedFrame: encodedFrame, includeLengthPrefix: false)
+    }
+
+    /// Serialize an EncodedFrame into the on-wire format including the 4-byte length prefix.
+    static func serializeFramed(encodedFrame: EncodedFrame) -> Data? {
+        serialize(encodedFrame: encodedFrame, includeLengthPrefix: true)
+    }
+
+    private static func serialize(encodedFrame: EncodedFrame, includeLengthPrefix: Bool) -> Data? {
         let vpsData = encodedFrame.hevcVPS ?? Data()
         let spsData = encodedFrame.h264SPS ?? Data()
         let ppsData = encodedFrame.h264PPS ?? Data()
@@ -170,20 +179,25 @@ enum BinaryFrameWire {
 
         guard let headerJSON = try? JSONEncoder().encode(header) else { return nil }
 
-        // Total: 4 magic + 1 reserved + 4 header-length + headerJSON + vps + sps + pps + payload
-        let totalSize = 4 + 1 + 4 + headerJSON.count + vpsData.count + spsData.count + ppsData.count + encodedFrame.payload.count
+        let payloadSize = 4 + 1 + 4 + headerJSON.count + vpsData.count + spsData.count + ppsData.count + encodedFrame.payload.count
+        let totalSize = (includeLengthPrefix ? 4 : 0) + payloadSize
         var data = Data(capacity: totalSize)
+
+        if includeLengthPrefix {
+            var payloadLength = UInt32(payloadSize).bigEndian
+            withUnsafeBytes(of: &payloadLength) { data.append(contentsOf: $0) }
+        }
 
         // Magic
         var magic = NetworkProtocol.binaryMagic.bigEndian
-        data.append(Data(bytes: &magic, count: 4))
+        withUnsafeBytes(of: &magic) { data.append(contentsOf: $0) }
 
         // Reserved byte (for future use)
         data.append(0)
 
         // Header length
         var headerLen = UInt32(headerJSON.count).bigEndian
-        data.append(Data(bytes: &headerLen, count: 4))
+        withUnsafeBytes(of: &headerLen) { data.append(contentsOf: $0) }
 
         // Header JSON
         data.append(headerJSON)
@@ -206,6 +220,7 @@ enum BinaryFrameWire {
     /// Deserialize binary wire format back into components needed for decoding.
     static func deserialize(data: Data) -> (header: BinaryFrameHeader, vps: Data?, sps: Data?, pps: Data?, payload: Data)? {
         guard data.count >= 9 else { return nil }
+        let start = data.startIndex
 
         // Check magic
         let magic = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
@@ -214,25 +229,26 @@ enum BinaryFrameWire {
         // Skip reserved byte (index 4)
 
         // Header length
-        let headerLen = Int(Data(data[5..<9]).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-        let headerStart = 9
-        guard data.count >= headerStart + headerLen else { return nil }
+        let headerLengthRange = (start + 5)..<(start + 9)
+        let headerLen = Int(data[headerLengthRange].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+        let headerStart = start + 9
+        guard data.count >= 9 + headerLen else { return nil }
 
-        let headerData = Data(data[headerStart ..< headerStart + headerLen])
+        let headerData = data[headerStart ..< headerStart + headerLen]
         guard let header = try? JSONDecoder().decode(BinaryFrameHeader.self, from: headerData) else { return nil }
 
         let vpsLen = header.vpsLength ?? 0
         let afterHeader = headerStart + headerLen
-        let expectedTotal = afterHeader + vpsLen + header.spsLength + header.ppsLength + header.payloadLength
+        let expectedTotal = 9 + headerLen + vpsLen + header.spsLength + header.ppsLength + header.payloadLength
         guard data.count >= expectedTotal else { return nil }
 
-        let vps: Data? = vpsLen > 0 ? Data(data[afterHeader ..< afterHeader + vpsLen]) : nil
+        let vps: Data? = vpsLen > 0 ? data[afterHeader ..< afterHeader + vpsLen] : nil
         let afterVPS = afterHeader + vpsLen
-        let sps: Data? = header.spsLength > 0 ? Data(data[afterVPS ..< afterVPS + header.spsLength]) : nil
+        let sps: Data? = header.spsLength > 0 ? data[afterVPS ..< afterVPS + header.spsLength] : nil
         let afterSPS = afterVPS + header.spsLength
-        let pps: Data? = header.ppsLength > 0 ? Data(data[afterSPS ..< afterSPS + header.ppsLength]) : nil
+        let pps: Data? = header.ppsLength > 0 ? data[afterSPS ..< afterSPS + header.ppsLength] : nil
         let afterPPS = afterSPS + header.ppsLength
-        let payload = Data(data[afterPPS ..< afterPPS + header.payloadLength])
+        let payload = data[afterPPS ..< afterPPS + header.payloadLength]
 
         return (header, vps, sps, pps, payload)
     }

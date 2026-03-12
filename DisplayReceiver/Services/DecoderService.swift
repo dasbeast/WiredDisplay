@@ -278,31 +278,7 @@ final class DecoderService {
             throw DecoderServiceError.parameterSetUnavailable
         }
 
-        var blockBuffer: CMBlockBuffer?
-        var createStatus = CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault,
-            memoryBlock: nil,
-            blockLength: encodedFrame.payload.count,
-            blockAllocator: nil,
-            customBlockSource: nil,
-            offsetToData: 0,
-            dataLength: encodedFrame.payload.count,
-            flags: kCMBlockBufferAssureMemoryNowFlag,
-            blockBufferOut: &blockBuffer
-        )
-
-        guard createStatus == kCMBlockBufferNoErr, let blockBuffer else {
-            throw DecoderServiceError.blockBufferCreationFailed(createStatus)
-        }
-
-        createStatus = encodedFrame.payload.withUnsafeBytes { bytes in
-            guard let base = bytes.baseAddress else { return kCMBlockBufferBadCustomBlockSourceErr }
-            return CMBlockBufferReplaceDataBytes(with: base, blockBuffer: blockBuffer, offsetIntoDestination: 0, dataLength: encodedFrame.payload.count)
-        }
-
-        guard createStatus == kCMBlockBufferNoErr else {
-            throw DecoderServiceError.blockBufferWriteFailed(createStatus)
-        }
+        let blockBuffer = try makeBlockBufferBackedByPayload(encodedFrame.payload)
 
         let frameRate = max(1, encodedFrame.targetFramesPerSecond)
         let timescale = CMTimeScale(frameRate)
@@ -382,12 +358,66 @@ final class DecoderService {
 
         return context.pixelBuffer
     }
+
+    private func makeBlockBufferBackedByPayload(_ payload: Data) throws -> CMBlockBuffer {
+        let storage = DataBackedBlockBufferStorage(payload: payload)
+        let retainedStorage = Unmanaged.passRetained(storage)
+
+        var customBlockSource = CMBlockBufferCustomBlockSource()
+        customBlockSource.version = UInt32(kCMBlockBufferCustomBlockSourceVersion)
+        customBlockSource.AllocateBlock = nil
+        customBlockSource.FreeBlock = releaseDataBackedBlockBuffer
+        customBlockSource.refCon = retainedStorage.toOpaque()
+
+        var blockBuffer: CMBlockBuffer?
+        let createStatus = storage.payload.withUnsafeBytes { bytes -> OSStatus in
+            guard let baseAddress = bytes.baseAddress else {
+                return kCMBlockBufferBadPointerParameterErr
+            }
+
+            return CMBlockBufferCreateWithMemoryBlock(
+                allocator: kCFAllocatorDefault,
+                memoryBlock: UnsafeMutableRawPointer(mutating: baseAddress),
+                blockLength: payload.count,
+                blockAllocator: nil,
+                customBlockSource: &customBlockSource,
+                offsetToData: 0,
+                dataLength: payload.count,
+                flags: 0,
+                blockBufferOut: &blockBuffer
+            )
+        }
+
+        guard createStatus == kCMBlockBufferNoErr, let blockBuffer else {
+            retainedStorage.release()
+            throw DecoderServiceError.blockBufferCreationFailed(createStatus)
+        }
+
+        return blockBuffer
+    }
 }
 
 private final class DecoderCallbackContext {
     let semaphore = DispatchSemaphore(value: 0)
     var pixelBuffer: CVPixelBuffer?
     var error: Error?
+}
+
+private final class DataBackedBlockBufferStorage {
+    let payload: Data
+
+    init(payload: Data) {
+        self.payload = payload
+    }
+}
+
+private func releaseDataBackedBlockBuffer(
+    refCon: UnsafeMutableRawPointer?,
+    doomedMemoryBlock _: UnsafeMutableRawPointer,
+    sizeInBytes _: Int
+) {
+    guard let refCon else { return }
+    Unmanaged<DataBackedBlockBufferStorage>.fromOpaque(refCon).release()
 }
 
 private let decoderOutputCallback: VTDecompressionOutputCallback = { _, sourceFrameRefCon, status, _, imageBuffer, _, _ in
