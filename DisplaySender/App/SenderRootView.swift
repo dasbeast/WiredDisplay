@@ -24,6 +24,7 @@ struct SenderRootView: View {
 
     @State private var endpointSummary = "-"
     @State private var negotiatedResolutionText = "-"
+    @State private var videoTransportText = "TCP"
     @State private var wiredPathSummary = "unknown"
     @State private var wiredWarning = ""
     @State private var interfaceLines: [String] = []
@@ -53,10 +54,15 @@ struct SenderRootView: View {
                     }
                     .keyboardShortcut(.cancelAction)
                 } else {
-                    Button("Connect & Stream") {
-                        connect()
+                    Button("Connect & Stream TCP") {
+                        connect(using: .tcp)
                     }
                     .keyboardShortcut(.defaultAction)
+                    .disabled(receiverHostInput.isEmpty)
+
+                    Button("Connect & Stream UDP") {
+                        connect(using: .udp)
+                    }
                     .disabled(receiverHostInput.isEmpty)
                 }
             }
@@ -79,6 +85,7 @@ struct SenderRootView: View {
             GroupBox("Diagnostics") {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Configured Endpoint: \(endpointSummary)")
+                    Text("Video Transport: \(videoTransportText)")
                     Text("Negotiated Display: \(negotiatedResolutionText)")
                     Text("Wired Path: \(wiredPathSummary)")
                     if !wiredWarning.isEmpty {
@@ -109,7 +116,7 @@ struct SenderRootView: View {
         }
     }
 
-    private func connect() {
+    private func connect(using videoTransportMode: NetworkProtocol.VideoTransportMode) {
         guard !receiverHostInput.isEmpty else { return }
         guard let port = UInt16(portInput) else { return }
 
@@ -119,7 +126,8 @@ struct SenderRootView: View {
 
         coordinator.connect(
             receiverHost: receiverHostInput,
-            port: port
+            port: port,
+            videoTransportMode: videoTransportMode
         )
         refreshFromCoordinator()
     }
@@ -137,6 +145,7 @@ struct SenderRootView: View {
         estimatedDisplayLatencyText = formatRate(coordinator.estimatedDisplayLatencyMilliseconds, unit: "ms")
 
         endpointSummary = coordinator.configuredEndpointSummary
+        videoTransportText = coordinator.negotiatedVideoTransportMode.rawValue.uppercased()
         negotiatedResolutionText = "\(coordinator.targetWidth)x\(coordinator.targetHeight)"
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         wiredWarning = coordinator.wiredPathAvailable ? "" : "No wired route currently available. Verify Thunderbolt Bridge and cable link."

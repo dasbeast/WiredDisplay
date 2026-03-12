@@ -100,10 +100,16 @@ final class TransportService {
         }
     }
 
-    func sendHello(senderName: String, targetWidth: Int, targetHeight: Int) {
+    func sendHello(
+        senderName: String,
+        preferredVideoTransport: NetworkProtocol.VideoTransportMode,
+        targetWidth: Int,
+        targetHeight: Int
+    ) {
         let payload = HelloPayload(
             senderName: senderName,
             requestedProtocolVersion: NetworkProtocol.protocolVersion,
+            preferredVideoTransport: preferredVideoTransport,
             targetWidth: targetWidth,
             targetHeight: targetHeight
         )
@@ -286,4 +292,82 @@ enum TransportServiceError: Error {
     case notConnected
     case messageTooLarge
     case serializationFailed
+}
+
+/// UDP transport for low-latency encoded video delivery.
+final class VideoDatagramTransportService {
+    private let queue = DispatchQueue(label: "wireddisplay.sender.videoDatagram")
+
+    private(set) var isConnected = false
+
+    private var connection: NWConnection?
+
+    var onStateChange: ((Bool) -> Void)?
+    var onError: ((Error) -> Void)?
+
+    func connect(host: String, port: UInt16 = NetworkProtocol.defaultPort) {
+        disconnect()
+
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            onError?(TransportServiceError.invalidEndpoint)
+            return
+        }
+
+        let parameters = NetworkDiagnostics.lowLatencyUDPParameters()
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
+        self.connection = connection
+
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.isConnected = true
+                self.onStateChange?(true)
+            case .failed(let error):
+                self.isConnected = false
+                self.onStateChange?(false)
+                self.onError?(error)
+            case .cancelled:
+                self.isConnected = false
+                self.onStateChange?(false)
+            default:
+                break
+            }
+        }
+
+        connection.start(queue: queue)
+    }
+
+    func disconnect() {
+        connection?.cancel()
+        connection = nil
+        isConnected = false
+        onStateChange?(false)
+    }
+
+    func sendVideoFrame(_ encodedFrame: EncodedFrame) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.isConnected, let connection = self.connection else { return }
+            guard let datagrams = VideoDatagramWire.serialize(encodedFrame: encodedFrame) else {
+                self.onError?(TransportServiceError.serializationFailed)
+                return
+            }
+
+            if encodedFrame.metadata.frameIndex % 30 == 0 {
+                print(
+                    "[VideoDatagramTransport] Sending frame \(encodedFrame.metadata.frameIndex): " +
+                    "codec=\(encodedFrame.codec), datagrams=\(datagrams.count)"
+                )
+            }
+
+            for datagram in datagrams {
+                connection.send(content: datagram, completion: .contentProcessed { [weak self] error in
+                    if let error {
+                        self?.onError?(error)
+                    }
+                })
+            }
+        }
+    }
 }

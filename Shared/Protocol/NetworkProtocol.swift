@@ -14,6 +14,8 @@ enum NetworkProtocol {
     static let targetFramesPerSecond: Int = 60
     static let keyFrameIntervalSeconds: Int = 1
     static let captureFramesPerSecond: Int = 60
+    static let videoDatagramChunkPayloadBytes: Int = 1200
+    static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 50_000_000
     // HEVC (H.265) encoder target: ~300 Mbps for near-lossless retina quality over Thunderbolt.
     // Thunderbolt 3 provides 40,000 Mbps — we use at most 5% of available bandwidth.
     static let targetVideoBitrateBps: Int = 300_000_000
@@ -44,12 +46,18 @@ enum NetworkProtocol {
     // Layout: [4-byte magic][1-byte type][4-byte header-length][header-JSON][payload-bytes]
     // This avoids base64-encoding binary data inside JSON envelopes.
     static let binaryMagic: UInt32 = 0x57445646 // "WDVF" – WiredDisplay Video Frame
+    static let videoDatagramMagic: UInt32 = 0x57445644 // "WDVD" – WiredDisplay Video Datagram
 
     enum MessageType: UInt8, Codable, Sendable {
         case hello = 1
         case helloAck = 2
         case heartbeat = 3
         case videoFrame = 4
+    }
+
+    enum VideoTransportMode: String, Codable, Sendable {
+        case tcp
+        case udp
     }
 
     enum ProtocolError: Error, Sendable {
@@ -72,6 +80,28 @@ enum NetworkProtocol {
 
         return data[start..<end].reduce(UInt32(0)) { partial, byte in
             (partial << 8) | UInt32(byte)
+        }
+    }
+
+    static func readUInt16BigEndian(from data: Data, atOffset offset: Int) -> UInt16? {
+        guard offset >= 0, offset + 2 <= data.count else { return nil }
+
+        let start = data.index(data.startIndex, offsetBy: offset)
+        let end = data.index(start, offsetBy: 2)
+
+        return data[start..<end].reduce(UInt16(0)) { partial, byte in
+            (partial << 8) | UInt16(byte)
+        }
+    }
+
+    static func readUInt64BigEndian(from data: Data, atOffset offset: Int) -> UInt64? {
+        guard offset >= 0, offset + 8 <= data.count else { return nil }
+
+        let start = data.index(data.startIndex, offsetBy: offset)
+        let end = data.index(start, offsetBy: 8)
+
+        return data[start..<end].reduce(UInt64(0)) { partial, byte in
+            (partial << 8) | UInt64(byte)
         }
     }
 }
@@ -119,6 +149,7 @@ struct NetworkEnvelope: Codable, Sendable {
 struct HelloPayload: Codable, Sendable {
     let senderName: String
     let requestedProtocolVersion: UInt16
+    let preferredVideoTransport: NetworkProtocol.VideoTransportMode?
     /// Legacy fallback logical size used when the receiver cannot report its display mode.
     let targetWidth: Int
     let targetHeight: Int
@@ -141,6 +172,7 @@ struct HelloAckPayload: Codable, Sendable {
     let receiverName: String
     let reason: String?
     let displayMetrics: ReceiverDisplayMetrics?
+    let negotiatedVideoTransport: NetworkProtocol.VideoTransportMode?
 }
 
 /// Bidirectional keepalive payload to detect stale links.
@@ -287,5 +319,78 @@ enum BinaryFrameWire {
         let payload = data[afterPPS ..< afterPPS + header.payloadLength]
 
         return (header, vps, sps, pps, payload)
+    }
+}
+
+/// Frame-level UDP chunking for binary video frames.
+enum VideoDatagramWire {
+    private static let headerBytes = 16
+
+    static func serialize(encodedFrame: EncodedFrame) -> [Data]? {
+        guard let frameData = BinaryFrameWire.serialize(encodedFrame: encodedFrame) else {
+            return nil
+        }
+
+        let maxPayloadBytes = max(1, NetworkProtocol.videoDatagramChunkPayloadBytes)
+        let chunkCount = Int(ceil(Double(frameData.count) / Double(maxPayloadBytes)))
+        guard chunkCount > 0, chunkCount <= Int(UInt16.max) else {
+            return nil
+        }
+
+        var datagrams: [Data] = []
+        datagrams.reserveCapacity(chunkCount)
+
+        for chunkIndex in 0..<chunkCount {
+            let startOffset = chunkIndex * maxPayloadBytes
+            let endOffset = min(frameData.count, startOffset + maxPayloadBytes)
+            let payload = frameData.subdata(in: startOffset..<endOffset)
+
+            var datagram = Data(capacity: headerBytes + payload.count)
+            appendUInt32BigEndian(NetworkProtocol.videoDatagramMagic, to: &datagram)
+            appendUInt64BigEndian(encodedFrame.metadata.frameIndex, to: &datagram)
+            appendUInt16BigEndian(UInt16(chunkCount), to: &datagram)
+            appendUInt16BigEndian(UInt16(chunkIndex), to: &datagram)
+            datagram.append(payload)
+            datagrams.append(datagram)
+        }
+
+        return datagrams
+    }
+
+    static func deserialize(datagram: Data) -> (frameIndex: UInt64, chunkCount: Int, chunkIndex: Int, payload: Data)? {
+        guard datagram.count >= headerBytes else { return nil }
+        guard NetworkProtocol.readUInt32BigEndian(from: datagram, atOffset: 0) == NetworkProtocol.videoDatagramMagic else {
+            return nil
+        }
+        guard let frameIndex = NetworkProtocol.readUInt64BigEndian(from: datagram, atOffset: 4),
+              let chunkCount = NetworkProtocol.readUInt16BigEndian(from: datagram, atOffset: 12).map(Int.init),
+              let chunkIndex = NetworkProtocol.readUInt16BigEndian(from: datagram, atOffset: 14).map(Int.init),
+              chunkCount > 0,
+              chunkIndex >= 0,
+              chunkIndex < chunkCount else {
+            return nil
+        }
+
+        return (
+            frameIndex: frameIndex,
+            chunkCount: chunkCount,
+            chunkIndex: chunkIndex,
+            payload: datagram.subdata(in: headerBytes..<datagram.count)
+        )
+    }
+
+    private static func appendUInt16BigEndian(_ value: UInt16, to data: inout Data) {
+        var bigEndianValue = value.bigEndian
+        withUnsafeBytes(of: &bigEndianValue) { data.append(contentsOf: $0) }
+    }
+
+    private static func appendUInt32BigEndian(_ value: UInt32, to data: inout Data) {
+        var bigEndianValue = value.bigEndian
+        withUnsafeBytes(of: &bigEndianValue) { data.append(contentsOf: $0) }
+    }
+
+    private static func appendUInt64BigEndian(_ value: UInt64, to data: inout Data) {
+        var bigEndianValue = value.bigEndian
+        withUnsafeBytes(of: &bigEndianValue) { data.append(contentsOf: $0) }
     }
 }

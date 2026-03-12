@@ -70,13 +70,19 @@ final class ListenerService {
         onStateChange?(false)
     }
 
-    func sendHelloAck(accepted: Bool, reason: String?, displayMetrics: ReceiverDisplayMetrics? = nil) {
+    func sendHelloAck(
+        accepted: Bool,
+        reason: String?,
+        displayMetrics: ReceiverDisplayMetrics? = nil,
+        negotiatedVideoTransport: NetworkProtocol.VideoTransportMode = .tcp
+    ) {
         let payload = HelloAckPayload(
             accepted: accepted,
             acceptedProtocolVersion: NetworkProtocol.protocolVersion,
             receiverName: Host.current().localizedName ?? "DisplayReceiver",
             reason: reason,
-            displayMetrics: displayMetrics
+            displayMetrics: displayMetrics,
+            negotiatedVideoTransport: negotiatedVideoTransport
         )
 
         do {
@@ -233,4 +239,211 @@ enum ListenerServiceError: Error {
     case invalidEndpoint
     case noActiveConnection
     case messageTooLarge
+}
+
+/// UDP listener for low-latency binary video datagrams.
+final class VideoDatagramListenerService {
+    private let queue = DispatchQueue(label: "wireddisplay.receiver.videoDatagram")
+    private let reassembler = VideoDatagramReassembler()
+
+    private(set) var isListening = false
+    private(set) var listeningPort: UInt16 = NetworkProtocol.defaultPort
+
+    private var listener: NWListener?
+    private var activeConnection: NWConnection?
+
+    var onStateChange: ((Bool) -> Void)?
+    var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data?, Data) -> Void)?
+    var onError: ((Error) -> Void)?
+
+    func startListening(port: UInt16 = NetworkProtocol.defaultPort) {
+        stopListening()
+
+        do {
+            let nwPort = try NWEndpoint.Port(rawValue: port).unwrapOrThrow()
+            let parameters = NetworkDiagnostics.lowLatencyUDPParameters()
+
+            let listener = try NWListener(using: parameters, on: nwPort)
+            self.listener = listener
+            self.listeningPort = port
+
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.isListening = true
+                    self.onStateChange?(true)
+                case .failed(let error):
+                    self.isListening = false
+                    self.onStateChange?(false)
+                    self.onError?(error)
+                case .cancelled:
+                    self.isListening = false
+                    self.onStateChange?(false)
+                default:
+                    break
+                }
+            }
+
+            listener.newConnectionHandler = { [weak self] connection in
+                self?.activate(connection: connection)
+            }
+
+            listener.start(queue: queue)
+        } catch {
+            isListening = false
+            onStateChange?(false)
+            onError?(error)
+        }
+    }
+
+    func stopListening() {
+        activeConnection?.cancel()
+        activeConnection = nil
+        listener?.cancel()
+        listener = nil
+        reassembler.reset()
+        isListening = false
+        onStateChange?(false)
+    }
+
+    private func activate(connection: NWConnection) {
+        activeConnection?.cancel()
+        activeConnection = connection
+        reassembler.reset()
+
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .failed(let error) = state {
+                self.onError?(error)
+            }
+        }
+
+        connection.start(queue: queue)
+        receiveNextMessage(on: connection)
+    }
+
+    private func receiveNextMessage(on connection: NWConnection) {
+        connection.receiveMessage { [weak self] content, _, _, error in
+            guard let self else { return }
+
+            if let error {
+                self.onError?(error)
+                return
+            }
+
+            if let content, !content.isEmpty {
+                self.handle(datagram: content)
+            }
+
+            self.receiveNextMessage(on: connection)
+        }
+    }
+
+    private func handle(datagram: Data) {
+        guard let chunk = VideoDatagramWire.deserialize(datagram: datagram) else {
+            return
+        }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard let frameData = reassembler.insert(
+            frameIndex: chunk.frameIndex,
+            chunkIndex: chunk.chunkIndex,
+            chunkCount: chunk.chunkCount,
+            payload: chunk.payload,
+            arrivalNanoseconds: now
+        ) else {
+            return
+        }
+
+        guard let result = BinaryFrameWire.deserialize(data: frameData) else {
+            return
+        }
+
+        onBinaryVideoFrame?(result.header, result.vps, result.sps, result.pps, result.payload)
+    }
+}
+
+private final class VideoDatagramReassembler {
+    private struct Assembly {
+        let firstArrivalNanoseconds: UInt64
+        let chunkCount: Int
+        var chunks: [Data?]
+        var receivedChunkCount: Int
+    }
+
+    private let lock = NSLock()
+    private var assemblies: [UInt64: Assembly] = [:]
+    private var newestFrameIndex: UInt64 = 0
+
+    func reset() {
+        lock.lock()
+        assemblies.removeAll(keepingCapacity: false)
+        newestFrameIndex = 0
+        lock.unlock()
+    }
+
+    func insert(
+        frameIndex: UInt64,
+        chunkIndex: Int,
+        chunkCount: Int,
+        payload: Data,
+        arrivalNanoseconds: UInt64
+    ) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        pruneExpiredAssemblies(now: arrivalNanoseconds)
+
+        if frameIndex > newestFrameIndex {
+            newestFrameIndex = frameIndex
+            assemblies = assemblies.filter { $0.key >= frameIndex }
+        }
+
+        var assembly = assemblies[frameIndex] ?? Assembly(
+            firstArrivalNanoseconds: arrivalNanoseconds,
+            chunkCount: chunkCount,
+            chunks: Array(repeating: nil, count: chunkCount),
+            receivedChunkCount: 0
+        )
+
+        if assembly.chunkCount != chunkCount {
+            assembly = Assembly(
+                firstArrivalNanoseconds: arrivalNanoseconds,
+                chunkCount: chunkCount,
+                chunks: Array(repeating: nil, count: chunkCount),
+                receivedChunkCount: 0
+            )
+        }
+
+        if assembly.chunks[chunkIndex] == nil {
+            assembly.chunks[chunkIndex] = payload
+            assembly.receivedChunkCount += 1
+        }
+
+        assemblies[frameIndex] = assembly
+
+        guard assembly.receivedChunkCount == chunkCount else {
+            return nil
+        }
+
+        assemblies.removeValue(forKey: frameIndex)
+
+        let totalBytes = assembly.chunks.reduce(0) { partial, chunk in
+            partial + (chunk?.count ?? 0)
+        }
+        var frameData = Data(capacity: totalBytes)
+        for chunk in assembly.chunks {
+            guard let chunk else { return nil }
+            frameData.append(chunk)
+        }
+        return frameData
+    }
+
+    private func pruneExpiredAssemblies(now: UInt64) {
+        assemblies = assemblies.filter { _, assembly in
+            let age = now >= assembly.firstArrivalNanoseconds ? now - assembly.firstArrivalNanoseconds : 0
+            return age <= NetworkProtocol.videoDatagramAssemblyTimeoutNanoseconds
+        }
+    }
 }

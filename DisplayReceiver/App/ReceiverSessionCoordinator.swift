@@ -12,6 +12,7 @@ final class ReceiverSessionCoordinator {
     }
 
     private let listenerService: ListenerService
+    private let videoDatagramListenerService: VideoDatagramListenerService
     private let decoderService: DecoderService
     private let renderService: RenderService
     private let frameDecodePipeline: ReceiverFrameDecodePipeline
@@ -46,10 +47,12 @@ final class ReceiverSessionCoordinator {
 
     init(
         listenerService: ListenerService = ListenerService(),
+        videoDatagramListenerService: VideoDatagramListenerService = VideoDatagramListenerService(),
         decoderService: DecoderService = DecoderService(),
         renderService: RenderService = RenderService()
     ) {
         self.listenerService = listenerService
+        self.videoDatagramListenerService = videoDatagramListenerService
         self.decoderService = decoderService
         self.renderService = renderService
         self.frameDecodePipeline = ReceiverFrameDecodePipeline(
@@ -122,11 +125,30 @@ final class ReceiverSessionCoordinator {
             )
         }
 
+        videoDatagramListenerService.onBinaryVideoFrame = { [weak self] header, vps, sps, pps, payload in
+            guard self != nil else { return }
+            frameDecodePipeline.enqueueBinaryVideoFrame(
+                header: header,
+                vps: vps,
+                sps: sps,
+                pps: pps,
+                payload: payload,
+                arrivalNanoseconds: DispatchTime.now().uptimeNanoseconds
+            )
+        }
+
         listenerService.onError = { [weak self] error in
             guard let self else { return }
             Task { @MainActor in
                 self.lastErrorMessage = error.localizedDescription
                 self.state = .failed(error.localizedDescription)
+            }
+        }
+
+        videoDatagramListenerService.onError = { [weak self] error in
+            guard let self else { return }
+            Task { @MainActor in
+                self.lastErrorMessage = "UDP video listener: \(error.localizedDescription)"
             }
         }
     }
@@ -163,12 +185,14 @@ final class ReceiverSessionCoordinator {
 
         renderService.prepareRenderer()
         listenerService.startListening(port: port)
+        videoDatagramListenerService.startListening(port: port)
     }
 
     /// Stops listener and returns receiver pipeline to idle state.
     func stopListening() {
         frameDecodePipeline.reset()
         listenerService.stopListening()
+        videoDatagramListenerService.stopListening()
         state = .idle
     }
 
@@ -179,10 +203,18 @@ final class ReceiverSessionCoordinator {
                 let hello = try envelope.decodePayload(as: HelloPayload.self)
                 peerName = hello.senderName
                 if hello.requestedProtocolVersion == NetworkProtocol.protocolVersion {
+                    let requestedTransport = hello.preferredVideoTransport ?? .tcp
+                    let negotiatedTransport: NetworkProtocol.VideoTransportMode
+                    if requestedTransport == .udp && videoDatagramListenerService.isListening {
+                        negotiatedTransport = .udp
+                    } else {
+                        negotiatedTransport = .tcp
+                    }
                     listenerService.sendHelloAck(
                         accepted: true,
                         reason: nil,
-                        displayMetrics: currentDisplayMetrics()
+                        displayMetrics: currentDisplayMetrics(),
+                        negotiatedVideoTransport: negotiatedTransport
                     )
                     state = .running
                 } else {

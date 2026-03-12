@@ -78,6 +78,15 @@ enum NetworkDiagnostics {
         parameters.allowLocalEndpointReuse = true
         return parameters
     }
+
+    /// Builds UDP parameters tuned for interactive video delivery.
+    static func lowLatencyUDPParameters() -> NWParameters {
+        let udpOptions = NWProtocolUDP.Options()
+        let parameters = NWParameters(dtls: nil, udp: udpOptions)
+        parameters.includePeerToPeer = false
+        parameters.allowLocalEndpointReuse = true
+        return parameters
+    }
 }
 
 /// Tracks whether a wired path (Ethernet or Thunderbolt Bridge) is currently available.

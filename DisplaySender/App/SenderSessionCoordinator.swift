@@ -15,6 +15,7 @@ final class SenderSessionCoordinator {
     private let captureService: CaptureService
     private let encoderService: EncoderService
     private let transportService: TransportService
+    private let videoDatagramTransportService: VideoDatagramTransportService
     private let virtualDisplayService = VirtualDisplayService()
     private let wiredPathMonitor = WiredPathStatusMonitor()
 
@@ -34,6 +35,8 @@ final class SenderSessionCoordinator {
     private(set) var sentMegabitsPerSecond: Double? { didSet { onChange?() } }
     private(set) var heartbeatRoundTripMilliseconds: Double? { didSet { onChange?() } }
     private(set) var estimatedDisplayLatencyMilliseconds: Double? { didSet { onChange?() } }
+    private(set) var requestedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp { didSet { onChange?() } }
+    private(set) var negotiatedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp { didSet { onChange?() } }
 
     private(set) var configuredEndpointSummary: String = "-" { didSet { onChange?() } }
     private(set) var wiredPathAvailable = false { didSet { onChange?() } }
@@ -68,24 +71,24 @@ final class SenderSessionCoordinator {
     init(
         captureService: CaptureService = CaptureService(),
         encoderService: EncoderService = EncoderService(),
-        transportService: TransportService = TransportService()
+        transportService: TransportService = TransportService(),
+        videoDatagramTransportService: VideoDatagramTransportService = VideoDatagramTransportService()
     ) {
         self.captureService = captureService
         self.encoderService = encoderService
         self.transportService = transportService
+        self.videoDatagramTransportService = videoDatagramTransportService
 
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
-        let encoder = encoderService
-        let transportService = self.transportService
+        let encoder = self.encoderService
         let frameDispatchGate = self.frameDispatchGate
         encoderService.onEncodedFrame = { [weak self] encodedFrame in
+            guard let self else { return }
             guard frameDispatchGate.isRunning else { return }
 
-            transportService.sendVideoFrame(encodedFrame)
-
             Task { @MainActor [weak self] in
-                self?.recordOutboundFrame(encodedFrame)
+                self?.pushEncodedFrame(encodedFrame)
             }
         }
 
@@ -168,10 +171,22 @@ final class SenderSessionCoordinator {
         transportService.onDroppedFrameCountChange = { [weak self] count in
             guard let self else { return }
             Task { @MainActor in
-                if count > self.droppedOutboundFrameCount {
+                if self.negotiatedVideoTransportMode == .tcp, count > self.droppedOutboundFrameCount {
                     self.requestRecoveryKeyFrameIfNeeded()
                 }
                 self.droppedOutboundFrameCount = count
+            }
+        }
+
+        videoDatagramTransportService.onError = { [weak self] error in
+            guard let self else { return }
+            Task { @MainActor in
+                self.lastErrorMessage = "UDP video transport: \(error.localizedDescription)"
+                if self.shouldMaintainConnection,
+                   self.negotiatedVideoTransportMode == .udp,
+                   (self.state == .connected || self.state == .running) {
+                    self.scheduleReconnect(reason: error.localizedDescription)
+                }
             }
         }
     }
@@ -185,6 +200,7 @@ final class SenderSessionCoordinator {
     func connect(
         receiverHost: String,
         port: UInt16 = NetworkProtocol.defaultPort,
+        videoTransportMode: NetworkProtocol.VideoTransportMode = .tcp,
         targetWidth: Int = 2560,
         targetHeight: Int = 1440
     ) {
@@ -195,6 +211,8 @@ final class SenderSessionCoordinator {
         self.receiverHost = receiverHost
         self.targetWidth = targetWidth
         self.targetHeight = targetHeight
+        requestedVideoTransportMode = videoTransportMode
+        negotiatedVideoTransportMode = videoTransportMode
         sentFrameCount = 0
         droppedOutboundFrameCount = 0
         lastErrorMessage = nil
@@ -208,11 +226,16 @@ final class SenderSessionCoordinator {
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
         targetUsesHiDPI = true
-        configuredEndpointSummary = "\(receiverHost):\(port)"
+        configuredEndpointSummary = "\(receiverHost):\(port) [\(videoTransportMode.rawValue.uppercased())]"
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
         state = .connecting
         captureService.stopCapture()
+        if videoTransportMode == .udp {
+            videoDatagramTransportService.connect(host: receiverHost, port: port)
+        } else {
+            videoDatagramTransportService.disconnect()
+        }
         transportService.connect(host: receiverHost, port: port)
     }
 
@@ -258,6 +281,7 @@ final class SenderSessionCoordinator {
         stopHeartbeatTimers()
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
+        videoDatagramTransportService.disconnect()
         transportService.disconnect()
         state = .idle
         sentFramesPerSecond = nil
@@ -295,7 +319,12 @@ final class SenderSessionCoordinator {
     // MARK: - Frame Pipeline
 
     private func pushEncodedFrame(_ encodedFrame: EncodedFrame) {
-        transportService.sendVideoFrame(encodedFrame)
+        switch negotiatedVideoTransportMode {
+        case .tcp:
+            transportService.sendVideoFrame(encodedFrame)
+        case .udp:
+            videoDatagramTransportService.sendVideoFrame(encodedFrame)
+        }
         recordOutboundFrame(encodedFrame)
     }
 
@@ -329,6 +358,7 @@ final class SenderSessionCoordinator {
     private func sendHello() {
         transportService.sendHello(
             senderName: Host.current().localizedName ?? "DisplaySender",
+            preferredVideoTransport: requestedVideoTransportMode,
             targetWidth: targetWidth,
             targetHeight: targetHeight
         )
@@ -341,6 +371,7 @@ final class SenderSessionCoordinator {
                 let ack = try envelope.decodePayload(as: HelloAckPayload.self)
                 if ack.accepted {
                     applyReceiverDisplayMetrics(ack.displayMetrics)
+                    applyNegotiatedVideoTransport(ack.negotiatedVideoTransport ?? requestedVideoTransportMode)
                     state = .connected
                     lastInboundHeartbeatAt = Date()
                     startHeartbeatTimers()
@@ -413,6 +444,7 @@ final class SenderSessionCoordinator {
         stopHeartbeatTimers()
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
+        videoDatagramTransportService.disconnect()
         transportService.disconnect()
 
         guard shouldMaintainConnection, let host = desiredHost else { return }
@@ -420,6 +452,9 @@ final class SenderSessionCoordinator {
         Timer.scheduledTimer(withTimeInterval: NetworkProtocol.reconnectDelaySeconds, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.shouldMaintainConnection else { return }
+                if self.requestedVideoTransportMode == .udp {
+                    self.videoDatagramTransportService.connect(host: host, port: self.desiredPort)
+                }
                 self.transportService.connect(host: host, port: self.desiredPort)
             }
         }
@@ -457,6 +492,17 @@ final class SenderSessionCoordinator {
             "scale=\(String(format: "%.2f", displayMetrics.backingScaleFactor)), " +
             "hiDPI=\(targetUsesHiDPI)"
         )
+    }
+
+    private func applyNegotiatedVideoTransport(_ videoTransportMode: NetworkProtocol.VideoTransportMode) {
+        negotiatedVideoTransportMode = videoTransportMode
+        if videoTransportMode == .udp {
+            if let desiredHost {
+                videoDatagramTransportService.connect(host: desiredHost, port: desiredPort)
+            }
+        } else {
+            videoDatagramTransportService.disconnect()
+        }
     }
 
     private func requestRecoveryKeyFrameIfNeeded() {
