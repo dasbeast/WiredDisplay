@@ -18,7 +18,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     var onCapturedFrame: ((CapturedFrame) -> Void)?
     var onError: ((Error) -> Void)?
 
-    func startCapture(width: Int, height: Int, framesPerSecond: Int = 30) {
+    func startCapture(width: Int, height: Int, framesPerSecond: Int = 60) {
         stopCapture()
 
         isCapturing = true
@@ -137,7 +137,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         if #available(macOS 14.0, *) {
             configuration.captureResolution = .best
         }
-        configuration.queueDepth = 3
+        configuration.queueDepth = 2
         configuration.showsCursor = true
 
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
