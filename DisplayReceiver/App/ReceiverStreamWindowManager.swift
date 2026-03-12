@@ -1,0 +1,74 @@
+import AppKit
+import SwiftUI
+
+@MainActor
+final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
+    var onVisibilityChange: ((Bool) -> Void)?
+
+    private weak var window: NSWindow?
+    private var hostingController: NSHostingController<ReceiverRootView>?
+
+    func present(appController: ReceiverAppController, enterFullScreen: Bool) {
+        let window = ensureWindow(appController: appController)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        onVisibilityChange?(true)
+
+        guard enterFullScreen, !window.styleMask.contains(.fullScreen) else {
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            guard let window = self.window, !window.styleMask.contains(.fullScreen) else { return }
+            window.toggleFullScreen(nil)
+        }
+    }
+
+    func hide() {
+        guard let window else { return }
+
+        if window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                self.window?.orderOut(nil)
+                self.onVisibilityChange?(false)
+            }
+        } else {
+            window.orderOut(nil)
+            onVisibilityChange?(false)
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onVisibilityChange?(false)
+    }
+
+    private func ensureWindow(appController: ReceiverAppController) -> NSWindow {
+        if let window, let hostingController {
+            hostingController.rootView = ReceiverRootView(appController: appController)
+            return window
+        }
+
+        let contentView = ReceiverRootView(appController: appController)
+        let hostingController = NSHostingController(rootView: contentView)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1728, height: 1117),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "DisplayReceiver"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.collectionBehavior = [.fullScreenPrimary, .managed]
+        window.contentViewController = hostingController
+        window.delegate = self
+        window.center()
+
+        self.window = window
+        self.hostingController = hostingController
+        return window
+    }
+}
