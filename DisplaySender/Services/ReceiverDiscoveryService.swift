@@ -2,13 +2,22 @@ import Darwin
 import Combine
 import Foundation
 
+enum DiscoveredReceiverVisualKind: String {
+    case imac
+    case studioDisplay
+    case macbookPro
+    case display
+}
+
 struct DiscoveredReceiver: Identifiable, Equatable {
     let id: String
     let displayName: String
+    let displayDescriptor: String?
     let host: String
     let port: UInt16
     let endpointSummary: String
     let prefersWiredPath: Bool
+    let visualKind: DiscoveredReceiverVisualKind
 }
 
 @MainActor
@@ -20,6 +29,11 @@ final class ReceiverDiscoveryService: NSObject, ObservableObject {
     private let browser = NetServiceBrowser()
     private var servicesByKey: [String: NetService] = [:]
     private var receiversByKey: [String: DiscoveredReceiver] = [:]
+
+    private enum TXTRecordKey {
+        static let deviceFamily = "deviceFamily"
+        static let displayName = "displayName"
+    }
 
     override init() {
         super.init()
@@ -74,13 +88,23 @@ final class ReceiverDiscoveryService: NSObject, ObservableObject {
         let host = resolvedHost.host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else { return nil }
 
+        let textRecord = textRecordDictionary(for: service)
+        let displayDescriptor = txtString(for: TXTRecordKey.displayName, in: textRecord)
+        let visualKind = resolveVisualKind(
+            advertisedFamily: txtString(for: TXTRecordKey.deviceFamily, in: textRecord),
+            receiverName: service.name,
+            displayDescriptor: displayDescriptor
+        )
+
         return DiscoveredReceiver(
             id: key(for: service),
             displayName: service.name,
+            displayDescriptor: displayDescriptor,
             host: host,
             port: UInt16(service.port),
             endpointSummary: "\(host):\(service.port)",
-            prefersWiredPath: resolvedHost.prefersWiredPath
+            prefersWiredPath: resolvedHost.prefersWiredPath,
+            visualKind: visualKind
         )
     }
 
@@ -143,6 +167,52 @@ final class ReceiverDiscoveryService: NSObject, ObservableObject {
             guard result == 0 else { return nil }
             return String(cString: hostBuffer)
         }
+    }
+
+    private func textRecordDictionary(for service: NetService) -> [String: Data]? {
+        guard let textRecordData = service.txtRecordData() else {
+            return nil
+        }
+
+        return NetService.dictionary(fromTXTRecord: textRecordData)
+    }
+
+    private func txtString(for key: String, in textRecord: [String: Data]?) -> String? {
+        guard let value = textRecord?[key], !value.isEmpty else {
+            return nil
+        }
+
+        return String(data: value, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func resolveVisualKind(
+        advertisedFamily: String?,
+        receiverName: String,
+        displayDescriptor: String?
+    ) -> DiscoveredReceiverVisualKind {
+        if let advertisedFamily,
+           let family = DiscoveredReceiverVisualKind(rawValue: advertisedFamily) {
+            return family
+        }
+
+        let receiverNameLowercased = receiverName.lowercased()
+        let displayDescriptorLowercased = displayDescriptor?.lowercased() ?? ""
+        let combined = receiverNameLowercased + " " + displayDescriptorLowercased
+
+        if displayDescriptorLowercased.contains("studio display") {
+            return .studioDisplay
+        }
+
+        if receiverNameLowercased.contains("imac") {
+            return .imac
+        }
+
+        if combined.contains("macbook") || combined.contains("retina xdr") || combined.contains("liquid retina") {
+            return .macbookPro
+        }
+
+        return .display
     }
 }
 

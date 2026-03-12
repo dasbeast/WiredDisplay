@@ -61,7 +61,7 @@ struct SenderRootView: View {
             Text("DisplaySender")
                 .font(.title2)
 
-            Text("Pick a discoverable receiver on the wired network and start streaming.")
+                Text("Pick a discoverable receiver on the wired network and start streaming.")
                 .foregroundStyle(.secondary)
         }
     }
@@ -327,11 +327,19 @@ private struct ReceiverOptionRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(alignment: .top, spacing: 12) {
+                ReceiverThumbnailView(kind: receiver.visualKind)
+                    .frame(width: 132, height: 88)
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text(receiver.displayName)
                         .font(.headline)
+                    if let displayDescriptor = receiver.displayDescriptor {
+                        Text(displayDescriptor)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
                     Text(receiver.endpointSummary)
-                        .font(.system(.subheadline, design: .monospaced))
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
 
@@ -352,11 +360,183 @@ private struct ReceiverOptionRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
             .background(backgroundStyle)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
     }
 
     private var backgroundStyle: some ShapeStyle {
         isSelected ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08)
+    }
+}
+
+private struct ReceiverThumbnailView: View {
+    let kind: DiscoveredReceiverVisualKind
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(backgroundGradient)
+
+            deviceArtwork
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.06), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+    }
+
+    @ViewBuilder
+    private var deviceArtwork: some View {
+        switch kind {
+        case .imac:
+            iMacArtwork
+        case .studioDisplay:
+            studioDisplayArtwork
+        case .macbookPro:
+            macBookArtwork
+        case .display:
+            desktopDisplayArtwork
+        }
+    }
+
+    private var backgroundGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.14, green: 0.16, blue: 0.20),
+                Color(red: 0.09, green: 0.10, blue: 0.13)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var wallpaperGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.19, green: 0.55, blue: 0.84),
+                Color(red: 0.36, green: 0.77, blue: 0.88),
+                Color(red: 0.92, green: 0.86, blue: 0.58)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var desktopDisplayArtwork: some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .bottom) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.black)
+                    .frame(width: 92, height: 54)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .inset(by: 4)
+                            .fill(wallpaperGradient)
+                    )
+
+                Capsule()
+                    .fill(Color.white.opacity(0.85))
+                    .frame(width: 28, height: 2)
+                    .offset(y: 6)
+            }
+
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(silverGradient)
+                .frame(width: 16, height: 16)
+
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(silverGradient)
+                .frame(width: 42, height: 4)
+        }
+    }
+
+    private var studioDisplayArtwork: some View {
+        VStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(red: 0.07, green: 0.08, blue: 0.10))
+                .frame(width: 96, height: 56)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .inset(by: 4)
+                        .fill(wallpaperGradient)
+                )
+
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(silverGradient)
+                .frame(width: 16, height: 18)
+
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(silverGradient)
+                .frame(width: 40, height: 6)
+        }
+    }
+
+    private var iMacArtwork: some View {
+        VStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(red: 0.86, green: 0.86, blue: 0.88))
+                .frame(width: 98, height: 58)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .inset(by: 4)
+                        .fill(wallpaperGradient)
+                        .padding(.top, 2)
+                        .padding(.bottom, 10)
+                )
+
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(silverGradient)
+                .frame(width: 16, height: 18)
+
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(silverGradient)
+                .frame(width: 42, height: 6)
+        }
+    }
+
+    private var macBookArtwork: some View {
+        VStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(red: 0.10, green: 0.11, blue: 0.13))
+                .frame(width: 88, height: 54)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .inset(by: 4)
+                        .fill(wallpaperGradient)
+                )
+                .overlay(alignment: .bottom) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.2))
+                        .frame(width: 18, height: 2)
+                        .padding(.bottom, 4)
+                }
+
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(silverGradient)
+                .frame(width: 104, height: 10)
+                .overlay(
+                    Capsule()
+                        .fill(Color.black.opacity(0.14))
+                        .frame(width: 26, height: 2)
+                )
+        }
+    }
+
+    private var silverGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.92, green: 0.92, blue: 0.94),
+                Color(red: 0.74, green: 0.75, blue: 0.78)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
     }
 }
