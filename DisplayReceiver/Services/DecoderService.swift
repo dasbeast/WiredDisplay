@@ -17,6 +17,8 @@ final class DecoderService {
     private var cachedHEVCSPS: Data?
     private var cachedHEVCPPS: Data?
 
+    var onNeedsKeyFrame: ((FrameMetadata, VideoCodec) -> Void)?
+
     deinit {
         invalidateSession()
     }
@@ -74,6 +76,7 @@ final class DecoderService {
                 awaitingH264KeyFrame = true
                 invalidateSession()
                 print("[DecoderService] H.264 decode failed for frame \(encodedFrame.metadata.frameIndex): \(error)")
+                onNeedsKeyFrame?(encodedFrame.metadata, encodedFrame.codec)
             }
 
             return DecodedFrame(
@@ -111,6 +114,7 @@ final class DecoderService {
                 awaitingHEVCKeyFrame = true
                 invalidateSession()
                 print("[DecoderService] HEVC decode failed for frame \(encodedFrame.metadata.frameIndex): \(error)")
+                onNeedsKeyFrame?(encodedFrame.metadata, encodedFrame.codec)
             }
 
             return DecodedFrame(

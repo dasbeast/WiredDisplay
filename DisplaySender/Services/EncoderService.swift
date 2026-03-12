@@ -20,6 +20,10 @@ final class EncoderService {
     private var forceNextKeyFrame = false
     private var framesInFlight = 0
     private let maxFramesInFlight = 3
+    private var preferredKeyFrameIntervalFrames = max(
+        1,
+        NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds
+    )
     /// Cached VPS/SPS/PPS from the last key frame so we can send them with every frame.
     private var lastVPS: Data?
     private var lastSPS: Data?
@@ -36,6 +40,31 @@ final class EncoderService {
         stateLock.lock()
         forceNextKeyFrame = true
         stateLock.unlock()
+    }
+
+    func setPreferredKeyFrameIntervalFrames(_ frameCount: Int) {
+        let normalizedFrameCount = max(1, frameCount)
+
+        stateLock.lock()
+        preferredKeyFrameIntervalFrames = normalizedFrameCount
+        stateLock.unlock()
+
+        if let compressionSession {
+            let intervalNumber = NSNumber(value: normalizedFrameCount)
+            let seconds = Double(normalizedFrameCount) / Double(max(1, NetworkProtocol.targetFramesPerSecond))
+            setCompressionProperty(
+                compressionSession,
+                key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                value: intervalNumber,
+                label: "MaxKeyFrameInterval"
+            )
+            setCompressionProperty(
+                compressionSession,
+                key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                value: NSNumber(value: seconds),
+                label: "MaxKeyFrameIntervalDuration"
+            )
+        }
     }
 
     @discardableResult
@@ -181,8 +210,11 @@ final class EncoderService {
         setCompressionProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps, label: "ExpectedFrameRate")
 
         // Short key frame interval for fast recovery if a frame is dropped.
-        let keyFrameInterval = (NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds) as CFNumber
-        let keyFrameIntervalDuration = NetworkProtocol.keyFrameIntervalSeconds as CFNumber
+        let configuredKeyFrameIntervalFrames = currentPreferredKeyFrameIntervalFrames()
+        let keyFrameInterval = configuredKeyFrameIntervalFrames as CFNumber
+        let keyFrameIntervalDuration = (
+            Double(configuredKeyFrameIntervalFrames) / Double(max(1, NetworkProtocol.targetFramesPerSecond))
+        ) as CFNumber
         setCompressionProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: keyFrameInterval, label: "MaxKeyFrameInterval")
         setCompressionProperty(
             session,
@@ -295,7 +327,7 @@ final class EncoderService {
             throw EncoderServiceError.tooManyFramesInFlight
         }
 
-        let keyFrameInterval = UInt64(NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds)
+        let keyFrameInterval = UInt64(max(1, preferredKeyFrameIntervalFrames))
         let forceKeyFrame = forceNextKeyFrame
             || submittedFrameCount == 0
             || submittedFrameCount % keyFrameInterval == 0
@@ -308,6 +340,13 @@ final class EncoderService {
             forceKeyFrame: forceKeyFrame,
             targetBitrateKbps: max(1, currentTargetBitrateBps / 1_000)
         )
+    }
+
+    private func currentPreferredKeyFrameIntervalFrames() -> Int {
+        stateLock.lock()
+        let currentValue = preferredKeyFrameIntervalFrames
+        stateLock.unlock()
+        return currentValue
     }
 
     private func encodeWithVideoToolbox(

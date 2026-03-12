@@ -304,10 +304,13 @@ final class VideoDatagramTransportService {
     private var connectedHost: String?
     private var connectedPort: UInt16?
     private var sendInFlight = false
-    private var pendingFrame: EncodedFrame?
+    private var pendingFrames: [EncodedFrame] = []
+    private var awaitingKeyFrameAfterDrop = false
+    private var droppedOutboundFrameCount: UInt64 = 0
 
     var onStateChange: ((Bool) -> Void)?
     var onError: ((Error) -> Void)?
+    var onDroppedFrameCountChange: ((UInt64) -> Void)?
 
     func connect(host: String, port: UInt16 = NetworkProtocol.defaultPort) {
         if connection != nil, connectedHost == host, connectedPort == port {
@@ -356,39 +359,55 @@ final class VideoDatagramTransportService {
         connectedPort = nil
         isConnected = false
         sendInFlight = false
-        pendingFrame = nil
+        pendingFrames.removeAll(keepingCapacity: false)
+        awaitingKeyFrameAfterDrop = false
+        droppedOutboundFrameCount = 0
         onStateChange?(false)
     }
 
     func sendVideoFrame(_ encodedFrame: EncodedFrame) {
         queue.async { [weak self] in
             guard let self else { return }
-            if let pendingFrame = self.pendingFrame {
-                if pendingFrame.isKeyFrame && !encodedFrame.isKeyFrame {
-                    return
-                }
-
-                if encodedFrame.isKeyFrame || !pendingFrame.isKeyFrame {
-                    self.pendingFrame = encodedFrame
-                }
-            } else {
-                self.pendingFrame = encodedFrame
-            }
+            self.enqueueOutboundFrame(encodedFrame)
             self.flushPendingFrameIfPossible()
         }
+    }
+
+    private func enqueueOutboundFrame(_ encodedFrame: EncodedFrame) {
+        if awaitingKeyFrameAfterDrop && !encodedFrame.isKeyFrame {
+            droppedOutboundFrameCount += 1
+            onDroppedFrameCountChange?(droppedOutboundFrameCount)
+            return
+        }
+
+        if encodedFrame.isKeyFrame {
+            awaitingKeyFrameAfterDrop = false
+        }
+
+        while pendingFrames.count >= NetworkProtocol.maxPendingOutboundFrames {
+            if let dropIndex = pendingFrames.firstIndex(where: { !$0.isKeyFrame }) {
+                pendingFrames.remove(at: dropIndex)
+            } else {
+                pendingFrames.removeFirst()
+            }
+            droppedOutboundFrameCount += 1
+            awaitingKeyFrameAfterDrop = true
+            onDroppedFrameCountChange?(droppedOutboundFrameCount)
+        }
+
+        pendingFrames.append(encodedFrame)
     }
 
     private func flushPendingFrameIfPossible() {
         guard isConnected else { return }
         guard !sendInFlight else { return }
-        guard let connection, let frameToSend = pendingFrame else { return }
+        guard let connection, !pendingFrames.isEmpty else { return }
+        let frameToSend = pendingFrames.removeFirst()
         guard let datagrams = VideoDatagramWire.serialize(encodedFrame: frameToSend) else {
-            pendingFrame = nil
             onError?(TransportServiceError.serializationFailed)
             return
         }
 
-        pendingFrame = nil
         sendInFlight = true
 
         if frameToSend.metadata.frameIndex % 30 == 0 {

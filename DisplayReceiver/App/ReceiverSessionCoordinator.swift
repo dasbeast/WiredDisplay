@@ -44,6 +44,7 @@ final class ReceiverSessionCoordinator {
     private var inboundWindowFrameCount: UInt64 = 0
     private var inboundWindowPayloadBytes: UInt64 = 0
     private var lastRenderedFrameTelemetry: ReceiverRenderedFrameTelemetry?
+    private var lastRecoveryKeyFrameRequestAt: Date?
 
     init(
         listenerService: ListenerService = ListenerService(),
@@ -65,6 +66,16 @@ final class ReceiverSessionCoordinator {
         frameDecodePipeline.onFrameReady = { [weak self] update in
             Task { @MainActor [weak self] in
                 self?.applyFrameUpdate(update)
+            }
+        }
+
+        decoderService.onNeedsKeyFrame = { [weak self] metadata, codec in
+            guard codec != .rawBGRA else { return }
+            Task { @MainActor [weak self] in
+                self?.requestRecoveryKeyFrame(
+                    failedFrameIndex: metadata.frameIndex,
+                    reason: "decoder lost reference state"
+                )
             }
         }
 
@@ -179,6 +190,7 @@ final class ReceiverSessionCoordinator {
         inboundWindowStartNanoseconds = nil
         inboundWindowFrameCount = 0
         inboundWindowPayloadBytes = 0
+        lastRecoveryKeyFrameRequestAt = nil
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
         frameDecodePipeline.reset()
         RenderFrameStore.shared.reset()
@@ -237,6 +249,8 @@ final class ReceiverSessionCoordinator {
                 )
             case .videoFrame:
                 break
+            case .requestKeyFrame:
+                break
             }
         } catch {
             lastErrorMessage = error.localizedDescription
@@ -255,6 +269,20 @@ final class ReceiverSessionCoordinator {
             receiverRenderTimestampNanoseconds: update.renderTimestampNanoseconds
         )
         receivedFrameCount += 1
+    }
+
+    private func requestRecoveryKeyFrame(failedFrameIndex: UInt64?, reason: String) {
+        let now = Date()
+        if let lastRecoveryKeyFrameRequestAt,
+           now.timeIntervalSince(lastRecoveryKeyFrameRequestAt) < NetworkProtocol.udpRecoveryRequestThrottleSeconds {
+            return
+        }
+
+        lastRecoveryKeyFrameRequestAt = now
+        listenerService.sendKeyFrameRequest(
+            failedFrameIndex: failedFrameIndex,
+            reason: reason
+        )
     }
 
     private func updateFrameTimingMetrics(from metadata: FrameMetadata, arrivalNanoseconds: UInt64) {
@@ -470,9 +498,11 @@ private final class ReceiverFrameDecodePipeline {
     ) {
         guard isCurrentGeneration(generation) else { return }
 
-        // Skip stale P-frames — if newer frames are already queued, jump ahead.
-        // Always decode keyframes to keep the decoder state valid.
-        if !header.isKeyFrame && header.frameIndex < latestEnqueuedFrameIndex.current() {
+        // Compressed interframes depend on earlier reference frames, so dropping them
+        // before decode corrupts the reference chain. Only short-circuit stale raw frames.
+        if header.codec == .rawBGRA,
+           !header.isKeyFrame,
+           header.frameIndex < latestEnqueuedFrameIndex.current() {
             return
         }
 

@@ -18,7 +18,9 @@ enum NetworkProtocol {
     static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 150_000_000
     static let videoDatagramMaxOutstandingFrames: Int = 3
     static let udpKeyFrameSendRedundancy: Int = 2
+    static let udpKeyFrameIntervalFrames: Int = 15
     static let udpStartupRecoveryIntervalSeconds: TimeInterval = 0.25
+    static let udpRecoveryRequestThrottleSeconds: TimeInterval = 0.10
     // HEVC (H.265) encoder target: ~300 Mbps for near-lossless retina quality over Thunderbolt.
     // Thunderbolt 3 provides 40,000 Mbps — we use at most 5% of available bandwidth.
     static let targetVideoBitrateBps: Int = 300_000_000
@@ -56,6 +58,7 @@ enum NetworkProtocol {
         case helloAck = 2
         case heartbeat = 3
         case videoFrame = 4
+        case requestKeyFrame = 5
     }
 
     enum VideoTransportMode: String, Codable, Sendable {
@@ -192,6 +195,13 @@ struct HeartbeatPayload: Codable, Sendable {
     let renderedFrameSenderTimestampNanoseconds: UInt64?
     /// Receiver-local render timestamp for the most recently rendered frame.
     let renderedFrameReceiverTimestampNanoseconds: UInt64?
+}
+
+/// Receiver -> sender recovery request when compressed decode loses reference state.
+struct KeyFrameRequestPayload: Codable, Sendable {
+    let failedFrameIndex: UInt64?
+    let reason: String?
+    let requestedAtNanoseconds: UInt64
 }
 
 // MARK: - Binary Video Frame Wire Format

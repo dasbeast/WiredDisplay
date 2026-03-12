@@ -117,6 +117,21 @@ final class ListenerService {
         }
     }
 
+    func sendKeyFrameRequest(failedFrameIndex: UInt64?, reason: String?) {
+        let payload = KeyFrameRequestPayload(
+            failedFrameIndex: failedFrameIndex,
+            reason: reason,
+            requestedAtNanoseconds: DispatchTime.now().uptimeNanoseconds
+        )
+
+        do {
+            let envelope = try NetworkEnvelope.make(type: .requestKeyFrame, sequenceNumber: 0, payload: payload)
+            try sendEnvelope(envelope)
+        } catch {
+            onError?(error)
+        }
+    }
+
     private func activate(connection: NWConnection) {
         activeConnection?.cancel()
         activeConnection = connection

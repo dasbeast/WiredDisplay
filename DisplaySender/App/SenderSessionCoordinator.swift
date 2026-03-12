@@ -207,6 +207,19 @@ final class SenderSessionCoordinator {
                 }
             }
         }
+
+        videoDatagramTransportService.onDroppedFrameCountChange = { [weak self] count in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.negotiatedVideoTransportMode == .udp else { return }
+                if count > self.droppedOutboundFrameCount {
+                    self.requestRecoveryKeyFrameIfNeeded(
+                        minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
+                    )
+                }
+                self.droppedOutboundFrameCount = count
+            }
+        }
     }
 
     deinit {
@@ -231,6 +244,7 @@ final class SenderSessionCoordinator {
         self.targetHeight = targetHeight
         requestedVideoTransportMode = videoTransportMode
         negotiatedVideoTransportMode = videoTransportMode
+        encoderService.setPreferredKeyFrameIntervalFrames(keyFrameIntervalFrames(for: videoTransportMode))
         sentFrameCount = 0
         droppedOutboundFrameCount = 0
         lastErrorMessage = nil
@@ -350,7 +364,17 @@ final class SenderSessionCoordinator {
         case .tcp:
             transportService.sendVideoFrame(encodedFrame)
         case .udp:
-            videoDatagramTransportService.sendVideoFrame(encodedFrame)
+            if encodedFrame.isKeyFrame {
+                transportService.sendVideoFrame(encodedFrame)
+            } else {
+                if awaitingFirstRenderedFrame {
+                    requestRecoveryKeyFrameIfNeeded(
+                        minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
+                    )
+                    return
+                }
+                videoDatagramTransportService.sendVideoFrame(encodedFrame)
+            }
         }
         recordOutboundFrame(encodedFrame)
     }
@@ -422,6 +446,9 @@ final class SenderSessionCoordinator {
                     from: heartbeat,
                     localReceiveTimestampNanoseconds: DispatchTime.now().uptimeNanoseconds
                 )
+            case .requestKeyFrame:
+                _ = try envelope.decodePayload(as: KeyFrameRequestPayload.self)
+                requestRecoveryKeyFrameIfNeeded(minimumIntervalSeconds: 0)
             default:
                 break
             }
@@ -530,6 +557,7 @@ final class SenderSessionCoordinator {
 
     private func applyNegotiatedVideoTransport(_ videoTransportMode: NetworkProtocol.VideoTransportMode) {
         negotiatedVideoTransportMode = videoTransportMode
+        encoderService.setPreferredKeyFrameIntervalFrames(keyFrameIntervalFrames(for: videoTransportMode))
         if videoTransportMode == .udp {
             if let desiredHost {
                 videoDatagramTransportService.connect(host: desiredHost, port: desiredPort)
@@ -552,6 +580,15 @@ final class SenderSessionCoordinator {
 
         lastRecoveryKeyFrameRequestAt = now
         encoderService.requestKeyFrame()
+    }
+
+    private func keyFrameIntervalFrames(for videoTransportMode: NetworkProtocol.VideoTransportMode) -> Int {
+        switch videoTransportMode {
+        case .tcp:
+            return NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds
+        case .udp:
+            return NetworkProtocol.udpKeyFrameIntervalFrames
+        }
     }
 
     private func updateLatencyMetrics(
