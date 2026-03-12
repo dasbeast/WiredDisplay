@@ -175,8 +175,7 @@ final class ListenerService {
 
             // Check if this is a binary video frame (starts with magic bytes)
             if payload.count >= 4 {
-                let magic = payload.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-                if magic == NetworkProtocol.binaryMagic {
+                if NetworkProtocol.readUInt32BigEndian(from: payload, atOffset: 0) == NetworkProtocol.binaryMagic {
                     if let result = BinaryFrameWire.deserialize(data: payload) {
                         onBinaryVideoFrame?(result.header, result.vps, result.sps, result.pps, result.payload)
                     }
@@ -203,10 +202,7 @@ final class ListenerService {
     }
 
     private func readLengthPrefix(from data: Data) -> UInt32 {
-        data.prefix(4).withUnsafeBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress else { return 0 }
-            return base.assumingMemoryBound(to: UInt32.self).pointee.bigEndian
-        }
+        NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 0) ?? 0
     }
 }
 

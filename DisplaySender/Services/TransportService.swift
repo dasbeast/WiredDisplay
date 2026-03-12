@@ -263,10 +263,7 @@ final class TransportService {
     }
 
     private func readLengthPrefix(from data: Data) -> UInt32 {
-        data.prefix(4).withUnsafeBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress else { return 0 }
-            return base.assumingMemoryBound(to: UInt32.self).pointee.bigEndian
-        }
+        NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 0) ?? 0
     }
 }
 

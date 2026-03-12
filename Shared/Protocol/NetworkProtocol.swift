@@ -62,6 +62,18 @@ enum NetworkProtocol {
             throw ProtocolError.unsupportedVersion(received: version, expected: protocolVersion)
         }
     }
+
+    /// Reads a big-endian UInt32 from a Data buffer without assuming pointer alignment.
+    static func readUInt32BigEndian(from data: Data, atOffset offset: Int) -> UInt32? {
+        guard offset >= 0, offset + 4 <= data.count else { return nil }
+
+        let start = data.index(data.startIndex, offsetBy: offset)
+        let end = data.index(start, offsetBy: 4)
+
+        return data[start..<end].reduce(UInt32(0)) { partial, byte in
+            (partial << 8) | UInt32(byte)
+        }
+    }
 }
 /// Shared envelope used by all on-wire messages.
 struct NetworkEnvelope: Codable, Sendable {
@@ -223,14 +235,15 @@ enum BinaryFrameWire {
         let start = data.startIndex
 
         // Check magic
-        let magic = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        guard let magic = NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 0) else { return nil }
         guard magic == NetworkProtocol.binaryMagic else { return nil }
 
         // Skip reserved byte (index 4)
 
         // Header length
-        let headerLengthRange = (start + 5)..<(start + 9)
-        let headerLen = Int(data[headerLengthRange].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+        guard let headerLen = NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 5).map(Int.init) else {
+            return nil
+        }
         let headerStart = start + 9
         guard data.count >= 9 + headerLen else { return nil }
 
