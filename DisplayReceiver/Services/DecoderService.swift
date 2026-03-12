@@ -167,9 +167,9 @@ final class DecoderService {
             throw DecoderServiceError.formatDescriptionCreationFailed(formatStatus)
         }
 
+        try rebuildDecompressionSession(format: validFormat)
         cachedH264SPS = sps
         cachedH264PPS = pps
-        try rebuildDecompressionSession(format: validFormat)
     }
 
     /// Rebuilds the HEVC decompression session when VPS/SPS/PPS change.
@@ -223,10 +223,10 @@ final class DecoderService {
             throw DecoderServiceError.formatDescriptionCreationFailed(formatStatus)
         }
 
+        try rebuildDecompressionSession(format: validFormat)
         cachedHEVCVPS = vps
         cachedHEVCSPS = sps
         cachedHEVCPPS = pps
-        try rebuildDecompressionSession(format: validFormat)
     }
 
     private func rebuildDecompressionSession(format: CMVideoFormatDescription) throws {
@@ -287,7 +287,7 @@ final class DecoderService {
             customBlockSource: nil,
             offsetToData: 0,
             dataLength: encodedFrame.payload.count,
-            flags: 0,
+            flags: kCMBlockBufferAssureMemoryNowFlag,
             blockBufferOut: &blockBuffer
         )
 

@@ -187,9 +187,6 @@ final class EncoderService {
             label: "YCbCrMatrix"
         )
 
-        // Quality: near-lossless for UI / text content.
-        setCompressionProperty(session, key: kVTCompressionPropertyKey_Quality, value: 0.97 as CFNumber, label: "Quality")
-
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
 
@@ -474,11 +471,13 @@ private let encoderOutputCallback: VTCompressionOutputCallback = { _, sourceFram
     let isKeyFrame = !notSync
 
     // HEVC parameter sets: VPS (index 0), SPS (index 1), PPS (index 2)
+    // Extract from every frame — the hardware encoder may update parameter sets mid-stream
+    // (especially with EnableLowLatencyRateControl).
     var vpsData: Data?
     var spsData: Data?
     var ppsData: Data?
 
-    if isKeyFrame, let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {
+    if let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {
         var paramPointer: UnsafePointer<UInt8>?
         var paramSize = 0
         var paramCount = 0
