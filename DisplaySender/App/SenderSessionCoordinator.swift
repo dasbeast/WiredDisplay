@@ -64,6 +64,7 @@ final class SenderSessionCoordinator {
     private var lastRecoveryKeyFrameRequestAt: Date?
     private var targetUsesHiDPI = true
     private var awaitingUDPReadyToStart = false
+    private var awaitingFirstRenderedFrame = false
     private var outboundWindowStartNanoseconds: UInt64?
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
@@ -244,6 +245,7 @@ final class SenderSessionCoordinator {
         outboundWindowPayloadBytes = 0
         targetUsesHiDPI = true
         awaitingUDPReadyToStart = false
+        awaitingFirstRenderedFrame = false
         configuredEndpointSummary = "\(receiverHost):\(port) [\(videoTransportMode.rawValue.uppercased())]"
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
@@ -262,6 +264,11 @@ final class SenderSessionCoordinator {
     func startSession() {
         guard canStartSession else { return }
         state = .running
+        awaitingFirstRenderedFrame = negotiatedVideoTransportMode == .udp
+
+        if negotiatedVideoTransportMode == .udp {
+            requestRecoveryKeyFrameIfNeeded(minimumIntervalSeconds: 0)
+        }
 
         let captureWidth = effectiveCaptureWidth()
         let captureHeight = effectiveCaptureHeight()
@@ -309,6 +316,7 @@ final class SenderSessionCoordinator {
         estimatedReceiverClockOffsetNanoseconds = nil
         lastRecoveryKeyFrameRequestAt = nil
         awaitingUDPReadyToStart = false
+        awaitingFirstRenderedFrame = false
         droppedOutboundFrameCount = 0
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
@@ -466,6 +474,7 @@ final class SenderSessionCoordinator {
         estimatedReceiverClockOffsetNanoseconds = nil
         lastRecoveryKeyFrameRequestAt = nil
         awaitingUDPReadyToStart = false
+        awaitingFirstRenderedFrame = false
         stopHeartbeatTimers()
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
@@ -527,14 +536,17 @@ final class SenderSessionCoordinator {
             }
         } else {
             awaitingUDPReadyToStart = false
+            awaitingFirstRenderedFrame = false
             videoDatagramTransportService.disconnect()
         }
     }
 
-    private func requestRecoveryKeyFrameIfNeeded() {
+    private func requestRecoveryKeyFrameIfNeeded(
+        minimumIntervalSeconds: TimeInterval = Double(NetworkProtocol.keyFrameIntervalSeconds)
+    ) {
         let now = Date()
         if let lastRecoveryKeyFrameRequestAt,
-           now.timeIntervalSince(lastRecoveryKeyFrameRequestAt) < Double(NetworkProtocol.keyFrameIntervalSeconds) {
+           now.timeIntervalSince(lastRecoveryKeyFrameRequestAt) < minimumIntervalSeconds {
             return
         }
 
@@ -570,6 +582,16 @@ final class SenderSessionCoordinator {
             ((Int64(receiveTimestampNanoseconds) - Int64(originTimestampNanoseconds))
              + (Int64(heartbeat.transmitTimestampNanoseconds) - Int64(localReceiveTimestampNanoseconds))) / 2
         estimatedReceiverClockOffsetNanoseconds = receiverClockOffsetNanoseconds
+
+        if negotiatedVideoTransportMode == .udp {
+            if heartbeat.renderedFrameIndex != nil {
+                awaitingFirstRenderedFrame = false
+            } else if awaitingFirstRenderedFrame {
+                requestRecoveryKeyFrameIfNeeded(
+                    minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
+                )
+            }
+        }
 
         guard let renderedFrameSenderTimestampNanoseconds = heartbeat.renderedFrameSenderTimestampNanoseconds,
               let renderedFrameReceiverTimestampNanoseconds = heartbeat.renderedFrameReceiverTimestampNanoseconds else {

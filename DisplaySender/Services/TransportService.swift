@@ -363,7 +363,17 @@ final class VideoDatagramTransportService {
     func sendVideoFrame(_ encodedFrame: EncodedFrame) {
         queue.async { [weak self] in
             guard let self else { return }
-            self.pendingFrame = encodedFrame
+            if let pendingFrame = self.pendingFrame {
+                if pendingFrame.isKeyFrame && !encodedFrame.isKeyFrame {
+                    return
+                }
+
+                if encodedFrame.isKeyFrame || !pendingFrame.isKeyFrame {
+                    self.pendingFrame = encodedFrame
+                }
+            } else {
+                self.pendingFrame = encodedFrame
+            }
             self.flushPendingFrameIfPossible()
         }
     }
@@ -388,22 +398,29 @@ final class VideoDatagramTransportService {
             )
         }
 
+        let transmissionCount = frameToSend.isKeyFrame
+            ? max(1, NetworkProtocol.udpKeyFrameSendRedundancy)
+            : 1
+
         connection.batch {
-            for (index, datagram) in datagrams.enumerated() {
-                let completion: NWConnection.SendCompletion = index == datagrams.count - 1
-                    ? .contentProcessed { [weak self] error in
-                        guard let self else { return }
-                        self.queue.async {
-                            self.sendInFlight = false
-                            if let error {
-                                self.onError?(error)
-                                return
+            for transmissionIndex in 0..<transmissionCount {
+                for (index, datagram) in datagrams.enumerated() {
+                    let isLastDatagram = transmissionIndex == transmissionCount - 1 && index == datagrams.count - 1
+                    let completion: NWConnection.SendCompletion = isLastDatagram
+                        ? .contentProcessed { [weak self] error in
+                            guard let self else { return }
+                            self.queue.async {
+                                self.sendInFlight = false
+                                if let error {
+                                    self.onError?(error)
+                                    return
+                                }
+                                self.flushPendingFrameIfPossible()
                             }
-                            self.flushPendingFrameIfPossible()
                         }
-                    }
-                    : .idempotent
-                connection.send(content: datagram, completion: completion)
+                        : .idempotent
+                    connection.send(content: datagram, completion: completion)
+                }
             }
         }
     }
