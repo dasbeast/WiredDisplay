@@ -301,11 +301,19 @@ final class VideoDatagramTransportService {
     private(set) var isConnected = false
 
     private var connection: NWConnection?
+    private var connectedHost: String?
+    private var connectedPort: UInt16?
+    private var sendInFlight = false
+    private var pendingFrame: EncodedFrame?
 
     var onStateChange: ((Bool) -> Void)?
     var onError: ((Error) -> Void)?
 
     func connect(host: String, port: UInt16 = NetworkProtocol.defaultPort) {
+        if connection != nil, connectedHost == host, connectedPort == port {
+            return
+        }
+
         disconnect()
 
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
@@ -316,6 +324,8 @@ final class VideoDatagramTransportService {
         let parameters = NetworkDiagnostics.lowLatencyUDPParameters()
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
         self.connection = connection
+        connectedHost = host
+        connectedPort = port
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -323,6 +333,7 @@ final class VideoDatagramTransportService {
             case .ready:
                 self.isConnected = true
                 self.onStateChange?(true)
+                self.flushPendingFrameIfPossible()
             case .failed(let error):
                 self.isConnected = false
                 self.onStateChange?(false)
@@ -341,32 +352,58 @@ final class VideoDatagramTransportService {
     func disconnect() {
         connection?.cancel()
         connection = nil
+        connectedHost = nil
+        connectedPort = nil
         isConnected = false
+        sendInFlight = false
+        pendingFrame = nil
         onStateChange?(false)
     }
 
     func sendVideoFrame(_ encodedFrame: EncodedFrame) {
         queue.async { [weak self] in
             guard let self else { return }
-            guard self.isConnected, let connection = self.connection else { return }
-            guard let datagrams = VideoDatagramWire.serialize(encodedFrame: encodedFrame) else {
-                self.onError?(TransportServiceError.serializationFailed)
-                return
-            }
+            self.pendingFrame = encodedFrame
+            self.flushPendingFrameIfPossible()
+        }
+    }
 
-            if encodedFrame.metadata.frameIndex % 30 == 0 {
-                print(
-                    "[VideoDatagramTransport] Sending frame \(encodedFrame.metadata.frameIndex): " +
-                    "codec=\(encodedFrame.codec), datagrams=\(datagrams.count)"
-                )
-            }
+    private func flushPendingFrameIfPossible() {
+        guard isConnected else { return }
+        guard !sendInFlight else { return }
+        guard let connection, let frameToSend = pendingFrame else { return }
+        guard let datagrams = VideoDatagramWire.serialize(encodedFrame: frameToSend) else {
+            pendingFrame = nil
+            onError?(TransportServiceError.serializationFailed)
+            return
+        }
 
-            for datagram in datagrams {
-                connection.send(content: datagram, completion: .contentProcessed { [weak self] error in
-                    if let error {
-                        self?.onError?(error)
+        pendingFrame = nil
+        sendInFlight = true
+
+        if frameToSend.metadata.frameIndex % 30 == 0 {
+            print(
+                "[VideoDatagramTransport] Sending frame \(frameToSend.metadata.frameIndex): " +
+                "codec=\(frameToSend.codec), datagrams=\(datagrams.count)"
+            )
+        }
+
+        connection.batch {
+            for (index, datagram) in datagrams.enumerated() {
+                let completion: NWConnection.SendCompletion = index == datagrams.count - 1
+                    ? .contentProcessed { [weak self] error in
+                        guard let self else { return }
+                        self.queue.async {
+                            self.sendInFlight = false
+                            if let error {
+                                self.onError?(error)
+                                return
+                            }
+                            self.flushPendingFrameIfPossible()
+                        }
                     }
-                })
+                    : .idempotent
+                connection.send(content: datagram, completion: completion)
             }
         }
     }

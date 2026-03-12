@@ -184,8 +184,8 @@ final class ReceiverSessionCoordinator {
         RenderFrameStore.shared.reset()
 
         renderService.prepareRenderer()
-        listenerService.startListening(port: port)
         videoDatagramListenerService.startListening(port: port)
+        listenerService.startListening(port: port)
     }
 
     /// Stops listener and returns receiver pipeline to idle state.
@@ -205,7 +205,7 @@ final class ReceiverSessionCoordinator {
                 if hello.requestedProtocolVersion == NetworkProtocol.protocolVersion {
                     let requestedTransport = hello.preferredVideoTransport ?? .tcp
                     let negotiatedTransport: NetworkProtocol.VideoTransportMode
-                    if requestedTransport == .udp && videoDatagramListenerService.isListening {
+                    if requestedTransport == .udp && videoDatagramListenerService.canAcceptDatagrams {
                         negotiatedTransport = .udp
                     } else {
                         negotiatedTransport = .tcp

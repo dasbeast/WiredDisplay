@@ -248,6 +248,7 @@ final class VideoDatagramListenerService {
 
     private(set) var isListening = false
     private(set) var listeningPort: UInt16 = NetworkProtocol.defaultPort
+    var canAcceptDatagrams: Bool { listener != nil }
 
     private var listener: NWListener?
     private var activeConnection: NWConnection?
@@ -397,7 +398,10 @@ private final class VideoDatagramReassembler {
 
         if frameIndex > newestFrameIndex {
             newestFrameIndex = frameIndex
-            assemblies = assemblies.filter { $0.key >= frameIndex }
+            let oldestAllowedFrameIndex = frameIndex > UInt64(NetworkProtocol.videoDatagramMaxOutstandingFrames - 1)
+                ? frameIndex - UInt64(NetworkProtocol.videoDatagramMaxOutstandingFrames - 1)
+                : 0
+            assemblies = assemblies.filter { $0.key >= oldestAllowedFrameIndex }
         }
 
         var assembly = assemblies[frameIndex] ?? Assembly(
@@ -423,6 +427,8 @@ private final class VideoDatagramReassembler {
 
         assemblies[frameIndex] = assembly
 
+        trimAssemblyWindow()
+
         guard assembly.receivedChunkCount == chunkCount else {
             return nil
         }
@@ -444,6 +450,18 @@ private final class VideoDatagramReassembler {
         assemblies = assemblies.filter { _, assembly in
             let age = now >= assembly.firstArrivalNanoseconds ? now - assembly.firstArrivalNanoseconds : 0
             return age <= NetworkProtocol.videoDatagramAssemblyTimeoutNanoseconds
+        }
+    }
+
+    private func trimAssemblyWindow() {
+        guard assemblies.count > NetworkProtocol.videoDatagramMaxOutstandingFrames else {
+            return
+        }
+
+        let sortedKeys = assemblies.keys.sorted()
+        let keysToRemove = sortedKeys.prefix(max(0, sortedKeys.count - NetworkProtocol.videoDatagramMaxOutstandingFrames))
+        for key in keysToRemove {
+            assemblies.removeValue(forKey: key)
         }
     }
 }

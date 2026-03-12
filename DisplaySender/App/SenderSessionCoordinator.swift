@@ -63,6 +63,7 @@ final class SenderSessionCoordinator {
     private var estimatedReceiverClockOffsetNanoseconds: Int64?
     private var lastRecoveryKeyFrameRequestAt: Date?
     private var targetUsesHiDPI = true
+    private var awaitingUDPReadyToStart = false
     private var outboundWindowStartNanoseconds: UInt64?
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
@@ -189,6 +190,22 @@ final class SenderSessionCoordinator {
                 }
             }
         }
+
+        videoDatagramTransportService.onStateChange = { [weak self] isConnected in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.negotiatedVideoTransportMode == .udp else { return }
+
+                if isConnected {
+                    if self.awaitingUDPReadyToStart, self.state == .connected {
+                        self.awaitingUDPReadyToStart = false
+                        self.startSession()
+                    } else if self.state == .running {
+                        self.requestRecoveryKeyFrameIfNeeded()
+                    }
+                }
+            }
+        }
     }
 
     deinit {
@@ -226,6 +243,7 @@ final class SenderSessionCoordinator {
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
         targetUsesHiDPI = true
+        awaitingUDPReadyToStart = false
         configuredEndpointSummary = "\(receiverHost):\(port) [\(videoTransportMode.rawValue.uppercased())]"
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
@@ -290,6 +308,7 @@ final class SenderSessionCoordinator {
         estimatedDisplayLatencyMilliseconds = nil
         estimatedReceiverClockOffsetNanoseconds = nil
         lastRecoveryKeyFrameRequestAt = nil
+        awaitingUDPReadyToStart = false
         droppedOutboundFrameCount = 0
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
@@ -375,12 +394,17 @@ final class SenderSessionCoordinator {
                     state = .connected
                     lastInboundHeartbeatAt = Date()
                     startHeartbeatTimers()
-                    // Auto-start streaming once handshake succeeds
-                    startSession()
+                    // Auto-start once both the handshake and the selected video transport are ready.
+                    if negotiatedVideoTransportMode == .udp && !videoDatagramTransportService.isConnected {
+                        awaitingUDPReadyToStart = true
+                    } else {
+                        startSession()
+                    }
                 } else {
                     state = .failed(ack.reason ?? "receiver rejected handshake")
                     shouldMaintainConnection = false
                     captureService.stopCapture()
+                    videoDatagramTransportService.disconnect()
                     transportService.disconnect()
                 }
             case .heartbeat:
@@ -441,6 +465,7 @@ final class SenderSessionCoordinator {
         estimatedDisplayLatencyMilliseconds = nil
         estimatedReceiverClockOffsetNanoseconds = nil
         lastRecoveryKeyFrameRequestAt = nil
+        awaitingUDPReadyToStart = false
         stopHeartbeatTimers()
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
@@ -501,6 +526,7 @@ final class SenderSessionCoordinator {
                 videoDatagramTransportService.connect(host: desiredHost, port: desiredPort)
             }
         } else {
+            awaitingUDPReadyToStart = false
             videoDatagramTransportService.disconnect()
         }
     }

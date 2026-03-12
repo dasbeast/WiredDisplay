@@ -14,8 +14,9 @@ enum NetworkProtocol {
     static let targetFramesPerSecond: Int = 60
     static let keyFrameIntervalSeconds: Int = 1
     static let captureFramesPerSecond: Int = 60
-    static let videoDatagramChunkPayloadBytes: Int = 1200
-    static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 50_000_000
+    static let videoDatagramChunkPayloadBytes: Int = 1400
+    static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 150_000_000
+    static let videoDatagramMaxOutstandingFrames: Int = 3
     // HEVC (H.265) encoder target: ~300 Mbps for near-lossless retina quality over Thunderbolt.
     // Thunderbolt 3 provides 40,000 Mbps — we use at most 5% of available bandwidth.
     static let targetVideoBitrateBps: Int = 300_000_000
