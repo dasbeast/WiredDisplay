@@ -133,7 +133,18 @@ struct HelloAckPayload: Codable, Sendable {
 
 /// Bidirectional keepalive payload to detect stale links.
 struct HeartbeatPayload: Codable, Sendable {
-    let timestampNanoseconds: UInt64
+    /// Time at which the sender of this heartbeat put it on the wire.
+    let transmitTimestampNanoseconds: UInt64
+    /// Original sender transmit time when this heartbeat is acting as a reply.
+    let originTimestampNanoseconds: UInt64?
+    /// Time at which the replier received the original heartbeat.
+    let receiveTimestampNanoseconds: UInt64?
+    /// Most recently rendered frame index on the receiver, if known.
+    let renderedFrameIndex: UInt64?
+    /// Sender-side capture timestamp for the most recently rendered frame.
+    let renderedFrameSenderTimestampNanoseconds: UInt64?
+    /// Receiver-local render timestamp for the most recently rendered frame.
+    let renderedFrameReceiverTimestampNanoseconds: UInt64?
 }
 
 // MARK: - Binary Video Frame Wire Format

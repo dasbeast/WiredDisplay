@@ -41,6 +41,7 @@ final class ReceiverSessionCoordinator {
     private var inboundWindowStartNanoseconds: UInt64?
     private var inboundWindowFrameCount: UInt64 = 0
     private var inboundWindowPayloadBytes: UInt64 = 0
+    private var lastRenderedFrameTelemetry: ReceiverRenderedFrameTelemetry?
 
     init(
         listenerService: ListenerService = ListenerService(),
@@ -148,6 +149,7 @@ final class ReceiverSessionCoordinator {
         receivedMegabitsPerSecond = nil
         renderSourceDescription = "-"
         replacedBeforeRenderCount = 0
+        lastRenderedFrameTelemetry = nil
         lastFrameArrivalNanoseconds = nil
         smoothedIntervalMilliseconds = nil
         smoothedJitterMilliseconds = nil
@@ -186,9 +188,16 @@ final class ReceiverSessionCoordinator {
                 // Receiver does not currently expect helloAck in this direction.
                 break
             case .heartbeat:
+                let receiveTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
                 let heartbeat = try envelope.decodePayload(as: HeartbeatPayload.self)
-                lastHeartbeatNanoseconds = heartbeat.timestampNanoseconds
-                listenerService.sendHeartbeat()
+                lastHeartbeatNanoseconds = heartbeat.transmitTimestampNanoseconds
+                listenerService.sendHeartbeatReply(
+                    originTimestampNanoseconds: heartbeat.transmitTimestampNanoseconds,
+                    receiveTimestampNanoseconds: receiveTimestampNanoseconds,
+                    renderedFrameIndex: lastRenderedFrameTelemetry?.frameIndex,
+                    renderedFrameSenderTimestampNanoseconds: lastRenderedFrameTelemetry?.senderTimestampNanoseconds,
+                    renderedFrameReceiverTimestampNanoseconds: lastRenderedFrameTelemetry?.receiverRenderTimestampNanoseconds
+                )
             case .videoFrame:
                 break
             }
@@ -203,15 +212,17 @@ final class ReceiverSessionCoordinator {
         updateInboundMetrics(payloadByteCount: update.payloadByteCount, atNanoseconds: update.arrivalNanoseconds)
         renderSourceDescription = update.renderSource
         replacedBeforeRenderCount = update.replacedBeforeRenderCount
+        lastRenderedFrameTelemetry = ReceiverRenderedFrameTelemetry(
+            frameIndex: update.metadata.frameIndex,
+            senderTimestampNanoseconds: update.metadata.timestampNanoseconds,
+            receiverRenderTimestampNanoseconds: update.renderTimestampNanoseconds
+        )
         receivedFrameCount += 1
     }
 
     private func updateFrameTimingMetrics(from metadata: FrameMetadata, arrivalNanoseconds: UInt64) {
-        if arrivalNanoseconds >= metadata.timestampNanoseconds {
-            latestFrameLatencyMilliseconds = Double(arrivalNanoseconds - metadata.timestampNanoseconds) / 1_000_000.0
-        } else {
-            latestFrameLatencyMilliseconds = 0
-        }
+        _ = metadata
+        latestFrameLatencyMilliseconds = nil
 
         if let previousArrival = lastFrameArrivalNanoseconds, arrivalNanoseconds >= previousArrival {
             let intervalMs = Double(arrivalNanoseconds - previousArrival) / 1_000_000.0
@@ -267,6 +278,7 @@ private struct ReceiverFrameProcessingUpdate: Sendable {
     let renderSource: String
     let replacedBeforeRenderCount: UInt64
     let arrivalNanoseconds: UInt64
+    let renderTimestampNanoseconds: UInt64
 }
 
 private struct ReceiverRenderResult {
@@ -275,6 +287,12 @@ private struct ReceiverRenderResult {
     let hasPixelBuffer: Bool
     let hasPixelData: Bool
     let bytesPerRow: Int
+}
+
+private struct ReceiverRenderedFrameTelemetry {
+    let frameIndex: UInt64
+    let senderTimestampNanoseconds: UInt64
+    let receiverRenderTimestampNanoseconds: UInt64
 }
 
 private final class ReceiverFrameDecodePipeline {
@@ -346,13 +364,16 @@ private final class ReceiverFrameDecodePipeline {
             let renderResult = renderDecodedFrame(decodedFrame)
             guard isCurrentGeneration(generation) else { return }
 
+            let renderTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+
             onFrameReady?(
                 ReceiverFrameProcessingUpdate(
                     metadata: packet.metadata,
                     payloadByteCount: packet.payload.count,
                     renderSource: renderResult.renderSource,
                     replacedBeforeRenderCount: renderResult.replacedBeforeRenderCount,
-                    arrivalNanoseconds: arrivalNanoseconds
+                    arrivalNanoseconds: arrivalNanoseconds,
+                    renderTimestampNanoseconds: renderTimestampNanoseconds
                 )
             )
         } catch {
@@ -402,6 +423,8 @@ private final class ReceiverFrameDecodePipeline {
         let renderResult = renderDecodedFrame(decodedFrame)
         guard isCurrentGeneration(generation) else { return }
 
+        let renderTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+
         if header.frameIndex % 30 == 0 {
             print(
                 "[Receiver] Rendered frame \(header.frameIndex): source=\(renderResult.renderSource), " +
@@ -416,7 +439,8 @@ private final class ReceiverFrameDecodePipeline {
                 payloadByteCount: payload.count,
                 renderSource: renderResult.renderSource,
                 replacedBeforeRenderCount: renderResult.replacedBeforeRenderCount,
-                arrivalNanoseconds: arrivalNanoseconds
+                arrivalNanoseconds: arrivalNanoseconds,
+                renderTimestampNanoseconds: renderTimestampNanoseconds
             )
         )
     }

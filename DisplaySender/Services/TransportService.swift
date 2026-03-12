@@ -122,7 +122,14 @@ final class TransportService {
     }
 
     func sendHeartbeat() {
-        let payload = HeartbeatPayload(timestampNanoseconds: DispatchTime.now().uptimeNanoseconds)
+        let payload = HeartbeatPayload(
+            transmitTimestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            originTimestampNanoseconds: nil,
+            receiveTimestampNanoseconds: nil,
+            renderedFrameIndex: nil,
+            renderedFrameSenderTimestampNanoseconds: nil,
+            renderedFrameReceiverTimestampNanoseconds: nil
+        )
 
         do {
             let envelope = try NetworkEnvelope.make(

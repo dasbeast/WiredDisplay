@@ -86,8 +86,21 @@ final class ListenerService {
         }
     }
 
-    func sendHeartbeat() {
-        let payload = HeartbeatPayload(timestampNanoseconds: DispatchTime.now().uptimeNanoseconds)
+    func sendHeartbeatReply(
+        originTimestampNanoseconds: UInt64,
+        receiveTimestampNanoseconds: UInt64,
+        renderedFrameIndex: UInt64?,
+        renderedFrameSenderTimestampNanoseconds: UInt64?,
+        renderedFrameReceiverTimestampNanoseconds: UInt64?
+    ) {
+        let payload = HeartbeatPayload(
+            transmitTimestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            originTimestampNanoseconds: originTimestampNanoseconds,
+            receiveTimestampNanoseconds: receiveTimestampNanoseconds,
+            renderedFrameIndex: renderedFrameIndex,
+            renderedFrameSenderTimestampNanoseconds: renderedFrameSenderTimestampNanoseconds,
+            renderedFrameReceiverTimestampNanoseconds: renderedFrameReceiverTimestampNanoseconds
+        )
 
         do {
             let envelope = try NetworkEnvelope.make(type: .heartbeat, sequenceNumber: 0, payload: payload)

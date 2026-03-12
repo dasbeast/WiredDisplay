@@ -32,6 +32,8 @@ final class SenderSessionCoordinator {
     private(set) var lastErrorMessage: String? { didSet { onChange?() } }
     private(set) var sentFramesPerSecond: Double? { didSet { onChange?() } }
     private(set) var sentMegabitsPerSecond: Double? { didSet { onChange?() } }
+    private(set) var heartbeatRoundTripMilliseconds: Double? { didSet { onChange?() } }
+    private(set) var estimatedDisplayLatencyMilliseconds: Double? { didSet { onChange?() } }
 
     private(set) var configuredEndpointSummary: String = "-" { didSet { onChange?() } }
     private(set) var wiredPathAvailable = false { didSet { onChange?() } }
@@ -55,6 +57,7 @@ final class SenderSessionCoordinator {
     private var heartbeatTimer: Timer?
     private var heartbeatTimeoutTimer: Timer?
     private var lastInboundHeartbeatAt: Date?
+    private var estimatedReceiverClockOffsetNanoseconds: Int64?
     private var outboundWindowStartNanoseconds: UInt64?
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
@@ -194,6 +197,9 @@ final class SenderSessionCoordinator {
         lastErrorMessage = nil
         sentFramesPerSecond = nil
         sentMegabitsPerSecond = nil
+        heartbeatRoundTripMilliseconds = nil
+        estimatedDisplayLatencyMilliseconds = nil
+        estimatedReceiverClockOffsetNanoseconds = nil
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
@@ -250,6 +256,9 @@ final class SenderSessionCoordinator {
         state = .idle
         sentFramesPerSecond = nil
         sentMegabitsPerSecond = nil
+        heartbeatRoundTripMilliseconds = nil
+        estimatedDisplayLatencyMilliseconds = nil
+        estimatedReceiverClockOffsetNanoseconds = nil
         droppedOutboundFrameCount = 0
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
@@ -336,8 +345,12 @@ final class SenderSessionCoordinator {
                     transportService.disconnect()
                 }
             case .heartbeat:
-                _ = try envelope.decodePayload(as: HeartbeatPayload.self)
+                let heartbeat = try envelope.decodePayload(as: HeartbeatPayload.self)
                 lastInboundHeartbeatAt = Date()
+                updateLatencyMetrics(
+                    from: heartbeat,
+                    localReceiveTimestampNanoseconds: DispatchTime.now().uptimeNanoseconds
+                )
             default:
                 break
             }
@@ -385,6 +398,9 @@ final class SenderSessionCoordinator {
     private func scheduleReconnect(reason: String) {
         lastErrorMessage = reason
         state = .connecting
+        heartbeatRoundTripMilliseconds = nil
+        estimatedDisplayLatencyMilliseconds = nil
+        estimatedReceiverClockOffsetNanoseconds = nil
         stopHeartbeatTimers()
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
@@ -412,6 +428,59 @@ final class SenderSessionCoordinator {
             return min(targetHeight, NetworkProtocol.rawDiagnosticsMaxHeight)
         }
         return targetHeight
+    }
+
+    private func updateLatencyMetrics(
+        from heartbeat: HeartbeatPayload,
+        localReceiveTimestampNanoseconds: UInt64
+    ) {
+        guard let originTimestampNanoseconds = heartbeat.originTimestampNanoseconds,
+              let receiveTimestampNanoseconds = heartbeat.receiveTimestampNanoseconds else {
+            return
+        }
+
+        let receiverProcessingNanoseconds = max(
+            0,
+            Int64(heartbeat.transmitTimestampNanoseconds) - Int64(receiveTimestampNanoseconds)
+        )
+        let localElapsedNanoseconds = max(
+            0,
+            Int64(localReceiveTimestampNanoseconds) - Int64(originTimestampNanoseconds)
+        )
+        let roundTripNanoseconds = max(0, localElapsedNanoseconds - receiverProcessingNanoseconds)
+        heartbeatRoundTripMilliseconds = smoothMetric(
+            current: heartbeatRoundTripMilliseconds,
+            sample: Double(roundTripNanoseconds) / 1_000_000.0,
+            alpha: 0.20
+        )
+
+        let receiverClockOffsetNanoseconds =
+            ((Int64(receiveTimestampNanoseconds) - Int64(originTimestampNanoseconds))
+             + (Int64(heartbeat.transmitTimestampNanoseconds) - Int64(localReceiveTimestampNanoseconds))) / 2
+        estimatedReceiverClockOffsetNanoseconds = receiverClockOffsetNanoseconds
+
+        guard let renderedFrameSenderTimestampNanoseconds = heartbeat.renderedFrameSenderTimestampNanoseconds,
+              let renderedFrameReceiverTimestampNanoseconds = heartbeat.renderedFrameReceiverTimestampNanoseconds else {
+            return
+        }
+
+        let senderTimestampOnReceiverClock =
+            Int64(renderedFrameSenderTimestampNanoseconds) + receiverClockOffsetNanoseconds
+        let displayLatencyNanoseconds =
+            Int64(renderedFrameReceiverTimestampNanoseconds) - senderTimestampOnReceiverClock
+        guard displayLatencyNanoseconds >= 0 else { return }
+
+        estimatedDisplayLatencyMilliseconds = smoothMetric(
+            current: estimatedDisplayLatencyMilliseconds,
+            sample: Double(displayLatencyNanoseconds) / 1_000_000.0,
+            alpha: 0.15
+        )
+    }
+
+    private func smoothMetric(current: Double?, sample: Double, alpha: Double) -> Double {
+        guard sample.isFinite else { return current ?? 0 }
+        guard let current else { return sample }
+        return (alpha * sample) + ((1.0 - alpha) * current)
     }
 }
 

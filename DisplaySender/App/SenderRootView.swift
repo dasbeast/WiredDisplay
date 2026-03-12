@@ -21,6 +21,8 @@ struct SenderRootView: View {
     @State private var lastErrorText = "-"
     @State private var sentFramesPerSecondText = "-"
     @State private var sentMegabitsPerSecondText = "-"
+    @State private var heartbeatRoundTripText = "-"
+    @State private var estimatedDisplayLatencyText = "-"
 
     @State private var endpointSummary = "-"
     @State private var wiredPathSummary = "unknown"
@@ -70,6 +72,8 @@ struct SenderRootView: View {
                     Text("Dropped Outbound Frames: \(droppedOutboundFrameCount)")
                     Text("Send Rate: \(sentFramesPerSecondText)")
                     Text("Send Throughput: \(sentMegabitsPerSecondText)")
+                    Text("Heartbeat RTT: \(heartbeatRoundTripText)")
+                    Text("Est. Display Latency: \(estimatedDisplayLatencyText)")
                     Text("Last Error: \(lastErrorText)")
                         .foregroundStyle(lastErrorText == "-" ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
                 }
@@ -133,6 +137,8 @@ struct SenderRootView: View {
         lastErrorText = coordinator.lastErrorMessage ?? "-"
         sentFramesPerSecondText = formatRate(coordinator.sentFramesPerSecond, unit: "fps")
         sentMegabitsPerSecondText = formatRate(coordinator.sentMegabitsPerSecond, unit: "Mbps")
+        heartbeatRoundTripText = formatRate(coordinator.heartbeatRoundTripMilliseconds, unit: "ms")
+        estimatedDisplayLatencyText = formatRate(coordinator.estimatedDisplayLatencyMilliseconds, unit: "ms")
 
         endpointSummary = coordinator.configuredEndpointSummary
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
