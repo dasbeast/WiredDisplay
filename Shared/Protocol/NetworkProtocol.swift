@@ -19,10 +19,9 @@ enum NetworkProtocol {
     static let targetVideoBitrateBps: Int = 300_000_000
     static let minVideoBitrateBps: Int = 50_000_000
     static let maxVideoBitrateBps: Int = 2_000_000_000  // 2 Gbps – well within Thunderbolt 3 limits
-    // Diagnostic cap for H.264 stability testing.
-    // Force physical capture down to 1080p-class resolution to see whether inter-frame
-    // decode failures are caused by large-frame real-time encoding pressure.
-    static let maxCapturePixelsAtTargetFPS: Int = 2_073_600 // 1920x1080
+    // HEVC pixel budget: supports up to 5120×2880 HiDPI capture (22.1 MP).
+    // Hardware HEVC encoders handle this resolution at 60 fps over Thunderbolt.
+    static let maxCapturePixelsAtTargetFPS: Int = 22_118_400 // 5120x2880 + headroom
     static let allowLoopbackForLocalTesting: Bool = true
     static let preferRawFrameTransportForDiagnostics: Bool = false
     static let rawDiagnosticsMaxWidth: Int = 320

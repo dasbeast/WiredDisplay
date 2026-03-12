@@ -3,9 +3,7 @@ import CoreMedia
 import CoreVideo
 import VideoToolbox
 
-/// VideoToolbox encoder — H.264 at near-lossless quality for Thunderbolt display streaming.
-/// Uses high bitrate + quality=0.99 rather than HEVC to avoid hardware-specific HEVC decode issues.
-/// Over Thunderbolt (40 Gbps), H.264 at 2 Gbps is visually lossless.
+/// VideoToolbox HEVC (H.265) encoder for Sidecar-quality display streaming with raw fallback.
 final class EncoderService {
     private var compressionSession: VTCompressionSession?
     private var configuredWidth = 0
@@ -14,7 +12,8 @@ final class EncoderService {
     private var currentTargetBitrateBps: Int = NetworkProtocol.targetVideoBitrateBps
     private let stateLock = NSLock()
     private var forceNextKeyFrame = false
-    /// Cached SPS/PPS from the last key frame so we can send them with every frame.
+    /// Cached VPS/SPS/PPS from the last key frame so we can send them with every frame.
+    private var lastVPS: Data?
     private var lastSPS: Data?
     private var lastPPS: Data?
 
@@ -44,12 +43,12 @@ final class EncoderService {
             }
             try configureSessionIfNeeded(width: frame.metadata.width, height: frame.metadata.height)
             if let encoded = try encodeWithVideoToolbox(pixelBuffer: pixelBuffer, frame: frame) {
-                print("[EncoderService] H.264 encoded frame \(frame.metadata.frameIndex): \(encoded.payload.count) bytes, keyFrame=\(encoded.isKeyFrame)")
+                print("[EncoderService] HEVC encoded frame \(frame.metadata.frameIndex): \(encoded.payload.count) bytes, keyFrame=\(encoded.isKeyFrame)")
                 return encoded
             }
-            print("[EncoderService] Dropping frame \(frame.metadata.frameIndex): H.264 encode produced no output in time")
+            print("[EncoderService] Dropping frame \(frame.metadata.frameIndex): HEVC encode produced no output in time")
         } catch {
-            print("[EncoderService] Dropping frame \(frame.metadata.frameIndex): H.264 encode failed: \(error)")
+            print("[EncoderService] Dropping frame \(frame.metadata.frameIndex): HEVC encode failed: \(error)")
         }
         return nil
     }
@@ -99,21 +98,20 @@ final class EncoderService {
 
         invalidateSession()
 
-        let sourceAttributes: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey: width,
-            kCVPixelBufferHeightKey: height,
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as [String: Any]
-        ]
+        // Require hardware-accelerated HEVC encoder (Apple Silicon / T2 chip).
+        let encoderSpec: CFDictionary = [
+            kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true as CFBoolean,
+            kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true as CFBoolean
+        ] as CFDictionary
 
         var newSession: VTCompressionSession?
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: Int32(width),
             height: Int32(height),
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
-            imageBufferAttributes: sourceAttributes as CFDictionary,
+            codecType: kCMVideoCodecType_HEVC,
+            encoderSpecification: encoderSpec,
+            imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: encoderOutputCallback,
             refcon: nil,
@@ -134,27 +132,31 @@ final class EncoderService {
             fps: NetworkProtocol.targetFramesPerSecond
         )
 
-        // H.264 encoder configured for stable real-time display streaming over Thunderbolt.
+        // --- Sidecar-quality HEVC session configuration ---
+
+        // Real-time encoding: prioritize latency over compression efficiency.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue, label: "RealTime")
+
+        // No B-frames: the single biggest latency saver — decoder doesn't wait for future frames.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse, label: "AllowFrameReordering")
-        setCompressionProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel, label: "ProfileLevel")
-        setCompressionProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC, label: "H264EntropyMode")
+
+        // HEVC Main profile for hardware decode compatibility.
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel, label: "ProfileLevel")
+
+        // Bitrate: generous target for Thunderbolt bandwidth.
         let bitrate = NSNumber(value: currentTargetBitrateBps)
         setCompressionProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate, label: "AverageBitRate")
-        let dataRateBytesPerSecond = NSNumber(value: max(1, (currentTargetBitrateBps * 4) / 8))
-        let dataRateWindowSeconds = NSNumber(value: 1)
-        setCompressionProperty(
-            session,
-            key: kVTCompressionPropertyKey_DataRateLimits,
-            value: [dataRateBytesPerSecond, dataRateWindowSeconds] as CFArray,
-            label: "DataRateLimits"
-        )
 
-        // Allow one frame of buffering so the callback can arrive on the next submission.
-        setCompressionProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber, label: "MaxFrameDelayCount")
+        // DataRateLimits: allow 100 Mbps bursts over 1-second windows for fast motion / scene changes.
+        // Format: [bytes-per-period, period-in-seconds] — 12_500_000 bytes = 100 Mbps.
+        let dataRateLimits: [NSNumber] = [12_500_000 as NSNumber, 1.0 as NSNumber]
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: dataRateLimits as CFArray, label: "DataRateLimits")
 
+        // Frame rate hint for rate control.
         let fps = NetworkProtocol.targetFramesPerSecond as CFNumber
         setCompressionProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps, label: "ExpectedFrameRate")
+
+        // Short key frame interval for fast recovery if a frame is dropped.
         let keyFrameInterval = (NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds) as CFNumber
         let keyFrameIntervalDuration = NetworkProtocol.keyFrameIntervalSeconds as CFNumber
         setCompressionProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: keyFrameInterval, label: "MaxKeyFrameInterval")
@@ -164,6 +166,29 @@ final class EncoderService {
             value: keyFrameIntervalDuration,
             label: "MaxKeyFrameIntervalDuration"
         )
+
+        // Preserve source color space (Rec. 709 / Display P3) so colors aren't washed out.
+        setCompressionProperty(
+            session,
+            key: kVTCompressionPropertyKey_ColorPrimaries,
+            value: kCVImageBufferColorPrimaries_ITU_R_709_2,
+            label: "ColorPrimaries"
+        )
+        setCompressionProperty(
+            session,
+            key: kVTCompressionPropertyKey_TransferFunction,
+            value: kCVImageBufferTransferFunction_ITU_R_709_2,
+            label: "TransferFunction"
+        )
+        setCompressionProperty(
+            session,
+            key: kVTCompressionPropertyKey_YCbCrMatrix,
+            value: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            label: "YCbCrMatrix"
+        )
+
+        // Quality: near-lossless for UI / text content.
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_Quality, value: 0.97 as CFNumber, label: "Quality")
 
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
@@ -176,6 +201,7 @@ final class EncoderService {
         configuredWidth = 0
         configuredHeight = 0
         encodedFrameCount = 0
+        lastVPS = nil
         lastSPS = nil
         lastPPS = nil
     }
@@ -312,9 +338,10 @@ final class EncoderService {
 
         var waitResult = callbackContext.semaphore.wait(timeout: .now() + 2.0)
         if waitResult == .timedOut {
-            // Some H.264 encoder paths retain the first submitted frame until the session
-            // is explicitly asked to complete pending work.
-            VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+            let completeStatus = VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+            if completeStatus != noErr {
+                print("[EncoderService] CompleteFrames failed at \(frame.metadata.frameIndex): \(completeStatus)")
+            }
             waitResult = callbackContext.semaphore.wait(timeout: .now() + 0.5)
         }
         if waitResult == .timedOut {
@@ -327,12 +354,13 @@ final class EncoderService {
         if var output = callbackContext.output {
             encodedFrameCount += 1
 
-            // Cache SPS/PPS from key frames
+            // Cache VPS/SPS/PPS from key frames
+            if output.hevcVPS != nil { lastVPS = output.hevcVPS }
             if output.h264SPS != nil { lastSPS = output.h264SPS }
             if output.h264PPS != nil { lastPPS = output.h264PPS }
 
-            // Always attach cached SPS/PPS so the decoder can initialize at any point
-            if output.h264SPS == nil || output.h264PPS == nil {
+            // Always attach cached VPS/SPS/PPS so the decoder can initialize at any point
+            if output.hevcVPS == nil || output.h264SPS == nil || output.h264PPS == nil {
                 output = EncodedFrame(
                     metadata: output.metadata,
                     codec: output.codec,
@@ -343,7 +371,8 @@ final class EncoderService {
                     targetBitrateKbps: output.targetBitrateKbps,
                     targetFramesPerSecond: output.targetFramesPerSecond,
                     h264SPS: lastSPS,
-                    h264PPS: lastPPS
+                    h264PPS: lastPPS,
+                    hevcVPS: lastVPS
                 )
             }
 
@@ -444,47 +473,60 @@ private let encoderOutputCallback: VTCompressionOutputCallback = { _, sourceFram
     let notSync = firstAttachment?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
     let isKeyFrame = !notSync
 
+    // HEVC parameter sets: VPS (index 0), SPS (index 1), PPS (index 2)
+    var vpsData: Data?
     var spsData: Data?
     var ppsData: Data?
 
     if isKeyFrame, let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {
-        var spsPointer: UnsafePointer<UInt8>?
-        var spsSize = 0
-        var spsCount = 0
+        var paramPointer: UnsafePointer<UInt8>?
+        var paramSize = 0
+        var paramCount = 0
         var nalLength: Int32 = 0
 
-        let spsStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+        // VPS — index 0
+        let vpsStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
             formatDescription,
             parameterSetIndex: 0,
-            parameterSetPointerOut: &spsPointer,
-            parameterSetSizeOut: &spsSize,
-            parameterSetCountOut: &spsCount,
+            parameterSetPointerOut: &paramPointer,
+            parameterSetSizeOut: &paramSize,
+            parameterSetCountOut: &paramCount,
             nalUnitHeaderLengthOut: &nalLength
         )
-
-        if spsStatus == noErr, let spsPointer {
-            spsData = Data(bytes: spsPointer, count: spsSize)
+        if vpsStatus == noErr, let ptr = paramPointer {
+            vpsData = Data(bytes: ptr, count: paramSize)
         }
 
-        var ppsPointer: UnsafePointer<UInt8>?
-        var ppsSize = 0
-        let ppsStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+        // SPS — index 1
+        let spsStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
             formatDescription,
             parameterSetIndex: 1,
-            parameterSetPointerOut: &ppsPointer,
-            parameterSetSizeOut: &ppsSize,
-            parameterSetCountOut: &spsCount,
+            parameterSetPointerOut: &paramPointer,
+            parameterSetSizeOut: &paramSize,
+            parameterSetCountOut: &paramCount,
             nalUnitHeaderLengthOut: &nalLength
         )
+        if spsStatus == noErr, let ptr = paramPointer {
+            spsData = Data(bytes: ptr, count: paramSize)
+        }
 
-        if ppsStatus == noErr, let ppsPointer {
-            ppsData = Data(bytes: ppsPointer, count: ppsSize)
+        // PPS — index 2
+        let ppsStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            formatDescription,
+            parameterSetIndex: 2,
+            parameterSetPointerOut: &paramPointer,
+            parameterSetSizeOut: &paramSize,
+            parameterSetCountOut: &paramCount,
+            nalUnitHeaderLengthOut: &nalLength
+        )
+        if ppsStatus == noErr, let ptr = paramPointer {
+            ppsData = Data(bytes: ptr, count: paramSize)
         }
     }
 
     context.output = EncodedFrame(
         metadata: context.frame.metadata,
-        codec: .h264AVCC,
+        codec: .hevcAVCC,
         payload: payload,
         isKeyFrame: isKeyFrame,
         sourceBytesPerRow: context.frame.bytesPerRow,
@@ -492,7 +534,8 @@ private let encoderOutputCallback: VTCompressionOutputCallback = { _, sourceFram
         targetBitrateKbps: context.targetBitrateKbps,
         targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
         h264SPS: spsData,
-        h264PPS: ppsData
+        h264PPS: ppsData,
+        hevcVPS: vpsData
     )
 }
 
