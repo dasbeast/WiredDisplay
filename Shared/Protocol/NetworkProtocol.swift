@@ -21,6 +21,8 @@ enum NetworkProtocol {
     static let udpKeyFrameIntervalFrames: Int = 15
     static let udpStartupRecoveryIntervalSeconds: TimeInterval = 0.25
     static let udpRecoveryRequestThrottleSeconds: TimeInterval = 0.10
+    static let udpDecodeReorderWaitNanoseconds: UInt64 = 12_000_000
+    static let udpDecodeMaxPendingFrames: Int = 24
     // HEVC (H.265) encoder target: ~300 Mbps for near-lossless retina quality over Thunderbolt.
     // Thunderbolt 3 provides 40,000 Mbps — we use at most 5% of available bandwidth.
     static let targetVideoBitrateBps: Int = 300_000_000

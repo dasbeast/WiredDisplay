@@ -391,6 +391,15 @@ private struct ReceiverRenderedFrameTelemetry {
     let receiverRenderTimestampNanoseconds: UInt64
 }
 
+private struct PendingCompressedBinaryFrame {
+    let header: BinaryFrameHeader
+    let vps: Data?
+    let sps: Data?
+    let pps: Data?
+    let payload: Data
+    let arrivalNanoseconds: UInt64
+}
+
 private final class ReceiverFrameDecodePipeline {
     private let decoderService: DecoderService
     private let renderService: RenderService
@@ -399,6 +408,9 @@ private final class ReceiverFrameDecodePipeline {
     private var generation: UInt64 = 0
     /// Tracks the highest enqueued frame index so the decode worker can skip stale P-frames.
     private let latestEnqueuedFrameIndex = LatestFrameIndex()
+    private var pendingCompressedFrames: [UInt64: PendingCompressedBinaryFrame] = [:]
+    private var nextExpectedCompressedFrameIndex: UInt64?
+    private var blockedCompressedFrameAtNanoseconds: UInt64?
 
     var onFrameReady: ((ReceiverFrameProcessingUpdate) -> Void)?
     var onError: ((Error) -> Void)?
@@ -430,7 +442,7 @@ private final class ReceiverFrameDecodePipeline {
         let generation = currentGeneration()
         latestEnqueuedFrameIndex.update(header.frameIndex)
         queue.async { [weak self] in
-            self?.processBinaryVideoFrame(
+            self?.routeBinaryVideoFrame(
                 header: header,
                 vps: vps,
                 sps: sps,
@@ -447,6 +459,11 @@ private final class ReceiverFrameDecodePipeline {
         generation &+= 1
         generationLock.unlock()
         latestEnqueuedFrameIndex.update(0)
+        queue.async { [weak self] in
+            self?.pendingCompressedFrames.removeAll(keepingCapacity: false)
+            self?.nextExpectedCompressedFrameIndex = nil
+            self?.blockedCompressedFrameAtNanoseconds = nil
+        }
     }
 
     private func processVideoEnvelope(
@@ -487,7 +504,7 @@ private final class ReceiverFrameDecodePipeline {
         }
     }
 
-    private func processBinaryVideoFrame(
+    private func routeBinaryVideoFrame(
         header: BinaryFrameHeader,
         vps: Data?,
         sps: Data?,
@@ -498,12 +515,154 @@ private final class ReceiverFrameDecodePipeline {
     ) {
         guard isCurrentGeneration(generation) else { return }
 
+        if header.codec == .rawBGRA {
+            _ = processBinaryVideoFrame(
+                header: header,
+                vps: vps,
+                sps: sps,
+                pps: pps,
+                payload: payload,
+                arrivalNanoseconds: arrivalNanoseconds,
+                generation: generation
+            )
+            return
+        }
+
+        enqueueCompressedBinaryVideoFrame(
+            PendingCompressedBinaryFrame(
+                header: header,
+                vps: vps,
+                sps: sps,
+                pps: pps,
+                payload: payload,
+                arrivalNanoseconds: arrivalNanoseconds
+            ),
+            generation: generation
+        )
+    }
+
+    private func enqueueCompressedBinaryVideoFrame(
+        _ frame: PendingCompressedBinaryFrame,
+        generation: UInt64
+    ) {
+        guard isCurrentGeneration(generation) else { return }
+
+        if let nextExpectedCompressedFrameIndex,
+           frame.header.frameIndex < nextExpectedCompressedFrameIndex {
+            return
+        }
+
+        if pendingCompressedFrames[frame.header.frameIndex] == nil,
+           pendingCompressedFrames.count >= NetworkProtocol.udpDecodeMaxPendingFrames {
+            trimPendingCompressedFrames()
+        }
+
+        pendingCompressedFrames[frame.header.frameIndex] = frame
+
+        if frame.header.isKeyFrame,
+           nextExpectedCompressedFrameIndex == nil {
+            nextExpectedCompressedFrameIndex = frame.header.frameIndex
+        }
+
+        drainPendingCompressedFrames(generation: generation)
+    }
+
+    private func drainPendingCompressedFrames(generation: UInt64) {
+        guard isCurrentGeneration(generation) else { return }
+
+        while true {
+            if nextExpectedCompressedFrameIndex == nil {
+                guard let firstKeyFrameIndex = pendingCompressedFrames
+                    .values
+                    .filter({ $0.header.isKeyFrame })
+                    .map(\.header.frameIndex)
+                    .min() else {
+                    return
+                }
+                nextExpectedCompressedFrameIndex = firstKeyFrameIndex
+            }
+
+            guard let expectedFrameIndex = nextExpectedCompressedFrameIndex else {
+                return
+            }
+
+            if let frame = pendingCompressedFrames.removeValue(forKey: expectedFrameIndex) {
+                blockedCompressedFrameAtNanoseconds = nil
+
+                let wasRendered = processBinaryVideoFrame(
+                    header: frame.header,
+                    vps: frame.vps,
+                    sps: frame.sps,
+                    pps: frame.pps,
+                    payload: frame.payload,
+                    arrivalNanoseconds: frame.arrivalNanoseconds,
+                    generation: generation
+                )
+
+                guard isCurrentGeneration(generation) else { return }
+
+                if wasRendered {
+                    nextExpectedCompressedFrameIndex = expectedFrameIndex &+ 1
+                } else {
+                    // After a compressed-frame decode failure, keep only future keyframes
+                    // so the pipeline can restart cleanly on the next reference frame.
+                    pendingCompressedFrames = pendingCompressedFrames.filter { $0.value.header.isKeyFrame }
+                    nextExpectedCompressedFrameIndex = nil
+                    blockedCompressedFrameAtNanoseconds = nil
+                    return
+                }
+
+                continue
+            }
+
+            let newestArrival = pendingCompressedFrames.values.map(\.arrivalNanoseconds).max() ?? DispatchTime.now().uptimeNanoseconds
+            if blockedCompressedFrameAtNanoseconds == nil {
+                blockedCompressedFrameAtNanoseconds = newestArrival
+            }
+
+            guard let blockedAtNanoseconds = blockedCompressedFrameAtNanoseconds else {
+                return
+            }
+
+            let waitedNanoseconds = newestArrival >= blockedAtNanoseconds
+                ? newestArrival - blockedAtNanoseconds
+                : 0
+
+            guard waitedNanoseconds >= NetworkProtocol.udpDecodeReorderWaitNanoseconds else {
+                return
+            }
+
+            guard let recoveryKeyFrameIndex = pendingCompressedFrames
+                .values
+                .filter({ $0.header.isKeyFrame && $0.header.frameIndex > expectedFrameIndex })
+                .map(\.header.frameIndex)
+                .min() else {
+                return
+            }
+
+            pendingCompressedFrames = pendingCompressedFrames.filter { $0.key >= recoveryKeyFrameIndex }
+            nextExpectedCompressedFrameIndex = recoveryKeyFrameIndex
+            self.blockedCompressedFrameAtNanoseconds = nil
+        }
+    }
+
+    private func processBinaryVideoFrame(
+        header: BinaryFrameHeader,
+        vps: Data?,
+        sps: Data?,
+        pps: Data?,
+        payload: Data,
+        arrivalNanoseconds: UInt64,
+        generation: UInt64
+    ) -> Bool {
+        guard isCurrentGeneration(generation) else { return false }
+
         // Compressed interframes depend on earlier reference frames, so dropping them
         // before decode corrupts the reference chain. Only short-circuit stale raw frames.
         if header.codec == .rawBGRA,
            !header.isKeyFrame,
            header.frameIndex < latestEnqueuedFrameIndex.current() {
-            return
+            return false
         }
 
         let metadata = FrameMetadata(
@@ -531,15 +690,15 @@ private final class ReceiverFrameDecodePipeline {
             payload: payload
         )
         let decodedFrame = decoderService.decodeEncodedFrame(encodedFrame)
-        guard isCurrentGeneration(generation) else { return }
+        guard isCurrentGeneration(generation) else { return false }
 
         guard let renderResult = renderDecodedFrame(decodedFrame) else {
             if header.frameIndex % 30 == 0 {
                 print("[Receiver] Holding last rendered frame for undecodable frame \(header.frameIndex)")
             }
-            return
+            return false
         }
-        guard isCurrentGeneration(generation) else { return }
+        guard isCurrentGeneration(generation) else { return false }
 
         let renderTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
 
@@ -561,6 +720,21 @@ private final class ReceiverFrameDecodePipeline {
                 renderTimestampNanoseconds: renderTimestampNanoseconds
             )
         )
+        return true
+    }
+
+    private func trimPendingCompressedFrames() {
+        guard pendingCompressedFrames.count >= NetworkProtocol.udpDecodeMaxPendingFrames else {
+            return
+        }
+
+        let sortedFrameIndices = pendingCompressedFrames.keys.sorted()
+        let frameIndicesToRemove = sortedFrameIndices.prefix(
+            max(0, sortedFrameIndices.count - (NetworkProtocol.udpDecodeMaxPendingFrames - 1))
+        )
+        for frameIndex in frameIndicesToRemove {
+            pendingCompressedFrames.removeValue(forKey: frameIndex)
+        }
     }
 
     private func makeEncodedFrame(
