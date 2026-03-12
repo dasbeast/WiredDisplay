@@ -5,6 +5,7 @@ import SwiftUI
 /// A small status overlay shows connection info and fades out once streaming begins.
 struct ReceiverRootView: View {
     @State private var coordinator = ReceiverSessionCoordinator()
+    @StateObject private var advertisementService = ReceiverAdvertisementService()
 
     @State private var stateText = "idle"
     @State private var peerNameText = "-"
@@ -19,11 +20,9 @@ struct ReceiverRootView: View {
 
     var body: some View {
         ZStack {
-            // Full-window Metal render surface
             MetalRenderSurfaceView()
                 .ignoresSafeArea()
 
-            // Status overlay – visible until streaming, then auto-hides
             if showOverlay {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("DisplayReceiver")
@@ -37,6 +36,7 @@ struct ReceiverRootView: View {
                         Text("Rate: \(receivedFramesPerSecondText)")
                         Text("Throughput: \(receivedMegabitsPerSecondText)")
                     } else {
+                        Text("Discoverable As: \(advertisementService.advertisedName ?? Host.current().localizedName ?? "DisplayReceiver")")
                         Text("Wired Path: \(wiredPathSummary)")
                         if !interfaceLines.isEmpty {
                             Text("Local Interfaces:")
@@ -46,6 +46,11 @@ struct ReceiverRootView: View {
                                     .font(.system(.caption, design: .monospaced))
                             }
                         }
+                    }
+
+                    if let advertisementError = advertisementService.lastErrorMessage {
+                        Text("Discovery Error: \(advertisementError)")
+                            .foregroundStyle(.orange)
                     }
 
                     if lastErrorText != "-" {
@@ -69,12 +74,17 @@ struct ReceiverRootView: View {
             coordinator.onChange = {
                 refreshFromCoordinator()
             }
-            // Auto-start listening immediately
             coordinator.startListening(port: NetworkProtocol.defaultPort)
+            advertisementService.startAdvertising(
+                port: NetworkProtocol.defaultPort,
+                name: Host.current().localizedName ?? "DisplayReceiver"
+            )
             refreshFromCoordinator()
         }
+        .onDisappear {
+            advertisementService.stopAdvertising()
+        }
         .onTapGesture {
-            // Toggle overlay on tap when streaming
             if isStreaming {
                 withAnimation { showOverlay.toggle() }
             }
@@ -95,7 +105,6 @@ struct ReceiverRootView: View {
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         interfaceLines = coordinator.localInterfaceDescriptions
 
-        // Auto-hide overlay after receiving some frames
         if isStreaming && !wasStreaming {
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(3))

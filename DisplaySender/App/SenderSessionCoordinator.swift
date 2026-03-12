@@ -365,6 +365,7 @@ final class SenderSessionCoordinator {
             transportService.sendVideoFrame(encodedFrame)
         case .udp:
             if encodedFrame.isKeyFrame {
+                videoDatagramTransportService.noteKeyFrameBoundary()
                 transportService.sendVideoFrame(encodedFrame)
             } else {
                 if awaitingFirstRenderedFrame {

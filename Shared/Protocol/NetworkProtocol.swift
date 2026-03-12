@@ -4,6 +4,9 @@ import Foundation
 enum NetworkProtocol {
     static let protocolVersion: UInt16 = 1
     static let defaultPort: UInt16 = 50999
+    static let discoveryServiceType = "_wireddisplay._tcp."
+    static let discoveryServiceDomain = "local."
+    static let discoveryResolveTimeoutSeconds: TimeInterval = 3.0
     static let maximumEnvelopeBytes: Int = 134_217_728  // 128 MB – HEVC key frames at high bitrate
     static let maximumMessageBytes: Int = 134_217_728  // 128 MB – binary framed messages
     static let heartbeatIntervalSeconds: TimeInterval = 1.0
