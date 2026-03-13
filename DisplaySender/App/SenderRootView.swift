@@ -31,16 +31,24 @@ struct SenderRootView: View {
     @State private var wiredWarning = ""
     @State private var interfaceLines: [String] = []
 
+    // Display mode state
+    @State private var availableDisplayModes: [VirtualDisplayMode] = []
+    @State private var activeDisplayModeText = "-"
+    @State private var selectedModeID: String? = nil
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             headerSection
             receiverSection
             actionSection
+            if !availableDisplayModes.isEmpty {
+                displayModeSection
+            }
             statusSection
             diagnosticsSection
         }
         .padding()
-        .frame(minWidth: 760, minHeight: 520)
+        .frame(minWidth: 800, minHeight: 540)
         .onAppear {
             coordinator.onChange = {
                 refreshFromCoordinator()
@@ -131,6 +139,41 @@ struct SenderRootView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.top, 6)
+        }
+    }
+
+    private var displayModeSection: some View {
+        GroupBox("Display Mode") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Active:")
+                        .foregroundStyle(.secondary)
+                    Text(activeDisplayModeText)
+                        .font(.system(.body, design: .monospaced))
+                }
+
+                if availableDisplayModes.count > 1 {
+                    Divider()
+
+                    Text("Switch mode — capture restarts automatically.")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+
+                    Picker("Mode", selection: $selectedModeID) {
+                        ForEach(availableDisplayModes) { mode in
+                            Text(mode.label).tag(Optional(mode.id))
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    .onChange(of: selectedModeID) { _, newID in
+                        guard let newID,
+                              let mode = availableDisplayModes.first(where: { $0.id == newID }),
+                              newID != coordinator.activeDisplayMode?.id
+                        else { return }
+                        coordinator.changeDisplayMode(mode)
+                    }
+                }
+            }
         }
     }
 
@@ -279,6 +322,18 @@ struct SenderRootView: View {
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         wiredWarning = coordinator.wiredPathAvailable ? "" : "No wired route currently available. Verify Thunderbolt Bridge and cable link."
         interfaceLines = coordinator.localInterfaceDescriptions
+
+        availableDisplayModes = coordinator.availableDisplayModes
+        if let active = coordinator.activeDisplayMode {
+            activeDisplayModeText = active.shortDescription
+            // Keep the picker in sync with the active mode without triggering onChange.
+            if selectedModeID != active.id {
+                selectedModeID = active.id
+            }
+        } else if coordinator.availableDisplayModes.isEmpty {
+            activeDisplayModeText = "-"
+            selectedModeID = nil
+        }
     }
 
     private func statusText(for state: SenderSessionCoordinator.SessionState) -> String {

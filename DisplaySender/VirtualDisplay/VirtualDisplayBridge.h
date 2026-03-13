@@ -27,6 +27,22 @@ NS_ASSUME_NONNULL_BEGIN
 /// Returns the number of active virtual displays.
 + (NSUInteger)activeVirtualDisplayCount;
 
+/// Returns all display modes available on a virtual display.
+/// Each element is an NSDictionary with keys:
+///   "logicalWidth", "logicalHeight", "pixelWidth", "pixelHeight", "scale", "refreshRate"
++ (NSArray<NSDictionary *> *)availableModesForDisplay:(CGDirectDisplayID)displayID;
+
+/// Returns the currently active mode for a display, or nil.
+/// Keys match availableModesForDisplay:.
++ (nullable NSDictionary *)activeModeForDisplay:(CGDirectDisplayID)displayID;
+
+/// Applies the first available mode whose pixel dimensions match pixelWidth × pixelHeight.
+/// Returns YES if the configuration was applied successfully.
++ (BOOL)applyModeForDisplay:(CGDirectDisplayID)displayID
+                 pixelWidth:(unsigned int)pixelWidth
+                pixelHeight:(unsigned int)pixelHeight
+NS_SWIFT_NAME(applyMode(forDisplay:pixelWidth:pixelHeight:));
+
 @end
 
 NS_ASSUME_NONNULL_END

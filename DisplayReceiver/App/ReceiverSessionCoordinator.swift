@@ -112,6 +112,18 @@ final class ReceiverSessionCoordinator {
             }
         }
 
+        listenerService.onConnectionClosed = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.audioPlaybackService.stop()
+                self.frameDecodePipeline.reset()
+                RenderFrameStore.shared.reset()
+                if case .running = self.state {
+                    self.state = .listening
+                }
+            }
+        }
+
         let frameDecodePipeline = self.frameDecodePipeline
         listenerService.onEnvelope = { [weak self] envelope in
             if envelope.type == .videoFrame {
@@ -225,6 +237,8 @@ final class ReceiverSessionCoordinator {
         do {
             switch envelope.type {
             case .hello:
+                frameDecodePipeline.reset()
+                RenderFrameStore.shared.reset()
                 let hello = try envelope.decodePayload(as: HelloPayload.self)
                 peerName = hello.senderName
                 if hello.requestedProtocolVersion == NetworkProtocol.protocolVersion {

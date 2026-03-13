@@ -13,6 +13,7 @@ final class ListenerService {
     private var receiveBuffer = Data()
 
     var onStateChange: ((Bool) -> Void)?
+    var onConnectionClosed: (() -> Void)?
     var onEnvelope: ((NetworkEnvelope) -> Void)?
     var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data?, Data) -> Void)?
     var onBinaryAudioFrame: ((BinaryAudioHeader, Data) -> Void)?
@@ -168,6 +169,7 @@ final class ListenerService {
                 connection.cancel()
                 self.activeConnection = nil
                 self.receiveBuffer.removeAll(keepingCapacity: false)
+                self.onConnectionClosed?()
                 return
             }
 

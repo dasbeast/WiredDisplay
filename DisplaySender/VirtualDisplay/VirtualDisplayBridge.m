@@ -127,6 +127,137 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
     return displayID;
 }
 
++ (NSArray<NSDictionary *> *)availableModesForDisplay:(CGDirectDisplayID)displayID {
+    // Fetch all modes including HiDPI duplicates so we can pick the best per resolution.
+    NSDictionary *options = @{(__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES};
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(displayID, (__bridge CFDictionaryRef)options);
+    if (!modes) return @[];
+
+    // Key: "pixelWxpixelH" → best NSDictionary seen so far.
+    // When two modes share pixel dimensions, prefer the HiDPI one (higher scale).
+    NSMutableDictionary<NSString *, NSDictionary *> *bestForPixelSize = [NSMutableDictionary dictionary];
+
+    CFIndex count = CFArrayGetCount(modes);
+    for (CFIndex i = 0; i < count; i++) {
+        CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+        size_t pixelWidth  = CGDisplayModeGetPixelWidth(mode);
+        size_t pixelHeight = CGDisplayModeGetPixelHeight(mode);
+        size_t logicalWidth  = CGDisplayModeGetWidth(mode);
+        size_t logicalHeight = CGDisplayModeGetHeight(mode);
+        double refreshRate = CGDisplayModeGetRefreshRate(mode);
+
+        if (pixelWidth < 640 || pixelHeight < 480) continue;
+        if (logicalWidth == 0 || logicalHeight == 0) continue;
+
+        double scale = (double)pixelWidth / (double)logicalWidth;
+
+        NSString *key = [NSString stringWithFormat:@"%zux%zu", pixelWidth, pixelHeight];
+        NSDictionary *existing = bestForPixelSize[key];
+
+        // Prefer HiDPI (scale > 1) over 1x for the same pixel dimensions.
+        BOOL replaceExisting = (existing == nil) ||
+                               (scale > [existing[@"scale"] doubleValue]);
+
+        if (replaceExisting) {
+            bestForPixelSize[key] = @{
+                @"logicalWidth":  @(logicalWidth),
+                @"logicalHeight": @(logicalHeight),
+                @"pixelWidth":    @(pixelWidth),
+                @"pixelHeight":   @(pixelHeight),
+                @"scale":         @(scale),
+                @"refreshRate":   @(refreshRate)
+            };
+        }
+    }
+
+    CFRelease(modes);
+
+    NSMutableArray *result = [NSMutableArray arrayWithArray:bestForPixelSize.allValues];
+
+    // Sort by pixel area descending (sharpest first).
+    [result sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSUInteger areaA = [a[@"pixelWidth"] unsignedIntegerValue] * [a[@"pixelHeight"] unsignedIntegerValue];
+        NSUInteger areaB = [b[@"pixelWidth"] unsignedIntegerValue] * [b[@"pixelHeight"] unsignedIntegerValue];
+        if (areaA > areaB) return NSOrderedAscending;
+        if (areaA < areaB) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    return result;
+}
+
++ (nullable NSDictionary *)activeModeForDisplay:(CGDirectDisplayID)displayID {
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayID);
+    if (!mode) return nil;
+
+    size_t pixelWidth  = CGDisplayModeGetPixelWidth(mode);
+    size_t pixelHeight = CGDisplayModeGetPixelHeight(mode);
+    size_t logicalWidth  = CGDisplayModeGetWidth(mode);
+    size_t logicalHeight = CGDisplayModeGetHeight(mode);
+    double refreshRate = CGDisplayModeGetRefreshRate(mode);
+    double scale = logicalWidth > 0 ? (double)pixelWidth / (double)logicalWidth : 1.0;
+    CGDisplayModeRelease(mode);
+
+    return @{
+        @"logicalWidth":  @(logicalWidth),
+        @"logicalHeight": @(logicalHeight),
+        @"pixelWidth":    @(pixelWidth),
+        @"pixelHeight":   @(pixelHeight),
+        @"scale":         @(scale),
+        @"refreshRate":   @(refreshRate)
+    };
+}
+
++ (BOOL)applyModeForDisplay:(CGDirectDisplayID)displayID
+                pixelWidth:(unsigned int)pixelWidth
+               pixelHeight:(unsigned int)pixelHeight {
+    CFArrayRef allModes = CGDisplayCopyAllDisplayModes(displayID, NULL);
+    if (!allModes) return NO;
+
+    CGDisplayModeRef targetMode = NULL;
+    CFIndex count = CFArrayGetCount(allModes);
+    for (CFIndex i = 0; i < count; i++) {
+        CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(allModes, i);
+        if (CGDisplayModeGetPixelWidth(mode) == pixelWidth &&
+            CGDisplayModeGetPixelHeight(mode) == pixelHeight) {
+            targetMode = mode;
+            break;
+        }
+    }
+
+    if (!targetMode) {
+        NSLog(@"[VirtualDisplayBridge] No mode found for %ux%u on display %u", pixelWidth, pixelHeight, displayID);
+        CFRelease(allModes);
+        return NO;
+    }
+
+    CGDisplayConfigRef config = NULL;
+    CGError err = CGBeginDisplayConfiguration(&config);
+    if (err != kCGErrorSuccess) {
+        NSLog(@"[VirtualDisplayBridge] CGBeginDisplayConfiguration failed: %d", err);
+        CFRelease(allModes);
+        return NO;
+    }
+
+    err = CGConfigureDisplayWithDisplayMode(config, displayID, targetMode, NULL);
+    if (err != kCGErrorSuccess) {
+        NSLog(@"[VirtualDisplayBridge] CGConfigureDisplayWithDisplayMode failed: %d", err);
+        CGCancelDisplayConfiguration(config);
+        CFRelease(allModes);
+        return NO;
+    }
+
+    err = CGCompleteDisplayConfiguration(config, kCGConfigureForSession);
+    CFRelease(allModes);
+
+    if (err == kCGErrorSuccess) {
+        NSLog(@"[VirtualDisplayBridge] Applied mode %ux%u on display %u", pixelWidth, pixelHeight, displayID);
+    } else {
+        NSLog(@"[VirtualDisplayBridge] CGCompleteDisplayConfiguration failed: %d", err);
+    }
+    return err == kCGErrorSuccess;
+}
+
 + (void)destroyVirtualDisplay:(CGDirectDisplayID)displayID {
     @synchronized (activeDisplays()) {
         CGVirtualDisplay *display = activeDisplays()[@(displayID)];

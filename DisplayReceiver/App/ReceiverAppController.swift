@@ -118,6 +118,8 @@ final class ReceiverAppController: ObservableObject {
 
         if newStreaming && !wasStreaming {
             presentReceiverWindow(fullScreen: true)
+        } else if !newStreaming && wasStreaming {
+            hideReceiverWindow()
         }
     }
 

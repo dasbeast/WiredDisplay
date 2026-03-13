@@ -11,6 +11,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private var stream: SCStream?
     private var frameIndex: UInt64 = 0
+    private var forceNextKeyFrame = false
     private var audioPacketIndex: UInt64 = 0
     private let captureQueue = DispatchQueue(label: "wireddisplay.sender.capture", qos: .userInteractive)
     private let outputAudioFormat = AVAudioFormat(
@@ -33,7 +34,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         stopCapture()
 
         isCapturing = true
-        frameIndex = 0
+        forceNextKeyFrame = true
         audioPacketIndex = 0
         audioConverter = nil
         audioConverterSourceSignature = nil
@@ -183,12 +184,15 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
             let currentIndex = frameIndex
             frameIndex += 1
 
+            let isFirstFrame = forceNextKeyFrame
+            forceNextKeyFrame = false
+
             let metadata = FrameMetadata(
                 frameIndex: currentIndex,
                 timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
                 width: frameWidth,
                 height: frameHeight,
-                isKeyFrame: currentIndex % 60 == 0
+                isKeyFrame: isFirstFrame || currentIndex % 60 == 0
             )
 
             let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
@@ -313,12 +317,15 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         timer.setEventHandler { [weak self] in
             guard let self, self.isCapturing else { return }
 
+            let isFirstFrame = self.forceNextKeyFrame
+            self.forceNextKeyFrame = false
+
             let metadata = FrameMetadata(
                 frameIndex: self.frameIndex,
                 timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
                 width: width,
                 height: height,
-                isKeyFrame: self.frameIndex % UInt64(interval) == 0
+                isKeyFrame: isFirstFrame || self.frameIndex % UInt64(interval) == 0
             )
 
             let bytesPerRow = max(1, width * 4)

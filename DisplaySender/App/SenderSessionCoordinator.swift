@@ -41,6 +41,10 @@ final class SenderSessionCoordinator {
     private(set) var configuredEndpointSummary: String = "-" { didSet { onChange?() } }
     private(set) var wiredPathAvailable = false { didSet { onChange?() } }
     private(set) var localInterfaceDescriptions: [String] = [] { didSet { onChange?() } }
+    /// All modes macOS exposes on the active virtual display (populated after session starts).
+    private(set) var availableDisplayModes: [VirtualDisplayMode] = [] { didSet { onChange?() } }
+    /// The mode macOS actually has active on the virtual display (read back after creation/change).
+    private(set) var activeDisplayMode: VirtualDisplayMode? { didSet { onChange?() } }
     var canStartSession: Bool { state == .connected }
     var isSessionActive: Bool {
         switch state {
@@ -63,6 +67,9 @@ final class SenderSessionCoordinator {
     private var estimatedReceiverClockOffsetNanoseconds: Int64?
     private var lastRecoveryKeyFrameRequestAt: Date?
     private var targetUsesHiDPI = true
+    /// Receiver's advertised logical dimensions, used to auto-select the best virtual display mode.
+    private var receiverLogicalWidth: Int = 0
+    private var receiverLogicalHeight: Int = 0
     private var awaitingUDPReadyToStart = false
     private var awaitingFirstRenderedFrame = false
     private var outboundWindowStartNanoseconds: UInt64?
@@ -283,11 +290,14 @@ final class SenderSessionCoordinator {
     }
 
     /// Starts capture and frame transport after handshake succeeds.
-    /// Creates a virtual display for the extended desktop, then captures it.
+    /// Creates a virtual display for the extended desktop, applies the best matching mode,
+    /// reads back the actual live mode, then starts capture.
     func startSession() {
         guard canStartSession else { return }
         state = .running
         awaitingFirstRenderedFrame = negotiatedVideoTransportMode == .udp
+        availableDisplayModes = []
+        activeDisplayMode = nil
 
         if negotiatedVideoTransportMode == .udp {
             requestRecoveryKeyFrameIfNeeded(minimumIntervalSeconds: 0)
@@ -298,7 +308,7 @@ final class SenderSessionCoordinator {
 
         print("[Sender] Starting session: \(captureWidth)x\(captureHeight)")
 
-        // Create virtual display so macOS extends the desktop onto it
+        // Create virtual display so macOS extends the desktop onto it.
         let virtualDisplayID = virtualDisplayService.createDisplay(
             width: captureWidth,
             height: captureHeight,
@@ -308,16 +318,77 @@ final class SenderSessionCoordinator {
 
         print("[Sender] Virtual display created with ID: \(virtualDisplayID)")
 
-        // Point capture at the virtual display (or fall back to main display)
+        // Point capture at the virtual display (or fall back to main display).
         captureService.targetDisplayID = virtualDisplayID
 
-        // Give macOS a moment to initialize the virtual display before capturing
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        // Stage 1 (0.25s): CGDisplayCopyAllDisplayModes needs a moment after virtual display
+        // creation before it returns the advertised modes. Query modes here and apply the
+        // receiver-matched default to override whatever macOS restored from its display prefs.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self, case .running = self.state else { return }
-            print("[Sender] Starting capture on display \(virtualDisplayID)")
+            guard virtualDisplayID != 0 else { return }
+
+            let modes = self.virtualDisplayService.availableModes()
+            self.availableDisplayModes = modes
+            print("[Sender] Virtual display exposed \(modes.count) modes")
+
+            if let best = self.bestMatchingMode(
+                from: modes,
+                logicalWidth: self.receiverLogicalWidth,
+                logicalHeight: self.receiverLogicalHeight
+            ) {
+                print("[Sender] Auto-applying receiver-matched mode: \(best.label)")
+                self.virtualDisplayService.apply(mode: best)
+            } else {
+                print("[Sender] No matching mode found; macOS will use its remembered mode")
+            }
+
+            // Stage 2 (0.35s later): mode change has settled; read back live mode and start capture.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self, case .running = self.state else { return }
+
+                let liveMode = self.virtualDisplayService.activeMode()
+                self.activeDisplayMode = liveMode
+
+                if let liveMode {
+                    print(
+                        "[Sender] Active display mode: \(liveMode.shortDescription)" +
+                        (liveMode.pixelWidth != captureWidth || liveMode.pixelHeight != captureHeight
+                            ? " (requested \(captureWidth)×\(captureHeight))"
+                            : "")
+                    )
+                }
+
+                print("[Sender] Starting capture on display \(virtualDisplayID)")
+                self.captureService.startCapture(
+                    width: liveMode?.pixelWidth ?? captureWidth,
+                    height: liveMode?.pixelHeight ?? captureHeight,
+                    framesPerSecond: NetworkProtocol.captureFramesPerSecond
+                )
+            }
+        }
+    }
+
+    /// Applies a new display mode while the session is running.
+    /// Stops capture, applies the mode, waits for it to settle, then restarts capture.
+    func changeDisplayMode(_ mode: VirtualDisplayMode) {
+        guard state == .running, virtualDisplayService.isActive else { return }
+
+        print("[Sender] User changing display mode to: \(mode.label)")
+        captureService.stopCapture()
+        virtualDisplayService.apply(mode: mode)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, case .running = self.state else { return }
+
+            let liveMode = self.virtualDisplayService.activeMode()
+            self.activeDisplayMode = liveMode
+            let live = liveMode ?? mode
+
+            print("[Sender] Mode change settled: \(live.shortDescription)")
             self.captureService.startCapture(
-                width: captureWidth,
-                height: captureHeight,
+                width: live.pixelWidth,
+                height: live.pixelHeight,
                 framesPerSecond: NetworkProtocol.captureFramesPerSecond
             )
         }
@@ -344,6 +415,8 @@ final class SenderSessionCoordinator {
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
+        availableDisplayModes = []
+        activeDisplayMode = nil
     }
 
     /// Sends one manual synthetic frame for pipeline smoke testing.
@@ -512,6 +585,8 @@ final class SenderSessionCoordinator {
         lastRecoveryKeyFrameRequestAt = nil
         awaitingUDPReadyToStart = false
         awaitingFirstRenderedFrame = false
+        availableDisplayModes = []
+        activeDisplayMode = nil
         stopHeartbeatTimers()
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
@@ -548,6 +623,8 @@ final class SenderSessionCoordinator {
     private func applyReceiverDisplayMetrics(_ displayMetrics: ReceiverDisplayMetrics?) {
         guard let displayMetrics else {
             print("[Sender] Receiver did not advertise display metrics; using fallback \(targetWidth)x\(targetHeight)")
+            receiverLogicalWidth = targetWidth
+            receiverLogicalHeight = targetHeight
             return
         }
 
@@ -556,6 +633,8 @@ final class SenderSessionCoordinator {
         targetWidth = negotiatedWidth
         targetHeight = negotiatedHeight
         targetUsesHiDPI = displayMetrics.backingScaleFactor > 1.0
+        receiverLogicalWidth = negotiatedWidth
+        receiverLogicalHeight = negotiatedHeight
 
         print(
             "[Sender] Using receiver display metrics: logical=\(negotiatedWidth)x\(negotiatedHeight), " +
@@ -563,6 +642,24 @@ final class SenderSessionCoordinator {
             "scale=\(String(format: "%.2f", displayMetrics.backingScaleFactor)), " +
             "hiDPI=\(targetUsesHiDPI)"
         )
+    }
+
+    /// Selects the best mode from the available list that matches the receiver's logical resolution.
+    /// Falls back to the closest by pixel area if no exact logical match is found.
+    private func bestMatchingMode(from modes: [VirtualDisplayMode], logicalWidth: Int, logicalHeight: Int) -> VirtualDisplayMode? {
+        guard !modes.isEmpty else { return nil }
+
+        // Prefer an exact logical-dimension match (receiver's native resolution at Retina scale).
+        if let exact = modes.first(where: { $0.logicalWidth == logicalWidth && $0.logicalHeight == logicalHeight }) {
+            return exact
+        }
+
+        // Fall back: pick the mode whose pixel area is closest to the receiver's pixel area.
+        let targetPixelArea = logicalWidth * logicalHeight * (targetUsesHiDPI ? 4 : 1)
+        return modes.min(by: {
+            abs($0.pixelWidth * $0.pixelHeight - targetPixelArea) <
+            abs($1.pixelWidth * $1.pixelHeight - targetPixelArea)
+        })
     }
 
     private func applyNegotiatedVideoTransport(_ videoTransportMode: NetworkProtocol.VideoTransportMode) {
