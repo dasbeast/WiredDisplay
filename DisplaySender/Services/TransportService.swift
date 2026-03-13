@@ -29,40 +29,44 @@ final class TransportService {
     var onDroppedFrameCountChange: ((UInt64) -> Void)?
 
     func connect(host: String, port: UInt16 = NetworkProtocol.defaultPort) {
-        disconnect()
-
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-            onError?(TransportServiceError.invalidEndpoint)
-            return
-        }
-
-        let parameters = NetworkDiagnostics.lowLatencyTCPParameters()
-
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
-        self.connection = connection
-
-        connection.stateUpdateHandler = { [weak self] state in
+        queue.async { [weak self] in
             guard let self else { return }
-            switch state {
-            case .ready:
-                self.isConnected = true
-                self.onStateChange?(true)
-                self.receiveBuffer.removeAll(keepingCapacity: false)
-                self.receiveNextChunk(on: connection)
-                self.flushPendingIfPossible()
-            case .failed(let error):
-                self.isConnected = false
-                self.onStateChange?(false)
-                self.onError?(error)
-            case .cancelled:
-                self.isConnected = false
-                self.onStateChange?(false)
-            default:
-                break
-            }
-        }
 
-        connection.start(queue: queue)
+            self.disconnectLocked()
+
+            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+                self.onError?(TransportServiceError.invalidEndpoint)
+                return
+            }
+
+            let parameters = NetworkDiagnostics.lowLatencyTCPParameters()
+
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
+            self.connection = connection
+
+            connection.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.isConnected = true
+                    self.onStateChange?(true)
+                    self.receiveBuffer.removeAll(keepingCapacity: false)
+                    self.receiveNextChunk(on: connection)
+                    self.flushPendingIfPossible()
+                case .failed(let error):
+                    self.isConnected = false
+                    self.onStateChange?(false)
+                    self.onError?(error)
+                case .cancelled:
+                    self.isConnected = false
+                    self.onStateChange?(false)
+                default:
+                    break
+                }
+            }
+
+            connection.start(queue: self.queue)
+        }
     }
 
     /// Sends an encoded video frame using the binary wire format (no JSON/base64 for payload data).
@@ -127,51 +131,65 @@ final class TransportService {
         targetWidth: Int,
         targetHeight: Int
     ) {
-        let payload = HelloPayload(
-            senderName: senderName,
-            requestedProtocolVersion: NetworkProtocol.protocolVersion,
-            preferredVideoTransport: preferredVideoTransport,
-            targetWidth: targetWidth,
-            targetHeight: targetHeight
-        )
+        queue.async { [weak self] in
+            guard let self else { return }
 
-        do {
-            let envelope = try NetworkEnvelope.make(
-                type: .hello,
-                sequenceNumber: nextSequenceNumber,
-                payload: payload
+            let payload = HelloPayload(
+                senderName: senderName,
+                requestedProtocolVersion: NetworkProtocol.protocolVersion,
+                preferredVideoTransport: preferredVideoTransport,
+                targetWidth: targetWidth,
+                targetHeight: targetHeight
             )
-            nextSequenceNumber += 1
-            try queueEnvelopeForSend(envelope, isKeyFrame: true)
-        } catch {
-            onError?(error)
+
+            do {
+                let envelope = try NetworkEnvelope.make(
+                    type: .hello,
+                    sequenceNumber: self.nextSequenceNumber,
+                    payload: payload
+                )
+                self.nextSequenceNumber += 1
+                try self.queueEnvelopeForSend(envelope, isKeyFrame: true)
+            } catch {
+                self.onError?(error)
+            }
         }
     }
 
     func sendHeartbeat() {
-        let payload = HeartbeatPayload(
-            transmitTimestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
-            originTimestampNanoseconds: nil,
-            receiveTimestampNanoseconds: nil,
-            renderedFrameIndex: nil,
-            renderedFrameSenderTimestampNanoseconds: nil,
-            renderedFrameReceiverTimestampNanoseconds: nil
-        )
+        queue.async { [weak self] in
+            guard let self else { return }
 
-        do {
-            let envelope = try NetworkEnvelope.make(
-                type: .heartbeat,
-                sequenceNumber: nextSequenceNumber,
-                payload: payload
+            let payload = HeartbeatPayload(
+                transmitTimestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                originTimestampNanoseconds: nil,
+                receiveTimestampNanoseconds: nil,
+                renderedFrameIndex: nil,
+                renderedFrameSenderTimestampNanoseconds: nil,
+                renderedFrameReceiverTimestampNanoseconds: nil
             )
-            nextSequenceNumber += 1
-            try queueEnvelopeForSend(envelope, isKeyFrame: true)
-        } catch {
-            onError?(error)
+
+            do {
+                let envelope = try NetworkEnvelope.make(
+                    type: .heartbeat,
+                    sequenceNumber: self.nextSequenceNumber,
+                    payload: payload
+                )
+                self.nextSequenceNumber += 1
+                try self.queueEnvelopeForSend(envelope, isKeyFrame: true)
+            } catch {
+                self.onError?(error)
+            }
         }
     }
 
     func disconnect() {
+        queue.async { [weak self] in
+            self?.disconnectLocked()
+        }
+    }
+
+    private func disconnectLocked() {
         connection?.cancel()
         connection = nil
         receiveBuffer.removeAll(keepingCapacity: false)
