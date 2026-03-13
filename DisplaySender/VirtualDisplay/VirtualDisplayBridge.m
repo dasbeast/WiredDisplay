@@ -211,17 +211,25 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
 + (BOOL)applyModeForDisplay:(CGDirectDisplayID)displayID
                 pixelWidth:(unsigned int)pixelWidth
                pixelHeight:(unsigned int)pixelHeight {
-    CFArrayRef allModes = CGDisplayCopyAllDisplayModes(displayID, NULL);
+    // Include HiDPI duplicate modes so we can prefer the 2x (Retina) variant when
+    // both a 1x and a 2x entry exist for the same pixel dimensions.
+    NSDictionary *options = @{(__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES};
+    CFArrayRef allModes = CGDisplayCopyAllDisplayModes(displayID, (__bridge CFDictionaryRef)options);
     if (!allModes) return NO;
 
     CGDisplayModeRef targetMode = NULL;
+    double bestScale = -1.0;
     CFIndex count = CFArrayGetCount(allModes);
     for (CFIndex i = 0; i < count; i++) {
         CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(allModes, i);
         if (CGDisplayModeGetPixelWidth(mode) == pixelWidth &&
             CGDisplayModeGetPixelHeight(mode) == pixelHeight) {
-            targetMode = mode;
-            break;
+            size_t lw = CGDisplayModeGetWidth(mode);
+            double scale = lw > 0 ? (double)pixelWidth / (double)lw : 1.0;
+            if (scale > bestScale) {
+                bestScale = scale;
+                targetMode = mode;
+            }
         }
     }
 
