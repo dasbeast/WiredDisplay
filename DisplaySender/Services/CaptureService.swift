@@ -270,11 +270,13 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         guard converterError == nil else { return nil }
         guard conversionStatus == .haveData || conversionStatus == .inputRanDry else { return nil }
         guard convertedBuffer.frameLength > 0 else { return nil }
-        guard let int16ChannelData = convertedBuffer.int16ChannelData?.pointee else { return nil }
 
         let bytesPerFrame = Int(outputAudioFormat.streamDescription.pointee.mBytesPerFrame)
         let payloadLength = Int(convertedBuffer.frameLength) * bytesPerFrame
-        let payload = Data(bytes: int16ChannelData, count: payloadLength)
+        let audioBuffer = convertedBuffer.audioBufferList.pointee.mBuffers
+        guard let audioBufferData = audioBuffer.mData else { return nil }
+        guard Int(audioBuffer.mDataByteSize) >= payloadLength else { return nil }
+        let payload = Data(bytes: audioBufferData, count: payloadLength)
 
         let audioPacket = AudioPacket(
             packetIndex: audioPacketIndex,

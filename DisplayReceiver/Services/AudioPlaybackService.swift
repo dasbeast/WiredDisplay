@@ -47,13 +47,14 @@ final class AudioPlaybackService {
         let bytesPerFrame = Int(playbackFormat.streamDescription.pointee.mBytesPerFrame)
         let expectedPayloadLength = Int(frameCount) * bytesPerFrame
         guard payload.count >= expectedPayloadLength else { return }
-        guard let destination = buffer.int16ChannelData?.pointee else { return }
+        guard let destination = buffer.mutableAudioBufferList.pointee.mBuffers.mData else { return }
 
         buffer.frameLength = frameCount
         payload.withUnsafeBytes { bytes in
             guard let baseAddress = bytes.baseAddress else { return }
             memcpy(destination, baseAddress, expectedPayloadLength)
         }
+        buffer.mutableAudioBufferList.pointee.mBuffers.mDataByteSize = UInt32(expectedPayloadLength)
 
         if queuedBufferCount >= NetworkProtocol.audioPlaybackMaxQueuedBuffers {
             playerNode.stop()
