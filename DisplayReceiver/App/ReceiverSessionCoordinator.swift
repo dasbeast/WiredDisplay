@@ -15,6 +15,7 @@ final class ReceiverSessionCoordinator {
     private let videoDatagramListenerService: VideoDatagramListenerService
     private let decoderService: DecoderService
     private let renderService: RenderService
+    private let audioPlaybackService: AudioPlaybackService
     private let frameDecodePipeline: ReceiverFrameDecodePipeline
     private let wiredPathMonitor = WiredPathStatusMonitor()
 
@@ -50,12 +51,14 @@ final class ReceiverSessionCoordinator {
         listenerService: ListenerService = ListenerService(),
         videoDatagramListenerService: VideoDatagramListenerService = VideoDatagramListenerService(),
         decoderService: DecoderService = DecoderService(),
-        renderService: RenderService = RenderService()
+        renderService: RenderService = RenderService(),
+        audioPlaybackService: AudioPlaybackService? = nil
     ) {
         self.listenerService = listenerService
         self.videoDatagramListenerService = videoDatagramListenerService
         self.decoderService = decoderService
         self.renderService = renderService
+        self.audioPlaybackService = audioPlaybackService ?? AudioPlaybackService()
         self.frameDecodePipeline = ReceiverFrameDecodePipeline(
             decoderService: decoderService,
             renderService: renderService
@@ -103,6 +106,7 @@ final class ReceiverSessionCoordinator {
                         self.state = .listening
                     }
                 } else {
+                    self.audioPlaybackService.stop()
                     self.state = .idle
                 }
             }
@@ -134,6 +138,13 @@ final class ReceiverSessionCoordinator {
                 payload: payload,
                 arrivalNanoseconds: DispatchTime.now().uptimeNanoseconds
             )
+        }
+
+        listenerService.onBinaryAudioFrame = { [weak self] header, payload in
+            guard let self else { return }
+            Task { @MainActor in
+                self.audioPlaybackService.play(header: header, payload: payload)
+            }
         }
 
         videoDatagramListenerService.onBinaryVideoFrame = { [weak self] header, vps, sps, pps, payload in
@@ -196,6 +207,7 @@ final class ReceiverSessionCoordinator {
         RenderFrameStore.shared.reset()
 
         renderService.prepareRenderer()
+        audioPlaybackService.prepare()
         videoDatagramListenerService.startListening(port: port)
         listenerService.startListening(port: port)
     }
@@ -203,6 +215,7 @@ final class ReceiverSessionCoordinator {
     /// Stops listener and returns receiver pipeline to idle state.
     func stopListening() {
         frameDecodePipeline.reset()
+        audioPlaybackService.stop()
         listenerService.stopListening()
         videoDatagramListenerService.stopListening()
         state = .idle

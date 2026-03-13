@@ -112,6 +112,15 @@ final class SenderSessionCoordinator {
             _ = encoder.encode(frame: frame)
         }
 
+        captureService.onCapturedAudio = { [weak self] audioPacket in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.state == .running else { return }
+                self.transportService.sendAudioPacket(audioPacket)
+            }
+        }
+
         captureService.onError = { [weak self] error in
             guard let self else { return }
             Task { @MainActor in

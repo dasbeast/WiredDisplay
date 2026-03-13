@@ -100,6 +100,27 @@ final class TransportService {
         }
     }
 
+    func sendAudioPacket(_ audioPacket: AudioPacket) {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            guard let framedData = BinaryAudioWire.serializeFramed(audioPacket: audioPacket) else {
+                self.onError?(TransportServiceError.serializationFailed)
+                return
+            }
+
+            let wirePayloadBytes = framedData.count - 4
+            guard wirePayloadBytes <= NetworkProtocol.maximumMessageBytes else {
+                self.onError?(TransportServiceError.messageTooLarge)
+                return
+            }
+
+            let outbound = OutboundFrame(data: framedData, isKeyFrame: true)
+            self.enqueueOutboundFrame(outbound)
+            self.flushPendingIfPossible()
+        }
+    }
+
     func sendHello(
         senderName: String,
         preferredVideoTransport: NetworkProtocol.VideoTransportMode,

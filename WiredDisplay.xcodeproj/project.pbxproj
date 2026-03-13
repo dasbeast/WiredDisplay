@@ -29,6 +29,9 @@
 		DEE8512E2F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */; };
 		DEE8512F2F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */; };
 		DEE851302F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */; };
+		DEE851312F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */; };
+		DEE851332F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */; };
+		DEE851342F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -55,6 +58,7 @@
 		DEE850FD2F5D0DE700C44CD5 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
 		DEE851292F5D135200C44CD5 /* NetworkDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDiagnostics.swift; sourceTree = "<group>"; };
 		DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoFrameTypes.swift; sourceTree = "<group>"; };
+		DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioFrameTypes.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -203,6 +207,7 @@
 				DEE850A22F5D0A9400C44CD5 /* NetworkProtocol.swift */,
 				DEE851292F5D135200C44CD5 /* NetworkDiagnostics.swift */,
 				DEE8512D2F5D154700C44CD5 /* VideoFrameTypes.swift */,
+				DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */,
 			);
 			path = Protocol;
 			sourceTree = "<group>";
@@ -359,6 +364,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DEE851312F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */,
 				DEE8512F2F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */,
 				DEE850E92F5D0D2500C44CD5 /* FrameMetadata.swift in Sources */,
 				DEE8512C2F5D135200C44CD5 /* NetworkDiagnostics.swift in Sources */,
@@ -372,6 +378,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				DEE8512A2F5D135200C44CD5 /* NetworkDiagnostics.swift in Sources */,
+				DEE851332F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */,
 				DEE8512E2F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */,
 				DEE850EA2F5D0D2500C44CD5 /* FrameMetadata.swift in Sources */,
 				DEE850ED2F5D0D2C00C44CD5 /* VideoPacket.swift in Sources */,
@@ -387,6 +394,7 @@
 				DEE850EE2F5D0D2C00C44CD5 /* VideoPacket.swift in Sources */,
 				DEE850F12F5D0D3200C44CD5 /* NetworkProtocol.swift in Sources */,
 				DEE8512B2F5D135200C44CD5 /* NetworkDiagnostics.swift in Sources */,
+				DEE851342F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */,
 				DEE851302F5D154700C44CD5 /* VideoFrameTypes.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

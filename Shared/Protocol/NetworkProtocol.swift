@@ -57,6 +57,10 @@ enum NetworkProtocol {
     // This avoids base64-encoding binary data inside JSON envelopes.
     static let binaryMagic: UInt32 = 0x57445646 // "WDVF" – WiredDisplay Video Frame
     static let videoDatagramMagic: UInt32 = 0x57445644 // "WDVD" – WiredDisplay Video Datagram
+    static let binaryAudioMagic: UInt32 = 0x57444146 // "WDAF" – WiredDisplay Audio Frame
+    static let audioSampleRateHz: Double = 48_000
+    static let audioChannelCount: Int = 2
+    static let audioPlaybackMaxQueuedBuffers: Int = 8
 
     enum MessageType: UInt8, Codable, Sendable {
         case hello = 1

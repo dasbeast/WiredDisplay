@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import CoreMedia
 import CoreVideo
@@ -10,12 +11,22 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private var stream: SCStream?
     private var frameIndex: UInt64 = 0
+    private var audioPacketIndex: UInt64 = 0
     private let captureQueue = DispatchQueue(label: "wireddisplay.sender.capture", qos: .userInteractive)
+    private let outputAudioFormat = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: NetworkProtocol.audioSampleRateHz,
+        channels: AVAudioChannelCount(NetworkProtocol.audioChannelCount),
+        interleaved: true
+    )
+    private var audioConverter: AVAudioConverter?
+    private var audioConverterSourceSignature: String?
 
     /// The CGDirectDisplayID to capture. If 0, captures the main display.
     var targetDisplayID: CGDirectDisplayID = 0
 
     var onCapturedFrame: ((CapturedFrame) -> Void)?
+    var onCapturedAudio: ((AudioPacket) -> Void)?
     var onError: ((Error) -> Void)?
 
     func startCapture(width: Int, height: Int, framesPerSecond: Int = 60) {
@@ -23,6 +34,9 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
         isCapturing = true
         frameIndex = 0
+        audioPacketIndex = 0
+        audioConverter = nil
+        audioConverterSourceSignature = nil
 
         if NetworkProtocol.forceSyntheticCaptureForDiagnostics {
             startSyntheticCapture(width: width, height: height, framesPerSecond: framesPerSecond)
@@ -134,6 +148,10 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(framesPerSecond, 1)))
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.scalesToFit = false
+        configuration.capturesAudio = true
+        configuration.excludesCurrentProcessAudio = true
+        configuration.sampleRate = Int(NetworkProtocol.audioSampleRateHz)
+        configuration.channelCount = NetworkProtocol.audioChannelCount
         if #available(macOS 14.0, *) {
             configuration.captureResolution = .best
         }
@@ -142,6 +160,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+        try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
         try await newStream.startCapture()
 
         self.stream = newStream
@@ -150,35 +169,43 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - SCStreamOutput
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard isCapturing, type == .screen else { return }
         guard sampleBuffer.isValid else { return }
-        guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
+        guard isCapturing else { return }
 
-        let frameWidth = CVPixelBufferGetWidth(pixelBuffer)
-        let frameHeight = CVPixelBufferGetHeight(pixelBuffer)
-        guard frameWidth > 0, frameHeight > 0 else { return }
+        switch type {
+        case .screen:
+            guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
 
-        let currentIndex = frameIndex
-        frameIndex += 1
+            let frameWidth = CVPixelBufferGetWidth(pixelBuffer)
+            let frameHeight = CVPixelBufferGetHeight(pixelBuffer)
+            guard frameWidth > 0, frameHeight > 0 else { return }
 
-        let metadata = FrameMetadata(
-            frameIndex: currentIndex,
-            timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
-            width: frameWidth,
-            height: frameHeight,
-            isKeyFrame: currentIndex % 60 == 0
-        )
+            let currentIndex = frameIndex
+            frameIndex += 1
 
-        // Pass CVPixelBuffer directly to avoid expensive copy for H.264 encoding
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        let frame = CapturedFrame(
-            metadata: metadata,
-            rawData: Data(),
-            bytesPerRow: bytesPerRow,
-            pixelFormat: .bgra8,
-            pixelBuffer: pixelBuffer
-        )
-        onCapturedFrame?(frame)
+            let metadata = FrameMetadata(
+                frameIndex: currentIndex,
+                timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                width: frameWidth,
+                height: frameHeight,
+                isKeyFrame: currentIndex % 60 == 0
+            )
+
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            let frame = CapturedFrame(
+                metadata: metadata,
+                rawData: Data(),
+                bytesPerRow: bytesPerRow,
+                pixelFormat: .bgra8,
+                pixelBuffer: pixelBuffer
+            )
+            onCapturedFrame?(frame)
+        case .audio:
+            guard let audioPacket = makeAudioPacket(from: sampleBuffer) else { return }
+            onCapturedAudio?(audioPacket)
+        default:
+            return
+        }
     }
 
     // MARK: - SCStreamDelegate
@@ -191,6 +218,89 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - Synthetic Fallback
 
     private var syntheticTimer: DispatchSourceTimer?
+
+    private func makeAudioPacket(from sampleBuffer: CMSampleBuffer) -> AudioPacket? {
+        guard let outputAudioFormat else { return nil }
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
+        guard let sourceASBDPointer = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else { return nil }
+        guard let sourceFormat = AVAudioFormat(streamDescription: sourceASBDPointer) else { return nil }
+
+        let sourceSignature = audioFormatSignature(for: sourceASBDPointer.pointee)
+        if audioConverter == nil || audioConverterSourceSignature != sourceSignature {
+            audioConverter = AVAudioConverter(from: sourceFormat, to: outputAudioFormat)
+            audioConverterSourceSignature = sourceSignature
+        }
+
+        guard let audioConverter else { return nil }
+
+        let sourceFrameCount = AVAudioFrameCount(max(0, CMSampleBufferGetNumSamples(sampleBuffer)))
+        guard sourceFrameCount > 0 else { return nil }
+        guard let sourceBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: sourceFrameCount) else {
+            return nil
+        }
+
+        sourceBuffer.frameLength = sourceFrameCount
+        let copyStatus = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer,
+            at: 0,
+            frameCount: Int32(sourceFrameCount),
+            into: sourceBuffer.mutableAudioBufferList
+        )
+        guard copyStatus == noErr else { return nil }
+
+        let ratio = outputAudioFormat.sampleRate / max(1.0, sourceFormat.sampleRate)
+        let targetCapacity = AVAudioFrameCount(max(Double(sourceFrameCount) * ratio, 1.0).rounded(.up) + 64)
+        guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputAudioFormat, frameCapacity: targetCapacity) else {
+            return nil
+        }
+
+        var converterError: NSError?
+        var consumedSourceBuffer = false
+        let conversionStatus = audioConverter.convert(to: convertedBuffer, error: &converterError) { _, outStatus in
+            if consumedSourceBuffer {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+
+            consumedSourceBuffer = true
+            outStatus.pointee = .haveData
+            return sourceBuffer
+        }
+
+        guard converterError == nil else { return nil }
+        guard conversionStatus == .haveData || conversionStatus == .inputRanDry else { return nil }
+        guard convertedBuffer.frameLength > 0 else { return nil }
+        guard let int16ChannelData = convertedBuffer.int16ChannelData?.pointee else { return nil }
+
+        let bytesPerFrame = Int(outputAudioFormat.streamDescription.pointee.mBytesPerFrame)
+        let payloadLength = Int(convertedBuffer.frameLength) * bytesPerFrame
+        let payload = Data(bytes: int16ChannelData, count: payloadLength)
+
+        let audioPacket = AudioPacket(
+            packetIndex: audioPacketIndex,
+            timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            codec: .pcmInt16Interleaved,
+            sampleRateHz: outputAudioFormat.sampleRate,
+            channelCount: Int(outputAudioFormat.channelCount),
+            frameCount: Int(convertedBuffer.frameLength),
+            payload: payload
+        )
+        audioPacketIndex += 1
+        return audioPacket
+    }
+
+    private func audioFormatSignature(for asbd: AudioStreamBasicDescription) -> String {
+        [
+            String(asbd.mSampleRate),
+            String(asbd.mFormatID),
+            String(asbd.mFormatFlags),
+            String(asbd.mBytesPerPacket),
+            String(asbd.mFramesPerPacket),
+            String(asbd.mBytesPerFrame),
+            String(asbd.mChannelsPerFrame),
+            String(asbd.mBitsPerChannel)
+        ].joined(separator: ":")
+    }
 
     private func startSyntheticCapture(width: Int, height: Int, framesPerSecond: Int) {
         let queue = DispatchQueue(label: "wireddisplay.sender.capture.synthetic")

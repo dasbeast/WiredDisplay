@@ -15,6 +15,7 @@ final class ListenerService {
     var onStateChange: ((Bool) -> Void)?
     var onEnvelope: ((NetworkEnvelope) -> Void)?
     var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data?, Data) -> Void)?
+    var onBinaryAudioFrame: ((BinaryAudioHeader, Data) -> Void)?
     var onError: ((Error) -> Void)?
 
     func startListening(port: UInt16 = NetworkProtocol.defaultPort) {
@@ -213,6 +214,13 @@ final class ListenerService {
                 if NetworkProtocol.readUInt32BigEndian(from: payload, atOffset: 0) == NetworkProtocol.binaryMagic {
                     if let result = BinaryFrameWire.deserialize(data: payload) {
                         onBinaryVideoFrame?(result.header, result.vps, result.sps, result.pps, result.payload)
+                    }
+                    continue
+                }
+
+                if NetworkProtocol.readUInt32BigEndian(from: payload, atOffset: 0) == NetworkProtocol.binaryAudioMagic {
+                    if let result = BinaryAudioWire.deserialize(data: payload) {
+                        onBinaryAudioFrame?(result.header, result.payload)
                     }
                     continue
                 }
