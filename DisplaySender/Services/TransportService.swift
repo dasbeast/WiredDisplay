@@ -18,6 +18,8 @@ final class TransportService {
 
     private var pendingOutboundFrames: [OutboundFrame] = []
     private var awaitingKeyFrameAfterDrop = false
+    private var networkInFlightCount = 0
+    private let maxNetworkInFlight = 2
     private(set) var droppedOutboundFrameCount: UInt64 = 0 {
         didSet { onDroppedFrameCountChange?(droppedOutboundFrameCount) }
     }
@@ -194,6 +196,7 @@ final class TransportService {
         receiveBuffer.removeAll(keepingCapacity: false)
         pendingOutboundFrames.removeAll(keepingCapacity: false)
         awaitingKeyFrameAfterDrop = false
+        networkInFlightCount = 0
         droppedOutboundFrameCount = 0
 
         isConnected = false
@@ -240,13 +243,18 @@ final class TransportService {
     private func flushPendingIfPossible() {
         guard isConnected, let connection else { return }
         guard !pendingOutboundFrames.isEmpty else { return }
-        // Coalesce every pending frame into one batch so the OS can push them over the
-        // Thunderbolt bridge atomically, eliminating per-frame syscall micro-stutter.
+        // Batch all eligible frames so the OS coalesces them over the Thunderbolt bridge.
+        // networkInFlightCount caps concurrent in-kernel sends to prevent kernel buffer bloat
+        // (bufferbloat) that causes latency spikes under sustained 5K HEVC load.
         connection.batch {
-            while !pendingOutboundFrames.isEmpty {
+            while !pendingOutboundFrames.isEmpty && networkInFlightCount < maxNetworkInFlight {
                 let frame = pendingOutboundFrames.removeFirst()
+                networkInFlightCount += 1
                 connection.send(content: frame.data, completion: .contentProcessed { [weak self] error in
-                    if let error { self?.onError?(error) }
+                    guard let self else { return }
+                    self.networkInFlightCount -= 1
+                    if let error { self.onError?(error) }
+                    self.flushPendingIfPossible()
                 })
             }
         }
@@ -335,6 +343,8 @@ final class VideoDatagramTransportService {
     private var connectedPort: UInt16?
     private var pendingFrames: [EncodedFrame] = []
     private var awaitingKeyFrameAfterDrop = false
+    private var networkInFlightCount = 0
+    private let maxNetworkInFlight = 2
     private var droppedOutboundFrameCount: UInt64 = 0
 
     var onStateChange: ((Bool) -> Void)?
@@ -389,6 +399,7 @@ final class VideoDatagramTransportService {
         isConnected = false
         pendingFrames.removeAll(keepingCapacity: false)
         awaitingKeyFrameAfterDrop = false
+        networkInFlightCount = 0
         droppedOutboundFrameCount = 0
         onStateChange?(false)
     }
@@ -439,9 +450,9 @@ final class VideoDatagramTransportService {
 
     private func flushPendingFrameIfPossible() {
         guard isConnected, let connection else { return }
-        // Drain every queued frame immediately: submit each datagram batch to the OS without
-        // waiting for a contentProcessed acknowledgement before moving to the next frame.
-        while !pendingFrames.isEmpty {
+        // networkInFlightCount caps concurrent datagram bursts to prevent kernel buffer bloat
+        // under high-motion 5K HEVC load. Each frame's batch counts as one in-flight unit.
+        while !pendingFrames.isEmpty && networkInFlightCount < maxNetworkInFlight {
             let frameToSend = pendingFrames.removeFirst()
             guard let datagrams = VideoDatagramWire.serialize(encodedFrame: frameToSend) else {
                 onError?(TransportServiceError.serializationFailed)
@@ -459,13 +470,19 @@ final class VideoDatagramTransportService {
                 ? max(1, NetworkProtocol.udpKeyFrameSendRedundancy)
                 : 1
 
+            networkInFlightCount += 1
             connection.batch {
                 for transmissionIndex in 0..<transmissionCount {
                     for (index, datagram) in datagrams.enumerated() {
                         let isLastDatagram = transmissionIndex == transmissionCount - 1 && index == datagrams.count - 1
                         let completion: NWConnection.SendCompletion = isLastDatagram
                             ? .contentProcessed { [weak self] error in
-                                if let error { self?.onError?(error) }
+                                guard let self else { return }
+                                self.queue.async {
+                                    self.networkInFlightCount -= 1
+                                    if let error { self.onError?(error) }
+                                    self.flushPendingFrameIfPossible()
+                                }
                             }
                             : .idempotent
                         connection.send(content: datagram, completion: completion)

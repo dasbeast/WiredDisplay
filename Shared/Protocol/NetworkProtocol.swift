@@ -31,9 +31,27 @@ enum NetworkProtocol {
     static let targetVideoBitrateBps: Int = 300_000_000
     static let minVideoBitrateBps: Int = 50_000_000
     static let maxVideoBitrateBps: Int = 2_000_000_000  // 2 Gbps – well within Thunderbolt 3 limits
-    // HEVC pixel budget: supports up to 5120×2880 HiDPI capture (22.1 MP).
-    // Hardware HEVC encoders handle this resolution at 60 fps over Thunderbolt.
-    static let maxCapturePixelsAtTargetFPS: Int = 22_118_400 // 5120x2880 + headroom
+    // HEVC pixel budget: scaled to the machine's Media Engine tier.
+    // Pro / Max / Ultra chips have a dedicated media engine that handles 5K at 60fps.
+    // Base M-series chips share the media engine with other workloads; cap at 4K to
+    // prevent hardware encoder starvation and frame-drop cascades.
+    static var maxCapturePixelsAtTargetFPS: Int {
+        let chip = chipBrandString()
+        if chip.contains("Pro") || chip.contains("Max") || chip.contains("Ultra") {
+            return 14_745_600  // 5K budget: 5120×2880
+        }
+        return 8_847_360       // 4K budget: 3840×2304 for base M1/M2/M3/M4
+    }
+
+    /// Reads the processor brand string via sysctl (e.g. "Apple M3 Max").
+    private static func chipBrandString() -> String {
+        var size = 0
+        sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0)
+        guard size > 0 else { return "" }
+        var buffer = [CChar](repeating: 0, count: size)
+        sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0)
+        return String(cString: buffer)
+    }
     static let allowLoopbackForLocalTesting: Bool = true
     static let preferRawFrameTransportForDiagnostics: Bool = false
     static let rawDiagnosticsMaxWidth: Int = 320

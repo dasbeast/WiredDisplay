@@ -19,7 +19,7 @@ final class EncoderService {
     private let stateLock = NSLock()
     private var forceNextKeyFrame = false
     private var framesInFlight = 0
-    private let maxFramesInFlight = 8
+    private let maxFramesInFlight = 2
     private var preferredKeyFrameIntervalFrames = max(
         1,
         NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds
@@ -201,13 +201,6 @@ final class EncoderService {
         let bitrate = NSNumber(value: currentTargetBitrateBps)
         setCompressionProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate, label: "AverageBitRate")
 
-        // DataRateLimits: peak rate ceiling over 1-second windows. Must exceed the target
-        // bitrate so the encoder's rate control isn't fighting an artificial cap.
-        // Thunderbolt 3 provides 40 Gbps — allow up to 500 Mbps (well within bandwidth).
-        let dataRateLimitBytes = max(62_500_000, currentTargetBitrateBps / 8 * 3) // 3× target or 500 Mbps floor
-        let dataRateLimits: [NSNumber] = [NSNumber(value: dataRateLimitBytes), 1.0 as NSNumber]
-        setCompressionProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: dataRateLimits as CFArray, label: "DataRateLimits")
-
         // Frame rate hint for rate control.
         let fps = NetworkProtocol.targetFramesPerSecond as CFNumber
         setCompressionProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps, label: "ExpectedFrameRate")
@@ -245,16 +238,6 @@ final class EncoderService {
             value: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
             label: "YCbCrMatrix"
         )
-
-        // Prioritize encoding speed over compression efficiency — critical for real-time display streaming.
-        if #available(macOS 13.0, *) {
-            setCompressionProperty(
-                session,
-                key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-                value: kCFBooleanTrue,
-                label: "PrioritizeEncodingSpeedOverQuality"
-            )
-        }
 
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
