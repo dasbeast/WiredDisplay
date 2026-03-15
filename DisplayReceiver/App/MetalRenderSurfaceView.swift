@@ -97,6 +97,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var retainedCbCrTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
         private var retainedPixelBufferTextureSlot = 0
 
+        // Triple-buffering semaphore: limits CPU-ahead GPU submissions to 3 frames,
+        // preventing the render loop from starving WindowServer during high-motion content.
+        private let inFlightSemaphore = DispatchSemaphore(value: 3)
+
         // MetalFX Spatial Scaler state
         private var spatialScaler: MTLFXSpatialScaler?
         private var intermediateColorTexture: MTLTexture?
@@ -136,6 +140,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         func draw(in view: MTKView) {
+            _ = inFlightSemaphore.wait(timeout: .distantFuture)
+
             guard let device = view.device,
                   let commandQueue,
                   let pipelineState,
@@ -143,7 +149,12 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                   let samplerState,
                   let commandBuffer = commandQueue.makeCommandBuffer(),
                   let drawable = view.currentDrawable else {
+                inFlightSemaphore.signal()
                 return
+            }
+
+            commandBuffer.addCompletedHandler { [weak self] _ in
+                self?.inFlightSemaphore.signal()
             }
 
             let frame = RenderFrameStore.shared.snapshot()
