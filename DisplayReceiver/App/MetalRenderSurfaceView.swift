@@ -263,15 +263,15 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             currentOutputHeight = outputHeight
 
             // Create intermediate texture at source (input) resolution.
-            let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm,
-                width: inputWidth,
-                height: inputHeight,
-                mipmapped: false
-            )
-            textureDescriptor.usage = [.renderTarget, .shaderRead]
-            textureDescriptor.storageMode = .private
-            intermediateColorTexture = device.makeTexture(descriptor: textureDescriptor)
+            let intermediateDescriptor = MTLTextureDescriptor()
+            intermediateDescriptor.textureType = .type2D
+            intermediateDescriptor.pixelFormat = .bgra8Unorm
+            intermediateDescriptor.width = inputWidth
+            intermediateDescriptor.height = inputHeight
+            intermediateDescriptor.mipmapLevelCount = 1
+            intermediateDescriptor.usage = [.renderTarget, .shaderRead]
+            intermediateDescriptor.storageMode = .private
+            intermediateColorTexture = device.makeTexture(descriptor: intermediateDescriptor)
 
             guard intermediateColorTexture != nil else {
                 print("[MetalRenderSurfaceView] Failed to create intermediate texture \(inputWidth)x\(inputHeight)")
