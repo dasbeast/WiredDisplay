@@ -68,7 +68,7 @@ final class DecoderService {
                         pixelBuffer: pixelBuffer,
                         pixelData: nil,
                         bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
-                        pixelFormat: .bgra8
+                        pixelFormat: .yuv420
                     )
                 }
                 print("[DecoderService] H.264 decode returned nil for frame \(encodedFrame.metadata.frameIndex)")
@@ -106,7 +106,7 @@ final class DecoderService {
                         pixelBuffer: pixelBuffer,
                         pixelData: nil,
                         bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
-                        pixelFormat: .bgra8
+                        pixelFormat: .yuv420
                     )
                 }
                 print("[DecoderService] HEVC decode returned nil for frame \(encodedFrame.metadata.frameIndex)")
@@ -238,7 +238,7 @@ final class DecoderService {
 
         let attrs: [CFString: Any] = [
             kCVPixelBufferMetalCompatibilityKey: true,
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         ]
 
         var callbackRecord = VTDecompressionOutputCallbackRecord(

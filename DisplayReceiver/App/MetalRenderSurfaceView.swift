@@ -2,7 +2,7 @@ import SwiftUI
 import MetalKit
 import CoreVideo
 
-/// Metal-backed surface that renders the most recent decoded BGRA frame.
+/// Metal-backed surface that renders the most recent decoded YUV (bi-planar 420v) frame.
 struct MetalRenderSurfaceView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -58,10 +58,27 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         fragment float4 texturedQuadFragment(
             VertexOut in [[stage_in]],
-            texture2d<float> sourceTexture [[texture(0)]],
-            sampler sourceSampler [[sampler(0)]]
+            texture2d<float> textureY    [[texture(0)]],
+            texture2d<float> textureCbCr [[texture(1)]],
+            sampler sourceSampler        [[sampler(0)]]
         ) {
-            return sourceTexture.sample(sourceSampler, in.textureCoordinate);
+            float  y    = textureY.sample(sourceSampler, in.textureCoordinate).r;
+            float2 cbcr = textureCbCr.sample(sourceSampler, in.textureCoordinate).rg;
+
+            // Bias for BT.709 limited-range (video range): Y in [16,235], CbCr in [16,240]
+            float3 yuv = float3(y - (16.0 / 255.0), cbcr.x - 0.5, cbcr.y - 0.5);
+
+            // BT.709 limited-range YCbCr -> linear RGB (column-major: each float3 is one column)
+            // Column 0: Y coefficients for R, G, B
+            // Column 1: Cb coefficients for R, G, B
+            // Column 2: Cr coefficients for R, G, B
+            const float3x3 rec709 = float3x3(
+                float3( 1.1644,  1.1644,  1.1644),
+                float3( 0.0000, -0.3917,  2.0172),
+                float3( 1.5960, -0.8129,  0.0000)
+            );
+
+            return float4(clamp(rec709 * yuv, 0.0, 1.0), 1.0);
         }
         """
 
@@ -70,10 +87,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var vertexBuffer: MTLBuffer?
         private var samplerState: MTLSamplerState?
         private var textureCache: CVMetalTextureCache?
-        private var retainedPixelBufferTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
+
+        // Retain both planes per slot to prevent premature CVMetalTexture deallocation.
+        private var retainedYTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
+        private var retainedCbCrTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
         private var retainedPixelBufferTextureSlot = 0
-        private var retainedRawTextures: [MTLTexture?] = Array(repeating: nil, count: 3)
-        private var retainedRawTextureSlot = 0
 
         func attach(to view: MTKView) {
             guard let device = view.device else { return }
@@ -105,8 +123,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         func draw(in view: MTKView) {
-            guard let device = view.device,
-                  let commandQueue,
+            guard let commandQueue,
                   let pipelineState,
                   let vertexBuffer,
                   let samplerState,
@@ -117,7 +134,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             let frame = RenderFrameStore.shared.snapshot()
-            let sourceTexture = frame.flatMap { makeTexture(from: $0, device: device) }
+            let textures = frame.flatMap { makeYCbCrTextures(from: $0) }
 
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
                 commandBuffer.present(drawable)
@@ -125,11 +142,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
 
-            if let sourceTexture {
+            if let textures {
                 var uniforms = RenderUniforms(
                     scale: makeAspectFitScale(
-                        contentWidth: sourceTexture.width,
-                        contentHeight: sourceTexture.height,
+                        contentWidth: textures.y.width,
+                        contentHeight: textures.y.height,
                         drawableSize: view.drawableSize
                     )
                 )
@@ -137,7 +154,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 encoder.setRenderPipelineState(pipelineState)
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
-                encoder.setFragmentTexture(sourceTexture, index: 0)
+                encoder.setFragmentTexture(textures.y, index: 0)
+                encoder.setFragmentTexture(textures.cbcr, index: 1)
                 encoder.setFragmentSamplerState(samplerState, index: 0)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
@@ -199,102 +217,58 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             return descriptor
         }
 
-        private func makeTexture(from frame: DecodedFrame, device: MTLDevice) -> MTLTexture? {
-            if let pixelBuffer = frame.pixelBuffer {
-                return makeTexture(from: pixelBuffer)
-            }
-
-            guard let pixelData = frame.pixelData,
-                  frame.pixelFormat == .bgra8,
-                  frame.metadata.width > 0,
-                  frame.metadata.height > 0,
-                  frame.bytesPerRow > 0 else {
-                return nil
-            }
-
-            let requiredByteCount = frame.bytesPerRow * frame.metadata.height
-            guard pixelData.count >= requiredByteCount else { return nil }
-
-            return makeTexture(
-                from: pixelData,
-                width: frame.metadata.width,
-                height: frame.metadata.height,
-                bytesPerRow: frame.bytesPerRow,
-                device: device
-            )
-        }
-
-        private func makeTexture(from pixelBuffer: CVPixelBuffer) -> MTLTexture? {
+        /// Extracts the Y (luma) and CbCr (chroma) Metal textures from a bi-planar YUV pixel buffer.
+        /// Returns nil if the frame has no pixel buffer (e.g. synthetic/rawBGRA diagnostic frames).
+        private func makeYCbCrTextures(from frame: DecodedFrame) -> (y: MTLTexture, cbcr: MTLTexture)? {
+            guard let pixelBuffer = frame.pixelBuffer else { return nil }
             guard let textureCache else { return nil }
 
-            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let width  = CVPixelBufferGetWidth(pixelBuffer)
             let height = CVPixelBufferGetHeight(pixelBuffer)
 
-            var cvTexture: CVMetalTexture?
-            let status = CVMetalTextureCacheCreateTextureFromImage(
+            // Plane 0: Luma (Y) — r8Unorm, full resolution
+            var cvTextureY: CVMetalTexture?
+            let statusY = CVMetalTextureCacheCreateTextureFromImage(
                 kCFAllocatorDefault,
                 textureCache,
                 pixelBuffer,
                 nil,
-                .bgra8Unorm,
+                .r8Unorm,
                 width,
                 height,
                 0,
-                &cvTexture
+                &cvTextureY
             )
 
-            guard status == kCVReturnSuccess,
-                  let cvTexture,
-                  let texture = CVMetalTextureGetTexture(cvTexture) else {
+            // Plane 1: Chroma (CbCr) — rg8Unorm, half resolution
+            var cvTextureCbCr: CVMetalTexture?
+            let statusCbCr = CVMetalTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault,
+                textureCache,
+                pixelBuffer,
+                nil,
+                .rg8Unorm,
+                width / 2,
+                height / 2,
+                1,
+                &cvTextureCbCr
+            )
+
+            guard statusY == kCVReturnSuccess, let cvTextureY,
+                  let textureY = CVMetalTextureGetTexture(cvTextureY),
+                  statusCbCr == kCVReturnSuccess, let cvTextureCbCr,
+                  let textureCbCr = CVMetalTextureGetTexture(cvTextureCbCr) else {
+                print("[MetalRenderSurfaceView] Failed to create YCbCr textures: Y=\(statusY) CbCr=\(statusCbCr)")
                 return nil
             }
 
-            retainedPixelBufferTextures[retainedPixelBufferTextureSlot] = cvTexture
-            retainedPixelBufferTextureSlot = (retainedPixelBufferTextureSlot + 1) % retainedPixelBufferTextures.count
-            return texture
-        }
+            // Retain both CVMetalTexture wrappers for the lifetime of the GPU frame.
+            let slot = retainedPixelBufferTextureSlot
+            retainedPixelBufferTextureSlot = (slot + 1) % retainedYTextures.count
+            retainedYTextures[slot]    = cvTextureY
+            retainedCbCrTextures[slot] = cvTextureCbCr
 
-        private func makeTexture(
-            from pixelData: Data,
-            width: Int,
-            height: Int,
-            bytesPerRow: Int,
-            device: MTLDevice
-        ) -> MTLTexture? {
-            let slot = retainedRawTextureSlot
-            retainedRawTextureSlot = (retainedRawTextureSlot + 1) % retainedRawTextures.count
-
-            let texture: MTLTexture
-            if let existingTexture = retainedRawTextures[slot],
-               existingTexture.width == width,
-               existingTexture.height == height {
-                texture = existingTexture
-            } else {
-                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: .bgra8Unorm,
-                    width: width,
-                    height: height,
-                    mipmapped: false
-                )
-                descriptor.usage = [.shaderRead]
-                descriptor.storageMode = .shared
-
-                guard let newTexture = device.makeTexture(descriptor: descriptor) else { return nil }
-                retainedRawTextures[slot] = newTexture
-                texture = newTexture
-            }
-
-            pixelData.withUnsafeBytes { rawBuffer in
-                guard let baseAddress = rawBuffer.baseAddress else { return }
-                texture.replace(
-                    region: MTLRegionMake2D(0, 0, width, height),
-                    mipmapLevel: 0,
-                    withBytes: baseAddress,
-                    bytesPerRow: bytesPerRow
-                )
-            }
-
-            return texture
+            return (y: textureY, cbcr: textureCbCr)
         }
 
         private func makeAspectFitScale(contentWidth: Int, contentHeight: Int, drawableSize: CGSize) -> SIMD2<Float> {

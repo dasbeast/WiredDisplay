@@ -4,6 +4,7 @@ import CoreVideo
 /// Pixel format contract for captured/decoded frame payloads.
 enum PixelFormat: String, Codable, Sendable {
     case bgra8
+    case yuv420
 }
 
 /// Declares codec intent for encoded frame payloads.

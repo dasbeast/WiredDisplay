@@ -147,7 +147,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.width = captureWidthPixels
         configuration.height = captureHeightPixels
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(framesPerSecond, 1)))
-        configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         configuration.scalesToFit = false
         configuration.capturesAudio = true
         configuration.excludesCurrentProcessAudio = true
@@ -200,7 +200,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
                 metadata: metadata,
                 rawData: Data(),
                 bytesPerRow: bytesPerRow,
-                pixelFormat: .bgra8,
+                pixelFormat: .yuv420,
                 pixelBuffer: pixelBuffer
             )
             onCapturedFrame?(frame)
