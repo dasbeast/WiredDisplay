@@ -1,8 +1,12 @@
 import SwiftUI
 import MetalKit
+import MetalFX
 import CoreVideo
 
 /// Metal-backed surface that renders the most recent decoded YUV (bi-planar 420v) frame.
+/// Two-pass pipeline:
+///   Pass 1 — YUV→RGB quad rendered to an offscreen intermediate texture (source resolution).
+///   Pass 2 — MetalFX Spatial Scaler upscales intermediate texture → drawable (display resolution).
 struct MetalRenderSurfaceView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -15,7 +19,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         view.preferredFramesPerSecond = 60
         view.clearColor = MTLClearColor(red: 0.08, green: 0.10, blue: 0.14, alpha: 1.0)
         view.colorPixelFormat = .bgra8Unorm
-        view.framebufferOnly = true
+        view.framebufferOnly = false
         view.delegate = context.coordinator
 
         context.coordinator.attach(to: view)
@@ -93,13 +97,21 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var retainedCbCrTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
         private var retainedPixelBufferTextureSlot = 0
 
+        // MetalFX Spatial Scaler state
+        private var spatialScaler: MTLFXSpatialScaler?
+        private var intermediateColorTexture: MTLTexture?
+        private var currentInputWidth: Int = 0
+        private var currentInputHeight: Int = 0
+        private var currentOutputWidth: Int = 0
+        private var currentOutputHeight: Int = 0
+
         func attach(to view: MTKView) {
             guard let device = view.device else { return }
 
             commandQueue = device.makeCommandQueue()
             vertexBuffer = makeVertexBuffer(device: device)
             samplerState = makeSamplerState(device: device)
-            pipelineState = makePipelineState(device: device, colorPixelFormat: view.colorPixelFormat)
+            pipelineState = makePipelineState(device: device, colorPixelFormat: .bgra8Unorm)
 
             var newTextureCache: CVMetalTextureCache?
             let cacheStatus = CVMetalTextureCacheCreate(
@@ -123,12 +135,12 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         func draw(in view: MTKView) {
-            guard let commandQueue,
+            guard let device = view.device,
+                  let commandQueue,
                   let pipelineState,
                   let vertexBuffer,
                   let samplerState,
                   let commandBuffer = commandQueue.makeCommandBuffer(),
-                  let renderPassDescriptor = view.currentRenderPassDescriptor,
                   let drawable = view.currentDrawable else {
                 return
             }
@@ -136,30 +148,185 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             let frame = RenderFrameStore.shared.snapshot()
             let textures = frame.flatMap { makeYCbCrTextures(from: $0) }
 
+            guard let textures else {
+                // No frame available — present a cleared drawable.
+                guard let clearPass = view.currentRenderPassDescriptor else {
+                    commandBuffer.commit()
+                    return
+                }
+                guard let clearEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: clearPass) else {
+                    commandBuffer.commit()
+                    return
+                }
+                clearEncoder.endEncoding()
+                commandBuffer.present(drawable)
+                commandBuffer.commit()
+                return
+            }
+
+            let inputWidth  = textures.y.width
+            let inputHeight = textures.y.height
+            let outputWidth  = Int(view.drawableSize.width)
+            let outputHeight = Int(view.drawableSize.height)
+
+            // Rebuild intermediate texture and MetalFX scaler when dimensions change.
+            if inputWidth != currentInputWidth
+                || inputHeight != currentInputHeight
+                || outputWidth != currentOutputWidth
+                || outputHeight != currentOutputHeight {
+                rebuildScalerResources(
+                    device: device,
+                    inputWidth: inputWidth,
+                    inputHeight: inputHeight,
+                    outputWidth: outputWidth,
+                    outputHeight: outputHeight
+                )
+            }
+
+            // --- Pass 1: Render YUV→RGB quad to offscreen intermediate texture ---
+            guard let intermediateColorTexture else {
+                // Scaler setup failed — fall back to direct rendering.
+                drawDirectToDrawable(
+                    view: view,
+                    commandBuffer: commandBuffer,
+                    drawable: drawable,
+                    pipelineState: pipelineState,
+                    vertexBuffer: vertexBuffer,
+                    samplerState: samplerState,
+                    textures: textures
+                )
+                return
+            }
+
+            let offscreenPassDescriptor = MTLRenderPassDescriptor()
+            offscreenPassDescriptor.colorAttachments[0].texture = intermediateColorTexture
+            offscreenPassDescriptor.colorAttachments[0].loadAction = .clear
+            offscreenPassDescriptor.colorAttachments[0].storeAction = .store
+            offscreenPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0.08, green: 0.10, blue: 0.14, alpha: 1.0)
+
+            guard let offscreenEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: offscreenPassDescriptor) else {
+                commandBuffer.present(drawable)
+                commandBuffer.commit()
+                return
+            }
+
+            // For Pass 1, the intermediate texture matches the input resolution exactly —
+            // no aspect-fit scaling needed; fill the entire intermediate surface.
+            var uniforms = RenderUniforms(scale: SIMD2<Float>(1.0, 1.0))
+
+            offscreenEncoder.setRenderPipelineState(pipelineState)
+            offscreenEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            offscreenEncoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
+            offscreenEncoder.setFragmentTexture(textures.y, index: 0)
+            offscreenEncoder.setFragmentTexture(textures.cbcr, index: 1)
+            offscreenEncoder.setFragmentSamplerState(samplerState, index: 0)
+            offscreenEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            offscreenEncoder.endEncoding()
+
+            // --- Pass 2: MetalFX Spatial Upscale → drawable ---
+            if let spatialScaler {
+                spatialScaler.colorTexture = intermediateColorTexture
+                spatialScaler.outputTexture = drawable.texture
+                spatialScaler.encode(commandBuffer: commandBuffer)
+            }
+
+            commandBuffer.present(drawable)
+            commandBuffer.commit()
+        }
+
+        /// Rebuilds the intermediate texture and MetalFX spatial scaler for new dimensions.
+        private func rebuildScalerResources(
+            device: MTLDevice,
+            inputWidth: Int,
+            inputHeight: Int,
+            outputWidth: Int,
+            outputHeight: Int
+        ) {
+            currentInputWidth  = inputWidth
+            currentInputHeight = inputHeight
+            currentOutputWidth  = outputWidth
+            currentOutputHeight = outputHeight
+
+            // Create intermediate texture at source (input) resolution.
+            let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: inputWidth,
+                height: inputHeight,
+                mipmapped: false
+            )
+            textureDescriptor.usage = [.renderTarget, .shaderRead]
+            textureDescriptor.storageMode = .private
+            intermediateColorTexture = device.makeTexture(descriptor: textureDescriptor)
+
+            guard intermediateColorTexture != nil else {
+                print("[MetalRenderSurfaceView] Failed to create intermediate texture \(inputWidth)x\(inputHeight)")
+                spatialScaler = nil
+                return
+            }
+
+            // Create MetalFX Spatial Scaler.
+            let scalerDescriptor = MTLFXSpatialScalerDescriptor()
+            scalerDescriptor.inputWidth  = inputWidth
+            scalerDescriptor.inputHeight = inputHeight
+            scalerDescriptor.outputWidth  = outputWidth
+            scalerDescriptor.outputHeight = outputHeight
+            scalerDescriptor.colorTextureFormat  = .bgra8Unorm
+            scalerDescriptor.outputTextureFormat = .bgra8Unorm
+            scalerDescriptor.colorProcessingMode = .perceptual
+
+            spatialScaler = scalerDescriptor.makeSpatialScaler(device: device)
+
+            if spatialScaler == nil {
+                print(
+                    "[MetalRenderSurfaceView] MetalFX spatial scaler creation failed " +
+                    "(\(inputWidth)x\(inputHeight) → \(outputWidth)x\(outputHeight)). " +
+                    "Falling back to direct rendering."
+                )
+            } else {
+                print(
+                    "[MetalRenderSurfaceView] MetalFX spatial scaler ready: " +
+                    "\(inputWidth)x\(inputHeight) → \(outputWidth)x\(outputHeight)"
+                )
+            }
+        }
+
+        /// Fallback: direct single-pass render to drawable when MetalFX is unavailable.
+        private func drawDirectToDrawable(
+            view: MTKView,
+            commandBuffer: MTLCommandBuffer,
+            drawable: CAMetalDrawable,
+            pipelineState: MTLRenderPipelineState,
+            vertexBuffer: MTLBuffer,
+            samplerState: MTLSamplerState,
+            textures: (y: MTLTexture, cbcr: MTLTexture)
+        ) {
+            guard let renderPassDescriptor = view.currentRenderPassDescriptor else {
+                commandBuffer.present(drawable)
+                commandBuffer.commit()
+                return
+            }
+
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
                 commandBuffer.present(drawable)
                 commandBuffer.commit()
                 return
             }
 
-            if let textures {
-                var uniforms = RenderUniforms(
-                    scale: makeAspectFitScale(
-                        contentWidth: textures.y.width,
-                        contentHeight: textures.y.height,
-                        drawableSize: view.drawableSize
-                    )
+            var uniforms = RenderUniforms(
+                scale: makeAspectFitScale(
+                    contentWidth: textures.y.width,
+                    contentHeight: textures.y.height,
+                    drawableSize: view.drawableSize
                 )
+            )
 
-                encoder.setRenderPipelineState(pipelineState)
-                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-                encoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
-                encoder.setFragmentTexture(textures.y, index: 0)
-                encoder.setFragmentTexture(textures.cbcr, index: 1)
-                encoder.setFragmentSamplerState(samplerState, index: 0)
-                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-            }
-
+            encoder.setRenderPipelineState(pipelineState)
+            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
+            encoder.setFragmentTexture(textures.y, index: 0)
+            encoder.setFragmentTexture(textures.cbcr, index: 1)
+            encoder.setFragmentSamplerState(samplerState, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
