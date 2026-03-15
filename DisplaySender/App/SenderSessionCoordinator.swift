@@ -96,8 +96,30 @@ final class SenderSessionCoordinator {
             guard let self else { return }
             guard frameDispatchGate.isRunning else { return }
 
+            // Route directly on the encoder thread — both transport services dispatch internally.
+            switch frameDispatchGate.negotiatedMode {
+            case .tcp:
+                self.transportService.sendVideoFrame(encodedFrame)
+            case .udp:
+                if encodedFrame.isKeyFrame {
+                    self.videoDatagramTransportService.noteKeyFrameBoundary()
+                    self.transportService.sendVideoFrame(encodedFrame)
+                } else {
+                    if frameDispatchGate.awaitingFirstRenderedFrame {
+                        Task { @MainActor [weak self] in
+                            self?.requestRecoveryKeyFrameIfNeeded(
+                                minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
+                            )
+                        }
+                        return
+                    }
+                    self.videoDatagramTransportService.sendVideoFrame(encodedFrame)
+                }
+            }
+
+            // Only the metrics counter requires MainActor.
             Task { @MainActor [weak self] in
-                self?.pushEncodedFrame(encodedFrame)
+                self?.recordOutboundFrame(encodedFrame)
             }
         }
 
@@ -260,6 +282,7 @@ final class SenderSessionCoordinator {
         self.targetHeight = targetHeight
         requestedVideoTransportMode = videoTransportMode
         negotiatedVideoTransportMode = videoTransportMode
+        frameDispatchGate.setNegotiatedMode(videoTransportMode)
         encoderService.setPreferredKeyFrameIntervalFrames(keyFrameIntervalFrames(for: videoTransportMode))
         sentFrameCount = 0
         droppedOutboundFrameCount = 0
@@ -296,6 +319,7 @@ final class SenderSessionCoordinator {
         guard canStartSession else { return }
         state = .running
         awaitingFirstRenderedFrame = negotiatedVideoTransportMode == .udp
+        frameDispatchGate.setAwaitingFirstRenderedFrame(awaitingFirstRenderedFrame)
         availableDisplayModes = []
         activeDisplayMode = nil
 
@@ -411,6 +435,7 @@ final class SenderSessionCoordinator {
         lastRecoveryKeyFrameRequestAt = nil
         awaitingUDPReadyToStart = false
         awaitingFirstRenderedFrame = false
+        frameDispatchGate.setAwaitingFirstRenderedFrame(false)
         droppedOutboundFrameCount = 0
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
@@ -585,6 +610,7 @@ final class SenderSessionCoordinator {
         lastRecoveryKeyFrameRequestAt = nil
         awaitingUDPReadyToStart = false
         awaitingFirstRenderedFrame = false
+        frameDispatchGate.setAwaitingFirstRenderedFrame(false)
         availableDisplayModes = []
         activeDisplayMode = nil
         stopHeartbeatTimers()
@@ -664,6 +690,7 @@ final class SenderSessionCoordinator {
 
     private func applyNegotiatedVideoTransport(_ videoTransportMode: NetworkProtocol.VideoTransportMode) {
         negotiatedVideoTransportMode = videoTransportMode
+        frameDispatchGate.setNegotiatedMode(videoTransportMode)
         encoderService.setPreferredKeyFrameIntervalFrames(keyFrameIntervalFrames(for: videoTransportMode))
         if videoTransportMode == .udp {
             if let desiredHost {
@@ -730,6 +757,7 @@ final class SenderSessionCoordinator {
         if negotiatedVideoTransportMode == .udp {
             if heartbeat.renderedFrameIndex != nil {
                 awaitingFirstRenderedFrame = false
+                frameDispatchGate.setAwaitingFirstRenderedFrame(false)
             } else if awaitingFirstRenderedFrame {
                 requestRecoveryKeyFrameIfNeeded(
                     minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
@@ -764,18 +792,36 @@ final class SenderSessionCoordinator {
 
 private final class SenderFrameDispatchGate {
     private let lock = NSLock()
-    private var running = false
+    private var _running = false
+    private var _negotiatedMode: NetworkProtocol.VideoTransportMode = .tcp
+    private var _awaitingFirstRenderedFrame = false
 
     var isRunning: Bool {
-        lock.lock()
-        let currentValue = running
-        lock.unlock()
-        return currentValue
+        lock.lock(); defer { lock.unlock() }
+        return _running
     }
 
-    func setRunning(_ isRunning: Bool) {
-        lock.lock()
-        running = isRunning
-        lock.unlock()
+    /// The negotiated video transport mode, safe to read from any thread.
+    var negotiatedMode: NetworkProtocol.VideoTransportMode {
+        lock.lock(); defer { lock.unlock() }
+        return _negotiatedMode
+    }
+
+    /// Whether the pipeline is waiting for the first UDP frame to reach the renderer.
+    var awaitingFirstRenderedFrame: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _awaitingFirstRenderedFrame
+    }
+
+    func setRunning(_ value: Bool) {
+        lock.lock(); _running = value; lock.unlock()
+    }
+
+    func setNegotiatedMode(_ value: NetworkProtocol.VideoTransportMode) {
+        lock.lock(); _negotiatedMode = value; lock.unlock()
+    }
+
+    func setAwaitingFirstRenderedFrame(_ value: Bool) {
+        lock.lock(); _awaitingFirstRenderedFrame = value; lock.unlock()
     }
 }

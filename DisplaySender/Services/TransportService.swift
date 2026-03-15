@@ -18,7 +18,6 @@ final class TransportService {
 
     private var pendingOutboundFrames: [OutboundFrame] = []
     private var awaitingKeyFrameAfterDrop = false
-    private var sendInFlight = false
     private(set) var droppedOutboundFrameCount: UInt64 = 0 {
         didSet { onDroppedFrameCountChange?(droppedOutboundFrameCount) }
     }
@@ -195,7 +194,6 @@ final class TransportService {
         receiveBuffer.removeAll(keepingCapacity: false)
         pendingOutboundFrames.removeAll(keepingCapacity: false)
         awaitingKeyFrameAfterDrop = false
-        sendInFlight = false
         droppedOutboundFrameCount = 0
 
         isConnected = false
@@ -240,25 +238,16 @@ final class TransportService {
     }
 
     private func flushPendingIfPossible() {
-        guard isConnected else { return }
-        guard !sendInFlight else { return }
-        guard let connection else { return }
-        guard !pendingOutboundFrames.isEmpty else { return }
-
-        sendInFlight = true
-        let frame = pendingOutboundFrames.removeFirst()
-
-        connection.send(content: frame.data, completion: .contentProcessed { [weak self] error in
-            guard let self else { return }
-            self.sendInFlight = false
-
-            if let error {
-                self.onError?(error)
-                return
-            }
-
-            self.flushPendingIfPossible()
-        })
+        guard isConnected, let connection else { return }
+        // Drain the entire queue: hand every pending frame to the OS network stack immediately.
+        // Network.framework pipelines the sends internally; no need to wait for contentProcessed
+        // before submitting the next frame.
+        while !pendingOutboundFrames.isEmpty {
+            let frame = pendingOutboundFrames.removeFirst()
+            connection.send(content: frame.data, completion: .contentProcessed { [weak self] error in
+                if let error { self?.onError?(error) }
+            })
+        }
     }
 
     private func receiveNextChunk(on connection: NWConnection) {
@@ -342,7 +331,6 @@ final class VideoDatagramTransportService {
     private var connection: NWConnection?
     private var connectedHost: String?
     private var connectedPort: UInt16?
-    private var sendInFlight = false
     private var pendingFrames: [EncodedFrame] = []
     private var awaitingKeyFrameAfterDrop = false
     private var droppedOutboundFrameCount: UInt64 = 0
@@ -397,7 +385,6 @@ final class VideoDatagramTransportService {
         connectedHost = nil
         connectedPort = nil
         isConnected = false
-        sendInFlight = false
         pendingFrames.removeAll(keepingCapacity: false)
         awaitingKeyFrameAfterDrop = false
         droppedOutboundFrameCount = 0
@@ -449,46 +436,38 @@ final class VideoDatagramTransportService {
     }
 
     private func flushPendingFrameIfPossible() {
-        guard isConnected else { return }
-        guard !sendInFlight else { return }
-        guard let connection, !pendingFrames.isEmpty else { return }
-        let frameToSend = pendingFrames.removeFirst()
-        guard let datagrams = VideoDatagramWire.serialize(encodedFrame: frameToSend) else {
-            onError?(TransportServiceError.serializationFailed)
-            return
-        }
+        guard isConnected, let connection else { return }
+        // Drain every queued frame immediately: submit each datagram batch to the OS without
+        // waiting for a contentProcessed acknowledgement before moving to the next frame.
+        while !pendingFrames.isEmpty {
+            let frameToSend = pendingFrames.removeFirst()
+            guard let datagrams = VideoDatagramWire.serialize(encodedFrame: frameToSend) else {
+                onError?(TransportServiceError.serializationFailed)
+                continue
+            }
 
-        sendInFlight = true
+            if frameToSend.metadata.frameIndex % 30 == 0 {
+                print(
+                    "[VideoDatagramTransport] Sending frame \(frameToSend.metadata.frameIndex): " +
+                    "codec=\(frameToSend.codec), datagrams=\(datagrams.count)"
+                )
+            }
 
-        if frameToSend.metadata.frameIndex % 30 == 0 {
-            print(
-                "[VideoDatagramTransport] Sending frame \(frameToSend.metadata.frameIndex): " +
-                "codec=\(frameToSend.codec), datagrams=\(datagrams.count)"
-            )
-        }
+            let transmissionCount = frameToSend.isKeyFrame
+                ? max(1, NetworkProtocol.udpKeyFrameSendRedundancy)
+                : 1
 
-        let transmissionCount = frameToSend.isKeyFrame
-            ? max(1, NetworkProtocol.udpKeyFrameSendRedundancy)
-            : 1
-
-        connection.batch {
-            for transmissionIndex in 0..<transmissionCount {
-                for (index, datagram) in datagrams.enumerated() {
-                    let isLastDatagram = transmissionIndex == transmissionCount - 1 && index == datagrams.count - 1
-                    let completion: NWConnection.SendCompletion = isLastDatagram
-                        ? .contentProcessed { [weak self] error in
-                            guard let self else { return }
-                            self.queue.async {
-                                self.sendInFlight = false
-                                if let error {
-                                    self.onError?(error)
-                                    return
-                                }
-                                self.flushPendingFrameIfPossible()
+            connection.batch {
+                for transmissionIndex in 0..<transmissionCount {
+                    for (index, datagram) in datagrams.enumerated() {
+                        let isLastDatagram = transmissionIndex == transmissionCount - 1 && index == datagrams.count - 1
+                        let completion: NWConnection.SendCompletion = isLastDatagram
+                            ? .contentProcessed { [weak self] error in
+                                if let error { self?.onError?(error) }
                             }
-                        }
-                        : .idempotent
-                    connection.send(content: datagram, completion: completion)
+                            : .idempotent
+                        connection.send(content: datagram, completion: completion)
+                    }
                 }
             }
         }

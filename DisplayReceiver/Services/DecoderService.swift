@@ -333,7 +333,6 @@ final class DecoderService {
 
         var flagsOut = VTDecodeInfoFlags()
         let decodeFlags: VTDecodeFrameFlags = [
-            ._EnableAsynchronousDecompression,
             ._1xRealTimePlayback
         ]
 
