@@ -239,14 +239,16 @@ final class TransportService {
 
     private func flushPendingIfPossible() {
         guard isConnected, let connection else { return }
-        // Drain the entire queue: hand every pending frame to the OS network stack immediately.
-        // Network.framework pipelines the sends internally; no need to wait for contentProcessed
-        // before submitting the next frame.
-        while !pendingOutboundFrames.isEmpty {
-            let frame = pendingOutboundFrames.removeFirst()
-            connection.send(content: frame.data, completion: .contentProcessed { [weak self] error in
-                if let error { self?.onError?(error) }
-            })
+        guard !pendingOutboundFrames.isEmpty else { return }
+        // Coalesce every pending frame into one batch so the OS can push them over the
+        // Thunderbolt bridge atomically, eliminating per-frame syscall micro-stutter.
+        connection.batch {
+            while !pendingOutboundFrames.isEmpty {
+                let frame = pendingOutboundFrames.removeFirst()
+                connection.send(content: frame.data, completion: .contentProcessed { [weak self] error in
+                    if let error { self?.onError?(error) }
+                })
+            }
         }
     }
 

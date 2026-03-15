@@ -19,7 +19,7 @@ final class EncoderService {
     private let stateLock = NSLock()
     private var forceNextKeyFrame = false
     private var framesInFlight = 0
-    private let maxFramesInFlight = 3
+    private let maxFramesInFlight = 8
     private var preferredKeyFrameIntervalFrames = max(
         1,
         NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds
@@ -190,6 +190,9 @@ final class EncoderService {
 
         // No B-frames: the single biggest latency saver — decoder doesn't wait for future frames.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse, label: "AllowFrameReordering")
+
+        // Force 1-in-1-out: zero encoder lookahead so every submitted frame is emitted immediately.
+        setCompressionProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0), label: "MaxFrameDelayCount")
 
         // HEVC Main profile for hardware decode compatibility.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel, label: "ProfileLevel")

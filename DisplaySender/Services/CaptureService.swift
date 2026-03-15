@@ -156,7 +156,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         if #available(macOS 14.0, *) {
             configuration.captureResolution = .best
         }
-        configuration.queueDepth = 2
+        configuration.queueDepth = 8
         configuration.showsCursor = true
 
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)

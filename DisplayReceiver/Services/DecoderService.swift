@@ -349,7 +349,7 @@ final class DecoderService {
             throw DecoderServiceError.decodeFailed(decodeStatus)
         }
 
-        let waitResult = context.semaphore.wait(timeout: .now() + 0.05)
+        let waitResult = context.semaphore.wait(timeout: .now() + 0.016)
         if waitResult == .timedOut {
             VTDecompressionSessionWaitForAsynchronousFrames(session)
         }
