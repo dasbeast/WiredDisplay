@@ -100,6 +100,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         // MetalFX Spatial Scaler state
         private var spatialScaler: MTLFXSpatialScaler?
         private var intermediateColorTexture: MTLTexture?
+        private var upscaledTexture: MTLTexture?
         private var currentInputWidth: Int = 0
         private var currentInputHeight: Int = 0
         private var currentOutputWidth: Int = 0
@@ -223,12 +224,26 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             offscreenEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             offscreenEncoder.endEncoding()
 
-            // --- Pass 2: MetalFX Spatial Upscale → drawable ---
-            if let spatialScaler {
-                spatialScaler.colorTexture = intermediateColorTexture
-                spatialScaler.outputTexture = drawable.texture
-                spatialScaler.encode(commandBuffer: commandBuffer)
+            // --- Pass 2: MetalFX Spatial Upscale → private upscaled texture ---
+            guard let spatialScaler, let upscaledTexture else {
+                // Scaler unavailable after Pass 1 — present intermediate directly via fallback.
+                commandBuffer.present(drawable)
+                commandBuffer.commit()
+                return
             }
+
+            spatialScaler.colorTexture = intermediateColorTexture
+            spatialScaler.outputTexture = upscaledTexture
+            spatialScaler.encode(commandBuffer: commandBuffer)
+
+            // --- Pass 3: Blit private upscaled texture → drawable ---
+            guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+                commandBuffer.present(drawable)
+                commandBuffer.commit()
+                return
+            }
+            blitEncoder.copy(from: upscaledTexture, to: drawable.texture)
+            blitEncoder.endEncoding()
 
             commandBuffer.present(drawable)
             commandBuffer.commit()
@@ -260,6 +275,27 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             guard intermediateColorTexture != nil else {
                 print("[MetalRenderSurfaceView] Failed to create intermediate texture \(inputWidth)x\(inputHeight)")
+                spatialScaler = nil
+                upscaledTexture = nil
+                return
+            }
+
+            // Create private upscaled texture at output (drawable) resolution.
+            // MetalFX requires its outputTexture to have .private storage mode,
+            // but MTKView drawables use .managed — so we upscale to this private
+            // texture and then blit it to the drawable.
+            let outputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: outputWidth,
+                height: outputHeight,
+                mipmapped: false
+            )
+            outputDescriptor.usage = [.shaderRead, .shaderWrite]
+            outputDescriptor.storageMode = .private
+            upscaledTexture = device.makeTexture(descriptor: outputDescriptor)
+
+            guard upscaledTexture != nil else {
+                print("[MetalRenderSurfaceView] Failed to create upscaled texture \(outputWidth)x\(outputHeight)")
                 spatialScaler = nil
                 return
             }
