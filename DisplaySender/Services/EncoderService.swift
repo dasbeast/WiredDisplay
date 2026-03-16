@@ -8,6 +8,7 @@ final class EncoderService {
     private struct EncodeRequest {
         let forceKeyFrame: Bool
         let targetBitrateKbps: Int
+        let streamFrameIndex: UInt64
     }
 
     private var compressionSession: VTCompressionSession?
@@ -69,12 +70,14 @@ final class EncoderService {
 
     @discardableResult
     func encode(frame: CapturedFrame) -> Bool {
-        if NetworkProtocol.preferRawFrameTransportForDiagnostics {
-            onEncodedFrame?(makeRawEncodedFrame(from: frame))
-            return true
-        }
-
         do {
+            if NetworkProtocol.preferRawFrameTransportForDiagnostics {
+                let request = try beginEncodeRequest()
+                let encodedFrame = finishEncodeRequest(with: makeRawEncodedFrame(from: frame, request: request))
+                onEncodedFrame?(encodedFrame)
+                return true
+            }
+
             try configureSessionIfNeeded(width: frame.metadata.width, height: frame.metadata.height)
             let request = try beginEncodeRequest()
             let pixelBuffer = try makeInputPixelBuffer(from: frame)
@@ -100,7 +103,7 @@ final class EncoderService {
         return try makePixelBuffer(from: frame)
     }
 
-    private func makeRawEncodedFrame(from frame: CapturedFrame) -> EncodedFrame {
+    private func makeRawEncodedFrame(from frame: CapturedFrame, request: EncodeRequest) -> EncodedFrame {
         // Extract raw data from the pixel buffer if rawData is empty
         let rawData: Data
         let bytesPerRow: Int
@@ -124,11 +127,17 @@ final class EncoderService {
             bytesPerRow = frame.bytesPerRow
         }
 
+        let metadata = makeStreamMetadata(
+            from: frame,
+            streamFrameIndex: request.streamFrameIndex,
+            isKeyFrame: request.forceKeyFrame
+        )
+
         return EncodedFrame(
-            metadata: frame.metadata,
+            metadata: metadata,
             codec: .rawBGRA,
             payload: rawData,
-            isKeyFrame: frame.metadata.isKeyFrame,
+            isKeyFrame: metadata.isKeyFrame,
             sourceBytesPerRow: bytesPerRow,
             sourcePixelFormat: frame.pixelFormat,
             targetBitrateKbps: currentTargetBitrateBps / 1_000,
@@ -313,10 +322,14 @@ final class EncoderService {
             throw EncoderServiceError.tooManyFramesInFlight
         }
 
+        // Stream sequence numbers must only advance for frames the encoder actually accepts.
+        // If capture-time indices are used here, overload drops create holes that the receiver
+        // treats as missing compressed references and it stalls until a later keyframe arrives.
+        let streamFrameIndex = submittedFrameCount
         let keyFrameInterval = UInt64(max(1, preferredKeyFrameIntervalFrames))
         let forceKeyFrame = forceNextKeyFrame
-            || submittedFrameCount == 0
-            || submittedFrameCount % keyFrameInterval == 0
+            || streamFrameIndex == 0
+            || streamFrameIndex % keyFrameInterval == 0
 
         forceNextKeyFrame = false
         submittedFrameCount += 1
@@ -324,7 +337,8 @@ final class EncoderService {
 
         return EncodeRequest(
             forceKeyFrame: forceKeyFrame,
-            targetBitrateKbps: max(1, currentTargetBitrateBps / 1_000)
+            targetBitrateKbps: max(1, currentTargetBitrateBps / 1_000),
+            streamFrameIndex: streamFrameIndex
         )
     }
 
@@ -344,7 +358,7 @@ final class EncoderService {
 
         var flags = VTEncodeInfoFlags()
         let timescale = CMTimeScale(max(1, NetworkProtocol.targetFramesPerSecond))
-        let pts = CMTime(value: Int64(frame.metadata.frameIndex), timescale: timescale)
+        let pts = CMTime(value: Int64(request.streamFrameIndex), timescale: timescale)
         let duration = CMTime(value: 1, timescale: timescale)
 
         let frameProps: CFDictionary? = request.forceKeyFrame ? [
@@ -363,7 +377,7 @@ final class EncoderService {
                 status: status,
                 sampleBuffer: sampleBuffer,
                 frame: frame,
-                targetBitrateKbps: request.targetBitrateKbps
+                request: request
             )
         }
 
@@ -377,7 +391,7 @@ final class EncoderService {
         status: OSStatus,
         sampleBuffer: CMSampleBuffer?,
         frame: CapturedFrame,
-        targetBitrateKbps: Int
+        request: EncodeRequest
     ) {
         guard status == noErr else {
             finishEncodeRequestWithoutOutput()
@@ -394,7 +408,7 @@ final class EncoderService {
             let encodedFrame = try makeEncodedFrame(
                 from: sampleBuffer,
                 frame: frame,
-                targetBitrateKbps: targetBitrateKbps
+                request: request
             )
 
             let finalizedFrame = finishEncodeRequest(with: encodedFrame)
@@ -414,7 +428,7 @@ final class EncoderService {
     private func makeEncodedFrame(
         from sampleBuffer: CMSampleBuffer,
         frame: CapturedFrame,
-        targetBitrateKbps: Int
+        request: EncodeRequest
     ) throws -> EncodedFrame {
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
             throw EncoderServiceError.missingBlockBuffer
@@ -435,6 +449,11 @@ final class EncoderService {
         let firstAttachment = attachmentsArray?.first
         let notSync = firstAttachment?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
         let isKeyFrame = !notSync
+        let metadata = makeStreamMetadata(
+            from: frame,
+            streamFrameIndex: request.streamFrameIndex,
+            isKeyFrame: isKeyFrame
+        )
 
         // HEVC parameter sets: VPS (index 0), SPS (index 1), PPS (index 2)
         // Extract from every frame — the hardware encoder may update parameter sets mid-stream
@@ -490,17 +509,31 @@ final class EncoderService {
         }
 
         return EncodedFrame(
-            metadata: frame.metadata,
+            metadata: metadata,
             codec: .hevcAVCC,
             payload: payload,
             isKeyFrame: isKeyFrame,
             sourceBytesPerRow: frame.bytesPerRow,
             sourcePixelFormat: frame.pixelFormat,
-            targetBitrateKbps: targetBitrateKbps,
+            targetBitrateKbps: request.targetBitrateKbps,
             targetFramesPerSecond: NetworkProtocol.targetFramesPerSecond,
             h264SPS: spsData,
             h264PPS: ppsData,
             hevcVPS: vpsData
+        )
+    }
+
+    private func makeStreamMetadata(
+        from frame: CapturedFrame,
+        streamFrameIndex: UInt64,
+        isKeyFrame: Bool
+    ) -> FrameMetadata {
+        FrameMetadata(
+            frameIndex: streamFrameIndex,
+            timestampNanoseconds: frame.metadata.timestampNanoseconds,
+            width: frame.metadata.width,
+            height: frame.metadata.height,
+            isKeyFrame: isKeyFrame
         )
     }
 
