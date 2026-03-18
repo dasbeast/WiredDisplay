@@ -65,7 +65,6 @@ final class ReceiverAppController: ObservableObject {
     }
 
     func start() {
-        powerManagementService.startPreventingSleep()
         coordinator.startListening(port: NetworkProtocol.defaultPort)
         advertisementService.startAdvertising(
             port: NetworkProtocol.defaultPort,
@@ -117,8 +116,10 @@ final class ReceiverAppController: ObservableObject {
         interfaceLines = coordinator.localInterfaceDescriptions
 
         if newStreaming && !wasStreaming {
+            powerManagementService.startPreventingSleep()
             presentReceiverWindow(fullScreen: true)
         } else if !newStreaming && wasStreaming {
+            powerManagementService.stopPreventingSleep()
             hideReceiverWindow()
         }
     }
