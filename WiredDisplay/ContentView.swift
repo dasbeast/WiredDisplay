@@ -1,10 +1,3 @@
-//
-//  ContentView.swift
-//  WiredDisplay
-//
-//  Created by Bailey Kiehl on 3/7/26.
-//
-
 import SwiftUI
 
 struct ContentView: View {

@@ -2,15 +2,22 @@ import AppKit
 import Foundation
 import SwiftUI
 
+@MainActor
+private enum SenderRuntime {
+    static let coordinator = SenderSessionCoordinator()
+    static let discoveryService = ReceiverDiscoveryService()
+}
+
 /// Sender control panel for wired endpoint setup and session lifecycle.
 struct SenderRootView: View {
-    @State private var coordinator = SenderSessionCoordinator()
-    @StateObject private var discoveryService = ReceiverDiscoveryService()
+    private let coordinator = SenderRuntime.coordinator
+    @ObservedObject private var discoveryService = SenderRuntime.discoveryService
 
     private static let savedHostKey = "lastReceiverHost"
     private static let savedPortKey = "lastReceiverPort"
     private static let savedDisplayResolutionPreferenceKey = "displayResolutionPreference"
     private static let savedFixedDisplayPresetKey = "fixedDisplayPreset"
+    private static let savedStreamingPipelinePreferenceKey = "streamingPipelinePreference"
 
     @State private var receiverHostInput = UserDefaults.standard.string(forKey: SenderRootView.savedHostKey) ?? ""
     @State private var portInput = UserDefaults.standard.string(forKey: SenderRootView.savedPortKey) ?? String(NetworkProtocol.defaultPort)
@@ -40,7 +47,10 @@ struct SenderRootView: View {
     @State private var wiredPathSummary = "unknown"
     @State private var wiredWarning = ""
     @State private var interfaceLines: [String] = []
-    @State private var selectedStreamingPipelinePreference: NetworkProtocol.StreamingPipelinePreference = .automatic
+    @State private var selectedStreamingPipelinePreference =
+        NetworkProtocol.StreamingPipelinePreference(
+            rawValue: UserDefaults.standard.string(forKey: SenderRootView.savedStreamingPipelinePreferenceKey) ?? ""
+        ) ?? .automatic
 
     // Display mode state
     @State private var availableDisplayModes: [VirtualDisplayMode] = []
@@ -59,20 +69,21 @@ struct SenderRootView: View {
                     displayModeSection
                 }
                 statusSection
-                diagnosticsSection
+                nerdStatsSection
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
         .frame(minWidth: 800, minHeight: 540)
         .onAppear {
-            coordinator.onChange = {
-                refreshFromCoordinator()
-            }
             if let preset = VirtualDisplayPreset.commonPresets.first(where: { $0.id == selectedFixedDisplayPresetID }) {
                 coordinator.setPreferredDisplayPreset(preset)
             }
             coordinator.setDisplayResolutionPreference(selectedDisplayResolutionPreference)
+            coordinator.setStreamingPipelinePreference(selectedStreamingPipelinePreference)
+            coordinator.onChange = {
+                refreshFromCoordinator()
+            }
             discoveryService.startBrowsing()
             refreshFromCoordinator()
         }
@@ -257,6 +268,7 @@ struct SenderRootView: View {
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: selectedStreamingPipelinePreference) { _, newValue in
+                    UserDefaults.standard.set(newValue.rawValue, forKey: Self.savedStreamingPipelinePreferenceKey)
                     coordinator.setStreamingPipelinePreference(newValue)
                     refreshFromCoordinator()
                 }
@@ -298,49 +310,67 @@ struct SenderRootView: View {
     }
 
     private var statusSection: some View {
-        GroupBox("Status") {
+        GroupBox("Connection") {
             VStack(alignment: .leading, spacing: 6) {
-                Text("State: \(stateText)")
-                Text("Connection: \(connectionText)")
-                Text("Sent Frames: \(sentFrameCount)")
-                Text("Dropped Outbound Frames: \(droppedOutboundFrameCount)")
-                Text("Send Rate: \(sentFramesPerSecondText)")
-                Text("Send Throughput: \(sentMegabitsPerSecondText)")
-                Text("Heartbeat RTT: \(heartbeatRoundTripText)")
-                Text("Est. Display Latency: \(estimatedDisplayLatencyText)")
-                Text("Last Error: \(lastErrorText)")
-                    .foregroundStyle(lastErrorText == "-" ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
+                Text(connectionSummaryText)
+                    .font(.headline)
+
+                Text(connectionDetailText)
+                    .foregroundStyle(.secondary)
+
+                if lastErrorText != "-" {
+                    Text("Last Error: \(lastErrorText)")
+                        .foregroundStyle(.red)
+                }
             }
         }
     }
 
-    private var diagnosticsSection: some View {
-        GroupBox("Diagnostics") {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Selected Receiver: \(selectedReceiver()?.displayName ?? "manual")")
-                Text("Configured Endpoint: \(endpointSummary)")
-                Text("Video Transport: \(videoTransportText)")
-                Text("Display Resolution: \(displayResolutionSummaryText)")
-                Text("Streaming Pipeline: \(selectedStreamingPipelinePreference.label) -> \(resolvedStreamingPipelineText)")
-                Text("Negotiated Display: \(negotiatedResolutionText)")
-                Text("Wired Path: \(wiredPathSummary)")
-
-                if !wiredWarning.isEmpty {
-                    Text(wiredWarning)
-                        .foregroundStyle(.orange)
+    private var nerdStatsSection: some View {
+        DisclosureGroup("Stats for Nerds") {
+            VStack(alignment: .leading, spacing: 10) {
+                GroupBox("Status") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("State: \(stateText)")
+                        Text("Connection: \(connectionText)")
+                        Text("Sent Frames: \(sentFrameCount)")
+                        Text("Dropped Outbound Frames: \(droppedOutboundFrameCount)")
+                        Text("Send Rate: \(sentFramesPerSecondText)")
+                        Text("Send Throughput: \(sentMegabitsPerSecondText)")
+                        Text("Heartbeat RTT: \(heartbeatRoundTripText)")
+                        Text("Est. Display Latency: \(estimatedDisplayLatencyText)")
+                    }
                 }
 
-                if interfaceLines.isEmpty {
-                    Text("Local Interfaces: none detected")
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Local Interfaces:")
-                    ForEach(interfaceLines, id: \.self) { line in
-                        Text(line)
-                            .font(.system(.body, design: .monospaced))
+                GroupBox("Diagnostics") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Selected Receiver: \(selectedReceiver()?.displayName ?? "manual")")
+                        Text("Configured Endpoint: \(endpointSummary)")
+                        Text("Video Transport: \(videoTransportText)")
+                        Text("Display Resolution: \(displayResolutionSummaryText)")
+                        Text("Streaming Pipeline: \(selectedStreamingPipelinePreference.label) -> \(resolvedStreamingPipelineText)")
+                        Text("Negotiated Display: \(negotiatedResolutionText)")
+                        Text("Wired Path: \(wiredPathSummary)")
+
+                        if !wiredWarning.isEmpty {
+                            Text(wiredWarning)
+                                .foregroundStyle(.orange)
+                        }
+
+                        if interfaceLines.isEmpty {
+                            Text("Local Interfaces: none detected")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Local Interfaces:")
+                            ForEach(interfaceLines, id: \.self) { line in
+                                Text(line)
+                                    .font(.system(.body, design: .monospaced))
+                            }
+                        }
                     }
                 }
             }
+            .padding(.top, 8)
         }
     }
 
@@ -493,6 +523,35 @@ struct SenderRootView: View {
     private func formatRate(_ value: Double?, unit: String) -> String {
         guard let value else { return "-" }
         return String(format: "%.2f %@", value, unit)
+    }
+
+    private var connectionSummaryText: String {
+        switch coordinator.state {
+        case .running:
+            return "Connected"
+        case .connected:
+            return "Connected, waiting to start"
+        case .waitingForAck:
+            return "Connecting"
+        case .connecting:
+            return "Connecting"
+        case .failed:
+            return "Connection Failed"
+        case .idle:
+            return "Idle"
+        }
+    }
+
+    private var connectionDetailText: String {
+        switch coordinator.state {
+        case .running, .connected, .waitingForAck, .connecting:
+            let path = coordinator.wiredPathAvailable ? "Wired" : "Wireless"
+            return "\(path) via \(videoTransportText)"
+        case .failed:
+            return wiredPathSummary == "available" ? "Wired path available" : "Wireless or no wired path detected"
+        case .idle:
+            return wiredPathSummary == "available" ? "Ready on wired network" : "No wired path detected"
+        }
     }
 }
 

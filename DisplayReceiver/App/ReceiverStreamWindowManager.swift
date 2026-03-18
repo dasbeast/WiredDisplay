@@ -7,12 +7,14 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
 
     private weak var window: NSWindow?
     private var hostingController: NSHostingController<ReceiverRootView>?
+    private var isCursorHidden = false
 
     func present(appController: ReceiverAppController, enterFullScreen: Bool) {
         let window = ensureWindow(appController: appController)
         NSApplication.shared.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
+        setCursorHidden(appController.isStreaming)
         onVisibilityChange?(true)
 
         guard enterFullScreen, !window.styleMask.contains(.fullScreen) else {
@@ -27,6 +29,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
 
     func hide() {
         guard let window else { return }
+        setCursorHidden(false)
 
         if window.styleMask.contains(.fullScreen) {
             window.toggleFullScreen(nil)
@@ -41,6 +44,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        setCursorHidden(false)
         onVisibilityChange?(false)
     }
 
@@ -70,5 +74,17 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         self.window = window
         self.hostingController = hostingController
         return window
+    }
+
+    private func setCursorHidden(_ hidden: Bool) {
+        guard hidden != isCursorHidden else { return }
+
+        if hidden {
+            NSCursor.hide()
+        } else {
+            NSCursor.unhide()
+        }
+
+        isCursorHidden = hidden
     }
 }
