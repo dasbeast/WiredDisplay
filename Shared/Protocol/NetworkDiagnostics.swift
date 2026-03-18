@@ -1,18 +1,56 @@
 import Foundation
 import Network
 import Darwin
+import SystemConfiguration
 
 /// Lightweight diagnostics helpers for local interface visibility and wired path status.
+enum LocalInterfaceKind: String, Sendable {
+    case thunderboltBridge
+    case wiredEthernet
+    case wifi
+    case bridge
+    case other
+
+    nonisolated var isWiredPreferred: Bool {
+        switch self {
+        case .thunderboltBridge, .wiredEthernet, .bridge:
+            return true
+        case .wifi, .other:
+            return false
+        }
+    }
+
+    nonisolated var priorityScore: Int {
+        switch self {
+        case .thunderboltBridge:
+            return 0
+        case .wiredEthernet:
+            return 1
+        case .bridge:
+            return 2
+        case .wifi:
+            return 4
+        case .other:
+            return 3
+        }
+    }
+}
+
 struct LocalInterfaceAddress: Sendable {
     let interfaceName: String
     let address: String
+    let kind: LocalInterfaceKind
+
+    nonisolated var isLinkLocal: Bool { address.hasPrefix("169.254.") }
+    nonisolated var isWiredPreferred: Bool { kind.isWiredPreferred }
 }
 
 enum NetworkDiagnostics {
     /// Returns active non-loopback IPv4 addresses currently visible on this Mac.
-    static func localIPv4Addresses() -> [LocalInterfaceAddress] {
+    nonisolated static func localIPv4Addresses() -> [LocalInterfaceAddress] {
         var results: [LocalInterfaceAddress] = []
         var pointer: UnsafeMutablePointer<ifaddrs>?
+        let interfaceKinds = interfaceKindsByBSDName()
 
         guard getifaddrs(&pointer) == 0, let first = pointer else {
             return []
@@ -51,24 +89,31 @@ enum NetworkDiagnostics {
 
             let name = String(cString: entry.ifa_name)
             let ip = String(cString: host)
-            results.append(LocalInterfaceAddress(interfaceName: name, address: ip))
+            let kind = interfaceKinds[name] ?? inferInterfaceKind(interfaceName: name)
+            results.append(LocalInterfaceAddress(interfaceName: name, address: ip, kind: kind))
         }
 
-        return results.sorted {
-            if $0.interfaceName == $1.interfaceName {
-                return $0.address < $1.address
-            }
-            return $0.interfaceName < $1.interfaceName
-        }
+        return results.sorted(by: compareLocalInterfaces)
     }
 
-    static func localIPv4Descriptions() -> [String] {
+    nonisolated static func localIPv4Descriptions() -> [String] {
         localIPv4Addresses().map { "\($0.interfaceName): \($0.address)" }
+    }
+
+    nonisolated static func preferredDiscoveryIPv4Address() -> LocalInterfaceAddress? {
+        let addresses = localIPv4Addresses()
+        return addresses.min(by: { lhs, rhs in
+            compareLocalInterfaces(lhs, rhs)
+        })
+    }
+
+    nonisolated static func looksLikeWiredPreferredHost(_ host: String) -> Bool {
+        host.hasPrefix("169.254.")
     }
 
     /// Builds TCP parameters tuned for interactive display streaming.
     /// `noDelay` disables Nagle coalescing to reduce input-to-photon latency.
-    static func lowLatencyTCPParameters() -> NWParameters {
+    nonisolated static func lowLatencyTCPParameters() -> NWParameters {
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.noDelay = true
         tcpOptions.enableKeepalive = true
@@ -80,7 +125,7 @@ enum NetworkDiagnostics {
     }
 
     /// Builds UDP parameters tuned for interactive video delivery.
-    static func lowLatencyUDPParameters() -> NWParameters {
+    nonisolated static func lowLatencyUDPParameters() -> NWParameters {
         let udpOptions = NWProtocolUDP.Options()
         let parameters = NWParameters(dtls: nil, udp: udpOptions)
         parameters.includePeerToPeer = false
@@ -137,15 +182,114 @@ final class WiredPathStatusMonitor {
             }
         }
 
-        // Also check system interfaces for bridge/thunderbolt addresses
+        // Also check system interfaces for actual bridge / wired interfaces.
         let interfaces = NetworkDiagnostics.localIPv4Addresses()
-        for iface in interfaces {
-            let name = iface.interfaceName.lowercased()
-            if name.hasPrefix("bridge") || name.hasPrefix("en") {
-                return true
-            }
-        }
+        if interfaces.contains(where: \.isWiredPreferred) { return true }
 
         return false
+    }
+}
+
+private extension NetworkDiagnostics {
+    nonisolated static func compareLocalInterfaces(_ lhs: LocalInterfaceAddress, _ rhs: LocalInterfaceAddress) -> Bool {
+        let lhsScore = hostPreferenceScore(for: lhs)
+        let rhsScore = hostPreferenceScore(for: rhs)
+        if lhsScore != rhsScore {
+            return lhsScore < rhsScore
+        }
+        if lhs.interfaceName != rhs.interfaceName {
+            return lhs.interfaceName < rhs.interfaceName
+        }
+        return lhs.address < rhs.address
+    }
+
+    nonisolated static func hostPreferenceScore(for address: LocalInterfaceAddress) -> Int {
+        var score = address.kind.priorityScore * 10
+        if address.isLinkLocal {
+            score -= address.kind == .thunderboltBridge ? 5 : 1
+        } else if isPrivateIPv4(address.address) {
+            score += 1
+        } else {
+            score += 3
+        }
+        return score
+    }
+
+    nonisolated static func isPrivateIPv4(_ host: String) -> Bool {
+        host.hasPrefix("10.") ||
+        host.hasPrefix("192.168.") ||
+        host.hasPrefix("172.16.") ||
+        host.hasPrefix("172.17.") ||
+        host.hasPrefix("172.18.") ||
+        host.hasPrefix("172.19.") ||
+        host.hasPrefix("172.20.") ||
+        host.hasPrefix("172.21.") ||
+        host.hasPrefix("172.22.") ||
+        host.hasPrefix("172.23.") ||
+        host.hasPrefix("172.24.") ||
+        host.hasPrefix("172.25.") ||
+        host.hasPrefix("172.26.") ||
+        host.hasPrefix("172.27.") ||
+        host.hasPrefix("172.28.") ||
+        host.hasPrefix("172.29.") ||
+        host.hasPrefix("172.30.") ||
+        host.hasPrefix("172.31.")
+    }
+
+    nonisolated static func interfaceKindsByBSDName() -> [String: LocalInterfaceKind] {
+        guard let interfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface] else {
+            return [:]
+        }
+
+        var result: [String: LocalInterfaceKind] = [:]
+        for interface in interfaces {
+            guard let bsdName = SCNetworkInterfaceGetBSDName(interface) as String? else { continue }
+            let systemType = SCNetworkInterfaceGetInterfaceType(interface) as String?
+            let displayName = SCNetworkInterfaceGetLocalizedDisplayName(interface) as String?
+            result[bsdName] = classifyInterface(
+                interfaceName: bsdName,
+                systemType: systemType,
+                displayName: displayName
+            )
+        }
+        return result
+    }
+
+    nonisolated static func classifyInterface(
+        interfaceName: String,
+        systemType: String?,
+        displayName: String?
+    ) -> LocalInterfaceKind {
+        let interfaceNameLower = interfaceName.lowercased()
+        let displayNameLower = (displayName ?? "").lowercased()
+
+        if displayNameLower.contains("thunderbolt bridge") || interfaceNameLower.hasPrefix("bridge") {
+            return .thunderboltBridge
+        }
+
+        if systemType == (kSCNetworkInterfaceTypeIEEE80211 as String) {
+            return .wifi
+        }
+
+        if systemType == (kSCNetworkInterfaceTypeEthernet as String) {
+            return .wiredEthernet
+        }
+
+        if displayNameLower.contains("bridge") {
+            return .bridge
+        }
+
+        return inferInterfaceKind(interfaceName: interfaceName)
+    }
+
+    nonisolated static func inferInterfaceKind(interfaceName: String) -> LocalInterfaceKind {
+        let name = interfaceName.lowercased()
+        if name.hasPrefix("bridge") || name.hasPrefix("thunder") {
+            return .thunderboltBridge
+        }
+        if name.hasPrefix("awdl") || name.hasPrefix("llw") || name.hasPrefix("utun") {
+            return .other
+        }
+        return .other
     }
 }

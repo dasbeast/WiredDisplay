@@ -33,6 +33,8 @@ final class ReceiverDiscoveryService: NSObject, ObservableObject {
     private enum TXTRecordKey {
         static let deviceFamily = "deviceFamily"
         static let displayName = "displayName"
+        static let preferredHost = "preferredHost"
+        static let preferredHostIsWired = "preferredHostIsWired"
     }
 
     override init() {
@@ -81,14 +83,15 @@ final class ReceiverDiscoveryService: NSObject, ObservableObject {
             return nil
         }
 
-        guard let resolvedHost = preferredHost(for: service) else {
+        let textRecord = textRecordDictionary(for: service)
+
+        guard let resolvedHost = preferredHost(for: service, textRecord: textRecord) else {
             return nil
         }
 
         let host = resolvedHost.host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else { return nil }
 
-        let textRecord = textRecordDictionary(for: service)
         let displayDescriptor = txtString(for: TXTRecordKey.displayName, in: textRecord)
         let visualKind = resolveVisualKind(
             advertisedFamily: txtString(for: TXTRecordKey.deviceFamily, in: textRecord),
@@ -108,7 +111,17 @@ final class ReceiverDiscoveryService: NSObject, ObservableObject {
         )
     }
 
-    private func preferredHost(for service: NetService) -> (host: String, prefersWiredPath: Bool)? {
+    private func preferredHost(
+        for service: NetService,
+        textRecord: [String: Data]?
+    ) -> (host: String, prefersWiredPath: Bool)? {
+        if let advertisedHost = txtString(for: TXTRecordKey.preferredHost, in: textRecord),
+           !advertisedHost.isEmpty {
+            let prefersWiredPath = txtString(for: TXTRecordKey.preferredHostIsWired, in: textRecord) == "1" ||
+                NetworkDiagnostics.looksLikeWiredPreferredHost(advertisedHost)
+            return (host: advertisedHost, prefersWiredPath: prefersWiredPath)
+        }
+
         var candidates: [(host: String, score: Int, prefersWiredPath: Bool)] = []
 
         for address in service.addresses ?? [] {

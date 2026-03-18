@@ -5,6 +5,8 @@ import Foundation
 private enum ReceiverAdvertisementTXTRecordKey {
     static let deviceFamily = "deviceFamily"
     static let displayName = "displayName"
+    static let preferredHost = "preferredHost"
+    static let preferredHostIsWired = "preferredHostIsWired"
 }
 
 private enum AdvertisedReceiverVisualKind: String {
@@ -65,6 +67,8 @@ extension ReceiverAdvertisementService: NetServiceDelegate {
 private struct ReceiverAdvertisementProfile {
     let displayName: String?
     let deviceFamily: AdvertisedReceiverVisualKind
+    let preferredHost: String?
+    let preferredHostIsWired: Bool
 
     var txtRecordData: Data? {
         var textRecord: [String: Data] = [
@@ -75,6 +79,11 @@ private struct ReceiverAdvertisementProfile {
             textRecord[ReceiverAdvertisementTXTRecordKey.displayName] = Data(displayName.utf8)
         }
 
+        if let preferredHost, !preferredHost.isEmpty {
+            textRecord[ReceiverAdvertisementTXTRecordKey.preferredHost] = Data(preferredHost.utf8)
+            textRecord[ReceiverAdvertisementTXTRecordKey.preferredHostIsWired] = Data((preferredHostIsWired ? "1" : "0").utf8)
+        }
+
         return NetService.data(fromTXTRecord: textRecord)
     }
 
@@ -83,28 +92,54 @@ private struct ReceiverAdvertisementProfile {
         let displayName = mainScreen?.localizedName.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedReceiverName = receiverName.lowercased()
         let normalizedDisplayName = displayName?.lowercased() ?? ""
+        let preferredAddress = NetworkDiagnostics.preferredDiscoveryIPv4Address()
 
         if normalizedDisplayName.contains("studio display") {
-            return ReceiverAdvertisementProfile(displayName: displayName, deviceFamily: .studioDisplay)
+            return ReceiverAdvertisementProfile(
+                displayName: displayName,
+                deviceFamily: .studioDisplay,
+                preferredHost: preferredAddress?.address,
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+            )
         }
 
         if normalizedReceiverName.contains("imac") {
-            return ReceiverAdvertisementProfile(displayName: displayName, deviceFamily: .imac)
+            return ReceiverAdvertisementProfile(
+                displayName: displayName,
+                deviceFamily: .imac,
+                preferredHost: preferredAddress?.address,
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+            )
         }
 
         if normalizedReceiverName.contains("macbook") ||
             normalizedDisplayName.contains("retina xdr") ||
             normalizedDisplayName.contains("liquid retina") {
-            return ReceiverAdvertisementProfile(displayName: displayName, deviceFamily: .macbookPro)
+            return ReceiverAdvertisementProfile(
+                displayName: displayName,
+                deviceFamily: .macbookPro,
+                preferredHost: preferredAddress?.address,
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+            )
         }
 
         if let mainScreen {
             let backingFrame = mainScreen.convertRectToBacking(mainScreen.frame)
             if normalizedDisplayName.contains("built-in"), backingFrame.width >= 4300 {
-                return ReceiverAdvertisementProfile(displayName: displayName, deviceFamily: .imac)
+                return ReceiverAdvertisementProfile(
+                    displayName: displayName,
+                    deviceFamily: .imac,
+                    preferredHost: preferredAddress?.address,
+                    preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                )
             }
         }
 
-        return ReceiverAdvertisementProfile(displayName: displayName, deviceFamily: .display)
+        return ReceiverAdvertisementProfile(
+            displayName: displayName,
+            deviceFamily: .display,
+            preferredHost: preferredAddress?.address,
+            preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+        )
     }
 }
