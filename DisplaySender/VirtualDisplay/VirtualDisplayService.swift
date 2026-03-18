@@ -1,6 +1,35 @@
 import Foundation
 import CoreGraphics
 
+/// A fixed pixel-resolution preset that can be requested for the virtual display.
+struct VirtualDisplayPreset: Identifiable, Equatable, Hashable {
+    let pixelWidth: Int
+    let pixelHeight: Int
+
+    var id: String { "\(pixelWidth)x\(pixelHeight)" }
+    var label: String { "\(pixelWidth)×\(pixelHeight) pixels" }
+
+    static let defaultFixed = VirtualDisplayPreset(pixelWidth: 3008, pixelHeight: 1692)
+
+    static let commonPresets: [VirtualDisplayPreset] = [
+        VirtualDisplayPreset(pixelWidth: 5120, pixelHeight: 2880),
+        VirtualDisplayPreset(pixelWidth: 4096, pixelHeight: 2304),
+        VirtualDisplayPreset(pixelWidth: 3840, pixelHeight: 2160),
+        VirtualDisplayPreset(pixelWidth: 3200, pixelHeight: 1800),
+        VirtualDisplayPreset(pixelWidth: 3024, pixelHeight: 1964),
+        VirtualDisplayPreset(pixelWidth: 3008, pixelHeight: 1692),
+        VirtualDisplayPreset(pixelWidth: 2880, pixelHeight: 1620),
+        VirtualDisplayPreset(pixelWidth: 2560, pixelHeight: 1440),
+        VirtualDisplayPreset(pixelWidth: 2304, pixelHeight: 1296),
+        VirtualDisplayPreset(pixelWidth: 2048, pixelHeight: 1152),
+        VirtualDisplayPreset(pixelWidth: 1920, pixelHeight: 1080),
+        VirtualDisplayPreset(pixelWidth: 1680, pixelHeight: 945),
+        VirtualDisplayPreset(pixelWidth: 1600, pixelHeight: 900),
+        VirtualDisplayPreset(pixelWidth: 1366, pixelHeight: 768),
+        VirtualDisplayPreset(pixelWidth: 1280, pixelHeight: 720)
+    ]
+}
+
 /// A resolved display mode on a virtual display.
 struct VirtualDisplayMode: Identifiable, Equatable, Hashable {
     let logicalWidth: Int

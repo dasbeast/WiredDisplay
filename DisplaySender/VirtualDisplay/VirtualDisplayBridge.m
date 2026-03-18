@@ -62,14 +62,15 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
                                                                          refreshRate:refreshRate];
     [modes addObject:primaryMode];
 
-    // Additional common 16:9 modes for "Show all resolutions".
-    // Only advertise modes at or above the requested base size so the default
-    // mode does not land on a softer, lower-resolution setting.
+    // Additional common modes for "Show all resolutions".
+    // Keep the requested mode first so it remains the startup default, but advertise both
+    // lower and higher presets so the sender UI can force oddball resolutions for testing.
     static const unsigned int kPresetModes[][2] = {
         {5120, 2880},
         {4096, 2304},
         {3840, 2160},
         {3200, 1800},
+        {3024, 1964},
         {3008, 1692},
         {2880, 1620},
         {2560, 1440},
@@ -89,10 +90,6 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
         const unsigned int candidateHeight = kPresetModes[i][1];
 
         if (candidateWidth > descriptor.maxPixelsWide || candidateHeight > descriptor.maxPixelsHigh) {
-            continue;
-        }
-
-        if (candidateWidth < width || candidateHeight < height) {
             continue;
         }
 

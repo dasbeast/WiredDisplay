@@ -12,6 +12,22 @@ final class SenderSessionCoordinator {
         case failed(String)
     }
 
+    enum DisplayResolutionPreference: String, CaseIterable, Identifiable {
+        case matchReceiver
+        case fixedPreset
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .matchReceiver:
+                return "Match Receiver"
+            case .fixedPreset:
+                return "Fixed Preset"
+            }
+        }
+    }
+
     private let captureService: CaptureService
     private let encoderService: EncoderService
     private let transportService: TransportService
@@ -40,6 +56,8 @@ final class SenderSessionCoordinator {
     private(set) var streamingPipelinePreference: NetworkProtocol.StreamingPipelinePreference = .automatic { didSet { onChange?() } }
     private(set) var resolvedStreamingPipelineMode: NetworkProtocol.StreamingPipelineMode =
         NetworkProtocol.resolvedStreamingPipelineMode(for: .automatic) { didSet { onChange?() } }
+    private(set) var displayResolutionPreference: DisplayResolutionPreference = .matchReceiver { didSet { onChange?() } }
+    private(set) var preferredDisplayPreset: VirtualDisplayPreset = .defaultFixed { didSet { onChange?() } }
 
     private(set) var configuredEndpointSummary: String = "-" { didSet { onChange?() } }
     private(set) var wiredPathAvailable = false { didSet { onChange?() } }
@@ -316,7 +334,7 @@ final class SenderSessionCoordinator {
     }
 
     /// Starts capture and frame transport after handshake succeeds.
-    /// Creates a virtual display for the extended desktop, applies the best matching mode,
+    /// Creates a virtual display for the extended desktop, applies the configured startup mode,
     /// reads back the actual live mode, then starts capture.
     func startSession() {
         guard canStartSession else { return }
@@ -340,6 +358,10 @@ final class SenderSessionCoordinator {
             "tier=\(NetworkProtocol.detectedVideoHardwareTier.rawValue), " +
             "chip=\"\(NetworkProtocol.currentChipBrandString)\""
         )
+        print(
+            "[Sender] Display resolution: preference=\(displayResolutionPreference.rawValue), " +
+            "preset=\(preferredDisplayPreset.id)"
+        )
 
         // Create virtual display so macOS extends the desktop onto it.
         let virtualDisplayID = virtualDisplayService.createDisplay(
@@ -356,7 +378,7 @@ final class SenderSessionCoordinator {
 
         // Stage 1 (0.25s): CGDisplayCopyAllDisplayModes needs a moment after virtual display
         // creation before it returns the advertised modes. Query modes here and apply the
-        // receiver-matched default to override whatever macOS restored from its display prefs.
+        // configured startup mode to override whatever macOS restored from its display prefs.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self, case .running = self.state else { return }
             guard virtualDisplayID != 0 else { return }
@@ -365,15 +387,16 @@ final class SenderSessionCoordinator {
             self.availableDisplayModes = modes
             print("[Sender] Virtual display exposed \(modes.count) modes")
 
-            if let best = self.bestMatchingMode(
-                from: modes,
-                logicalWidth: self.receiverLogicalWidth,
-                logicalHeight: self.receiverLogicalHeight
-            ) {
-                print("[Sender] Auto-applying receiver-matched mode: \(best.label)")
-                self.virtualDisplayService.apply(mode: best)
+            if let preferred = self.preferredStartupMode(from: modes) {
+                switch self.displayResolutionPreference {
+                case .matchReceiver:
+                    print("[Sender] Auto-applying receiver-matched mode: \(preferred.label)")
+                case .fixedPreset:
+                    print("[Sender] Auto-applying fixed startup mode: \(preferred.label)")
+                }
+                self.virtualDisplayService.apply(mode: preferred)
             } else {
-                print("[Sender] No matching mode found; macOS will use its remembered mode")
+                print("[Sender] No preferred startup mode found; macOS will use its remembered mode")
             }
 
             // Stage 2 (0.35s later): mode change has settled; read back live mode and start capture.
@@ -645,14 +668,22 @@ final class SenderSessionCoordinator {
 
     private func effectiveCaptureWidth() -> Int {
         if NetworkProtocol.preferRawFrameTransportForDiagnostics {
-            return min(targetWidth, NetworkProtocol.rawDiagnosticsMaxWidth)
+            let preferredWidth = displayResolutionPreference == .fixedPreset ? preferredDisplayPreset.pixelWidth : targetWidth
+            return min(preferredWidth, NetworkProtocol.rawDiagnosticsMaxWidth)
+        }
+        if displayResolutionPreference == .fixedPreset {
+            return preferredDisplayPreset.pixelWidth
         }
         return targetWidth
     }
 
     private func effectiveCaptureHeight() -> Int {
         if NetworkProtocol.preferRawFrameTransportForDiagnostics {
-            return min(targetHeight, NetworkProtocol.rawDiagnosticsMaxHeight)
+            let preferredHeight = displayResolutionPreference == .fixedPreset ? preferredDisplayPreset.pixelHeight : targetHeight
+            return min(preferredHeight, NetworkProtocol.rawDiagnosticsMaxHeight)
+        }
+        if displayResolutionPreference == .fixedPreset {
+            return preferredDisplayPreset.pixelHeight
         }
         return targetHeight
     }
@@ -699,6 +730,41 @@ final class SenderSessionCoordinator {
         })
     }
 
+    private func preferredStartupMode(from modes: [VirtualDisplayMode]) -> VirtualDisplayMode? {
+        guard !modes.isEmpty else { return nil }
+
+        switch displayResolutionPreference {
+        case .matchReceiver:
+            return bestMatchingMode(
+                from: modes,
+                logicalWidth: receiverLogicalWidth,
+                logicalHeight: receiverLogicalHeight
+            )
+        case .fixedPreset:
+            if let exact = modes.first(where: {
+                $0.pixelWidth == preferredDisplayPreset.pixelWidth &&
+                $0.pixelHeight == preferredDisplayPreset.pixelHeight
+            }) {
+                return exact
+            }
+
+            let targetPixelArea = preferredDisplayPreset.pixelWidth * preferredDisplayPreset.pixelHeight
+            return modes.min(by: {
+                abs($0.pixelWidth * $0.pixelHeight - targetPixelArea) <
+                abs($1.pixelWidth * $1.pixelHeight - targetPixelArea)
+            })
+        }
+    }
+
+    private func applyPreferredDisplayModeIfRunning() {
+        guard state == .running, virtualDisplayService.isActive else { return }
+        let modes = availableDisplayModes.isEmpty ? virtualDisplayService.availableModes() : availableDisplayModes
+        availableDisplayModes = modes
+        guard let preferred = preferredStartupMode(from: modes) else { return }
+        guard activeDisplayMode != preferred else { return }
+        changeDisplayMode(preferred)
+    }
+
     private func applyNegotiatedVideoTransport(_ videoTransportMode: NetworkProtocol.VideoTransportMode) {
         negotiatedVideoTransportMode = videoTransportMode
         frameDispatchGate.setNegotiatedMode(videoTransportMode)
@@ -718,6 +784,18 @@ final class SenderSessionCoordinator {
         guard preference != streamingPipelinePreference else { return }
         streamingPipelinePreference = preference
         resolvedStreamingPipelineMode = NetworkProtocol.resolvedStreamingPipelineMode(for: preference)
+    }
+
+    func setDisplayResolutionPreference(_ preference: DisplayResolutionPreference) {
+        guard preference != displayResolutionPreference else { return }
+        displayResolutionPreference = preference
+        applyPreferredDisplayModeIfRunning()
+    }
+
+    func setPreferredDisplayPreset(_ preset: VirtualDisplayPreset) {
+        guard preset != preferredDisplayPreset else { return }
+        preferredDisplayPreset = preset
+        applyPreferredDisplayModeIfRunning()
     }
 
     private func requestRecoveryKeyFrameIfNeeded(

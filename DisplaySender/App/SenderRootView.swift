@@ -8,10 +8,18 @@ struct SenderRootView: View {
 
     private static let savedHostKey = "lastReceiverHost"
     private static let savedPortKey = "lastReceiverPort"
+    private static let savedDisplayResolutionPreferenceKey = "displayResolutionPreference"
+    private static let savedFixedDisplayPresetKey = "fixedDisplayPreset"
 
     @State private var receiverHostInput = UserDefaults.standard.string(forKey: SenderRootView.savedHostKey) ?? ""
     @State private var portInput = UserDefaults.standard.string(forKey: SenderRootView.savedPortKey) ?? String(NetworkProtocol.defaultPort)
     @State private var selectedReceiverID: String?
+    @State private var selectedDisplayResolutionPreference =
+        SenderSessionCoordinator.DisplayResolutionPreference(
+            rawValue: UserDefaults.standard.string(forKey: SenderRootView.savedDisplayResolutionPreferenceKey) ?? ""
+        ) ?? .matchReceiver
+    @State private var selectedFixedDisplayPresetID =
+        UserDefaults.standard.string(forKey: SenderRootView.savedFixedDisplayPresetKey) ?? VirtualDisplayPreset.defaultFixed.id
 
     @State private var stateText = "idle"
     @State private var connectionText = "not_connected"
@@ -42,6 +50,7 @@ struct SenderRootView: View {
         VStack(alignment: .leading, spacing: 12) {
             headerSection
             receiverSection
+            displayResolutionSection
             streamingPipelineSection
             actionSection
             if !availableDisplayModes.isEmpty {
@@ -56,6 +65,10 @@ struct SenderRootView: View {
             coordinator.onChange = {
                 refreshFromCoordinator()
             }
+            if let preset = VirtualDisplayPreset.commonPresets.first(where: { $0.id == selectedFixedDisplayPresetID }) {
+                coordinator.setPreferredDisplayPreset(preset)
+            }
+            coordinator.setDisplayResolutionPreference(selectedDisplayResolutionPreference)
             discoveryService.startBrowsing()
             refreshFromCoordinator()
         }
@@ -138,10 +151,56 @@ struct SenderRootView: View {
 
                 TextField("Receiver host", text: $receiverHostInput)
                 TextField("Port", text: $portInput)
-                Text("Resolution: auto-match receiver display")
+                Text("Resolution is configured in Display Resolution.")
                     .foregroundStyle(.secondary)
             }
             .padding(.top, 6)
+        }
+    }
+
+    private var displayResolutionSection: some View {
+        GroupBox("Display Resolution") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Choose how the virtual display starts. Match Receiver follows the receiver's display metrics. Fixed Preset lets you force pixel sizes like 3008×1692.")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+
+                Picker("Resolution", selection: $selectedDisplayResolutionPreference) {
+                    ForEach(SenderSessionCoordinator.DisplayResolutionPreference.allCases) { preference in
+                        Text(preference.label).tag(preference)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: selectedDisplayResolutionPreference) { _, newValue in
+                    UserDefaults.standard.set(newValue.rawValue, forKey: Self.savedDisplayResolutionPreferenceKey)
+                    coordinator.setDisplayResolutionPreference(newValue)
+                    refreshFromCoordinator()
+                }
+
+                if selectedDisplayResolutionPreference == .fixedPreset {
+                    Picker("Preset", selection: $selectedFixedDisplayPresetID) {
+                        ForEach(VirtualDisplayPreset.commonPresets) { preset in
+                            Text(preset.label).tag(preset.id)
+                        }
+                    }
+                    .onChange(of: selectedFixedDisplayPresetID) { _, newID in
+                        guard let preset = VirtualDisplayPreset.commonPresets.first(where: { $0.id == newID }) else { return }
+                        UserDefaults.standard.set(newID, forKey: Self.savedFixedDisplayPresetKey)
+                        coordinator.setPreferredDisplayPreset(preset)
+                        refreshFromCoordinator()
+                    }
+                }
+
+                Text("Configured startup mode: \(displayResolutionSummaryText)")
+                    .foregroundStyle(.secondary)
+                    .font(.system(.body, design: .monospaced))
+
+                if isSessionActive {
+                    Text("Resolution changes restart capture automatically when the requested mode changes.")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                }
+            }
         }
     }
 
@@ -158,7 +217,7 @@ struct SenderRootView: View {
                 if availableDisplayModes.count > 1 {
                     Divider()
 
-                    Text("Switch mode — capture restarts automatically.")
+                    Text("Switch mode live — capture restarts automatically.")
                         .foregroundStyle(.secondary)
                         .font(.callout)
 
@@ -257,6 +316,7 @@ struct SenderRootView: View {
                 Text("Selected Receiver: \(selectedReceiver()?.displayName ?? "manual")")
                 Text("Configured Endpoint: \(endpointSummary)")
                 Text("Video Transport: \(videoTransportText)")
+                Text("Display Resolution: \(displayResolutionSummaryText)")
                 Text("Streaming Pipeline: \(selectedStreamingPipelinePreference.label) -> \(resolvedStreamingPipelineText)")
                 Text("Negotiated Display: \(negotiatedResolutionText)")
                 Text("Wired Path: \(wiredPathSummary)")
@@ -301,6 +361,19 @@ struct SenderRootView: View {
     private func selectedReceiver() -> DiscoveredReceiver? {
         guard let selectedReceiverID else { return nil }
         return discoveryService.receivers.first(where: { $0.id == selectedReceiverID })
+    }
+
+    private var selectedFixedDisplayPreset: VirtualDisplayPreset {
+        VirtualDisplayPreset.commonPresets.first(where: { $0.id == selectedFixedDisplayPresetID }) ?? .defaultFixed
+    }
+
+    private var displayResolutionSummaryText: String {
+        switch selectedDisplayResolutionPreference {
+        case .matchReceiver:
+            return "Match Receiver"
+        case .fixedPreset:
+            return "Fixed \(selectedFixedDisplayPreset.label)"
+        }
     }
 
     private func resolvedConnectionTarget() -> (host: String, port: UInt16)? {
@@ -354,6 +427,12 @@ struct SenderRootView: View {
         endpointSummary = coordinator.configuredEndpointSummary
         videoTransportText = coordinator.negotiatedVideoTransportMode.rawValue.uppercased()
         resolvedStreamingPipelineText = coordinator.resolvedStreamingPipelineMode.label
+        if selectedDisplayResolutionPreference != coordinator.displayResolutionPreference {
+            selectedDisplayResolutionPreference = coordinator.displayResolutionPreference
+        }
+        if selectedFixedDisplayPresetID != coordinator.preferredDisplayPreset.id {
+            selectedFixedDisplayPresetID = coordinator.preferredDisplayPreset.id
+        }
         if selectedStreamingPipelinePreference != coordinator.streamingPipelinePreference {
             selectedStreamingPipelinePreference = coordinator.streamingPipelinePreference
         }
