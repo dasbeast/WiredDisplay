@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Darwin
 import Foundation
 
 private enum ReceiverAdvertisementTXTRecordKey {
@@ -11,6 +12,9 @@ private enum ReceiverAdvertisementTXTRecordKey {
 
 private enum AdvertisedReceiverVisualKind: String {
     case imac
+    case macMini
+    case macStudio
+    case macbookAir
     case studioDisplay
     case macbookPro
     case display
@@ -93,6 +97,52 @@ private struct ReceiverAdvertisementProfile {
         let normalizedReceiverName = receiverName.lowercased()
         let normalizedDisplayName = displayName?.lowercased() ?? ""
         let preferredAddress = NetworkDiagnostics.preferredDiscoveryIPv4Address()
+        let hardwareModel = hardwareModelIdentifier()
+
+        if hardwareModel.hasPrefix("Macmini") || normalizedReceiverName.contains("mac mini") {
+            return ReceiverAdvertisementProfile(
+                displayName: displayName,
+                deviceFamily: .macMini,
+                preferredHost: preferredAddress?.address,
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+            )
+        }
+
+        if hardwareModel.hasPrefix("MacStudio") || normalizedReceiverName.contains("mac studio") {
+            return ReceiverAdvertisementProfile(
+                displayName: displayName,
+                deviceFamily: .macStudio,
+                preferredHost: preferredAddress?.address,
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+            )
+        }
+
+        if hardwareModel.hasPrefix("MacBookAir") {
+            return ReceiverAdvertisementProfile(
+                displayName: displayName,
+                deviceFamily: .macbookAir,
+                preferredHost: preferredAddress?.address,
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+            )
+        }
+
+        if hardwareModel.hasPrefix("MacBookPro") || normalizedReceiverName.contains("macbook pro") {
+            return ReceiverAdvertisementProfile(
+                displayName: displayName,
+                deviceFamily: .macbookPro,
+                preferredHost: preferredAddress?.address,
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+            )
+        }
+
+        if hardwareModel.hasPrefix("iMac") {
+            return ReceiverAdvertisementProfile(
+                displayName: displayName,
+                deviceFamily: .imac,
+                preferredHost: preferredAddress?.address,
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+            )
+        }
 
         if normalizedDisplayName.contains("studio display") {
             return ReceiverAdvertisementProfile(
@@ -141,5 +191,15 @@ private struct ReceiverAdvertisementProfile {
             preferredHost: preferredAddress?.address,
             preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
         )
+    }
+
+    private static func hardwareModelIdentifier() -> String {
+        var size = 0
+        sysctlbyname("hw.model", nil, &size, nil, 0)
+        guard size > 0 else { return "" }
+
+        var buffer = [CChar](repeating: 0, count: size)
+        sysctlbyname("hw.model", &buffer, &size, nil, 0)
+        return String(cString: buffer)
     }
 }

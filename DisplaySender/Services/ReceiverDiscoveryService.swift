@@ -4,6 +4,9 @@ import Foundation
 
 enum DiscoveredReceiverVisualKind: String {
     case imac
+    case macMini
+    case macStudio
+    case macbookAir
     case studioDisplay
     case macbookPro
     case display
@@ -213,15 +216,33 @@ final class ReceiverDiscoveryService: NSObject, ObservableObject {
         let displayDescriptorLowercased = displayDescriptor?.lowercased() ?? ""
         let combined = receiverNameLowercased + " " + displayDescriptorLowercased
 
-        if displayDescriptorLowercased.contains("studio display") {
-            return .studioDisplay
+        if receiverNameLowercased.contains("mac mini") || receiverNameLowercased.contains("macmini") {
+            return .macMini
+        }
+
+        if receiverNameLowercased.contains("mac studio") || receiverNameLowercased.contains("macstudio") {
+            return .macStudio
+        }
+
+        if receiverNameLowercased.contains("macbook air") {
+            return .macbookAir
         }
 
         if receiverNameLowercased.contains("imac") {
             return .imac
         }
 
-        if combined.contains("macbook") || combined.contains("retina xdr") || combined.contains("liquid retina") {
+        if receiverNameLowercased.contains("macbook pro") ||
+            combined.contains("retina xdr") ||
+            combined.contains("liquid retina") {
+            return .macbookPro
+        }
+
+        if displayDescriptorLowercased.contains("studio display") {
+            return .studioDisplay
+        }
+
+        if combined.contains("macbook") {
             return .macbookPro
         }
 

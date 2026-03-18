@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -554,9 +555,19 @@ private struct ReceiverThumbnailView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(backgroundGradient)
 
-            deviceArtwork
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
+            if let systemIcon = ReceiverSystemIconCatalog.image(for: kind) {
+                Image(nsImage: systemIcon)
+                    .resizable()
+                    .interpolation(.high)
+                    .antialiased(true)
+                    .scaledToFit()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+            } else {
+                fallbackArtwork
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            }
         }
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -566,10 +577,14 @@ private struct ReceiverThumbnailView: View {
     }
 
     @ViewBuilder
-    private var deviceArtwork: some View {
+    private var fallbackArtwork: some View {
         switch kind {
         case .imac:
             iMacArtwork
+        case .macMini, .macStudio:
+            desktopDisplayArtwork
+        case .macbookAir:
+            macBookArtwork
         case .studioDisplay:
             studioDisplayArtwork
         case .macbookPro:
@@ -711,5 +726,36 @@ private struct ReceiverThumbnailView: View {
             startPoint: .top,
             endPoint: .bottom
         )
+    }
+}
+
+private enum ReceiverSystemIconCatalog {
+    private static let basePath = "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources"
+
+    static func image(for kind: DiscoveredReceiverVisualKind) -> NSImage? {
+        guard let path = iconPath(for: kind) else { return nil }
+        return NSImage(contentsOfFile: path)
+    }
+
+    private static func iconPath(for kind: DiscoveredReceiverVisualKind) -> String? {
+        let fileName: String
+        switch kind {
+        case .imac:
+            fileName = "com.apple.imac-2021-silver.icns"
+        case .macMini:
+            fileName = "com.apple.macmini-2020.icns"
+        case .macStudio:
+            fileName = "com.apple.macstudio.icns"
+        case .macbookAir:
+            fileName = "com.apple.macbookair-13-2022-space-gray.icns"
+        case .studioDisplay:
+            fileName = "com.apple.studio-display.icns"
+        case .macbookPro:
+            fileName = "com.apple.macbookpro-16-2021-space-gray.icns"
+        case .display:
+            fileName = "com.apple.pro-display-xdr.icns"
+        }
+
+        return "\(basePath)/\(fileName)"
     }
 }
