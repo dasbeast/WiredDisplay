@@ -46,21 +46,24 @@ struct SenderRootView: View {
     @State private var availableDisplayModes: [VirtualDisplayMode] = []
     @State private var activeDisplayModeText = "-"
     @State private var selectedModeID: String? = nil
-
+	
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            headerSection
-            receiverSection
-            displayResolutionSection
-            streamingPipelineSection
-            actionSection
-            if !availableDisplayModes.isEmpty {
-                displayModeSection
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                headerSection
+                receiverSection
+                displayResolutionSection
+                streamingPipelineSection
+                actionSection
+                if !availableDisplayModes.isEmpty {
+                    displayModeSection
+                }
+                statusSection
+                diagnosticsSection
             }
-            statusSection
-            diagnosticsSection
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
         }
-        .padding()
         .frame(minWidth: 800, minHeight: 540)
         .onAppear {
             coordinator.onChange = {
