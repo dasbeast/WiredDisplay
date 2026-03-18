@@ -67,6 +67,7 @@ struct VirtualDisplayMode: Identifiable, Equatable, Hashable {
 /// Uses the private CGVirtualDisplay API via an Obj-C bridge.
 final class VirtualDisplayService {
     private(set) var displayID: CGDirectDisplayID = 0
+    private var isDestroyingDisplay = false
     var isActive: Bool { displayID != 0 }
 
     /// Creates a virtual display with the given logical resolution.
@@ -150,10 +151,15 @@ final class VirtualDisplayService {
 
     /// Destroys the current virtual display.
     func destroyDisplay() {
-        guard displayID != 0 else { return }
-        VirtualDisplayBridge.destroyVirtualDisplay(displayID)
-        print("[VirtualDisplayService] Virtual display \(displayID) destroyed")
+        guard displayID != 0, !isDestroyingDisplay else { return }
+
+        isDestroyingDisplay = true
+        let doomedDisplayID = displayID
         displayID = 0
+
+        VirtualDisplayBridge.destroyVirtualDisplay(doomedDisplayID)
+        print("[VirtualDisplayService] Virtual display \(doomedDisplayID) destroy requested")
+        isDestroyingDisplay = false
     }
 
     deinit {

@@ -6,20 +6,34 @@
 //
 
 import AppKit
+import Sparkle
 import SwiftUI
 
 @main
 struct DisplaySenderApp: App {
     @NSApplicationDelegateAdaptor(DisplaySenderAppDelegate.self) private var appDelegate
+    @StateObject private var updater = DisplaySenderUpdater()
 
     var body: some Scene {
         WindowGroup(id: "main") {
             SenderRootView()
         }
         .defaultSize(width: 900, height: 720)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updater.updater?.checkForUpdates()
+                }
+                .disabled(updater.updater == nil || !(updater.updater?.canCheckForUpdates ?? false))
+            }
+        }
 
         MenuBarExtra("DisplaySender", systemImage: "display.2") {
-            DisplaySenderMenuBarView()
+            DisplaySenderMenuBarView(updater: updater)
+        }
+
+        Settings {
+            UpdaterSettingsView(updater: updater.updater, configurationError: updater.configurationError)
         }
     }
 }
@@ -46,6 +60,7 @@ final class DisplaySenderAppDelegate: NSObject, NSApplicationDelegate {
 
 private struct DisplaySenderMenuBarView: View {
     @Environment(\.openWindow) private var openWindow
+    @ObservedObject var updater: DisplaySenderUpdater
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -53,6 +68,8 @@ private struct DisplaySenderMenuBarView: View {
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "main")
             }
+
+            CheckForUpdatesView(updater: updater.updater)
 
             Divider()
 

@@ -1,14 +1,49 @@
 #import "VirtualDisplayBridge.h"
 #import "CGVirtualDisplayPrivate.h"
+#import <stdarg.h>
+#import <stdio.h>
 
 static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *sActiveDisplays = nil;
+static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *sRetiringDisplays = nil;
 static dispatch_once_t sOnceToken;
+static dispatch_queue_t sVirtualDisplayCallbackQueue = nil;
+static dispatch_once_t sQueueOnceToken;
+
+static void bridgeLog(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    fputs("[VirtualDisplayBridge] ", stderr);
+    vfprintf(stderr, format, args);
+    fputc('\n', stderr);
+    va_end(args);
+}
 
 static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void) {
     dispatch_once(&sOnceToken, ^{
         sActiveDisplays = [NSMutableDictionary dictionary];
+        sRetiringDisplays = [NSMutableDictionary dictionary];
     });
     return sActiveDisplays;
+}
+
+static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *retiringDisplays(void) {
+    (void)activeDisplays();
+    return sRetiringDisplays;
+}
+
+static dispatch_queue_t virtualDisplayCallbackQueue(void) {
+    dispatch_once(&sQueueOnceToken, ^{
+        sVirtualDisplayCallbackQueue = dispatch_queue_create("BK.DisplaySender.VirtualDisplayBridge", DISPATCH_QUEUE_SERIAL);
+    });
+    return sVirtualDisplayCallbackQueue;
+}
+
+static void scheduleRetiredDisplayPurge(NSNumber *displayKey, int64_t delayNanoseconds) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delayNanoseconds), virtualDisplayCallbackQueue(), ^{
+        @synchronized (activeDisplays()) {
+            [retiringDisplays() removeObjectForKey:displayKey];
+        }
+    });
 }
 
 @implementation VirtualDisplayBridge
@@ -34,17 +69,19 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
     descriptor.bluePrimary  = CGPointMake(0.1500, 0.0600);
     descriptor.whitePoint   = CGPointMake(0.3127, 0.3290);
 
-    descriptor.queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
+    descriptor.queue = virtualDisplayCallbackQueue();
     descriptor.terminationHandler = ^(CGDirectDisplayID displayID, void *error) {
-        NSLog(@"[VirtualDisplayBridge] Virtual display %u terminated", displayID);
+        NSNumber *displayKey = @(displayID);
         @synchronized (activeDisplays()) {
-            [activeDisplays() removeObjectForKey:@(displayID)];
+            [activeDisplays() removeObjectForKey:displayKey];
         }
+        bridgeLog("Virtual display %u terminated", displayID);
+        scheduleRetiredDisplayPurge(displayKey, 250 * NSEC_PER_MSEC);
     };
 
     CGVirtualDisplay *display = [[CGVirtualDisplay alloc] initWithDescriptor:descriptor];
     if (!display) {
-        NSLog(@"[VirtualDisplayBridge] Failed to create CGVirtualDisplay");
+        bridgeLog("Failed to create CGVirtualDisplay");
         return 0;
     }
 
@@ -109,13 +146,13 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
 
     BOOL applied = [display applySettings:settings];
     if (!applied) {
-        NSLog(@"[VirtualDisplayBridge] Failed to apply settings to virtual display");
+        bridgeLog("Failed to apply settings to virtual display");
         return 0;
     }
 
     CGDirectDisplayID displayID = display.displayID;
-    NSLog(@"[VirtualDisplayBridge] Created virtual display %u (%ux%u @ %.0fHz, hiDPI=%d, requestedHiDPI=%d)",
-          displayID, width, height, refreshRate, effectiveHiDPI, hiDPI);
+    bridgeLog("Created virtual display %u (%ux%u @ %.0fHz, hiDPI=%d, requestedHiDPI=%d)",
+              displayID, width, height, refreshRate, effectiveHiDPI, hiDPI);
 
     @synchronized (activeDisplays()) {
         activeDisplays()[@(displayID)] = display;
@@ -231,7 +268,7 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
     }
 
     if (!targetMode) {
-        NSLog(@"[VirtualDisplayBridge] No mode found for %ux%u on display %u", pixelWidth, pixelHeight, displayID);
+        bridgeLog("No mode found for %ux%u on display %u", pixelWidth, pixelHeight, displayID);
         CFRelease(allModes);
         return NO;
     }
@@ -239,14 +276,14 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
     CGDisplayConfigRef config = NULL;
     CGError err = CGBeginDisplayConfiguration(&config);
     if (err != kCGErrorSuccess) {
-        NSLog(@"[VirtualDisplayBridge] CGBeginDisplayConfiguration failed: %d", err);
+        bridgeLog("CGBeginDisplayConfiguration failed: %d", err);
         CFRelease(allModes);
         return NO;
     }
 
     err = CGConfigureDisplayWithDisplayMode(config, displayID, targetMode, NULL);
     if (err != kCGErrorSuccess) {
-        NSLog(@"[VirtualDisplayBridge] CGConfigureDisplayWithDisplayMode failed: %d", err);
+        bridgeLog("CGConfigureDisplayWithDisplayMode failed: %d", err);
         CGCancelDisplayConfiguration(config);
         CFRelease(allModes);
         return NO;
@@ -256,28 +293,37 @@ static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *activeDisplays(void)
     CFRelease(allModes);
 
     if (err == kCGErrorSuccess) {
-        NSLog(@"[VirtualDisplayBridge] Applied mode %ux%u on display %u", pixelWidth, pixelHeight, displayID);
+        bridgeLog("Applied mode %ux%u on display %u", pixelWidth, pixelHeight, displayID);
     } else {
-        NSLog(@"[VirtualDisplayBridge] CGCompleteDisplayConfiguration failed: %d", err);
+        bridgeLog("CGCompleteDisplayConfiguration failed: %d", err);
     }
     return err == kCGErrorSuccess;
 }
 
 + (void)destroyVirtualDisplay:(CGDirectDisplayID)displayID {
+    NSNumber *displayKey = @(displayID);
     @synchronized (activeDisplays()) {
-        CGVirtualDisplay *display = activeDisplays()[@(displayID)];
+        CGVirtualDisplay *display = activeDisplays()[displayKey];
         if (display) {
-            [activeDisplays() removeObjectForKey:@(displayID)];
-            NSLog(@"[VirtualDisplayBridge] Destroyed virtual display %u", displayID);
+            [activeDisplays() removeObjectForKey:displayKey];
+            retiringDisplays()[displayKey] = display;
         }
     }
+    bridgeLog("Destroy requested for virtual display %u", displayID);
+    scheduleRetiredDisplayPurge(displayKey, 2 * NSEC_PER_SEC);
 }
 
 + (void)destroyAllVirtualDisplays {
     @synchronized (activeDisplays()) {
-        NSLog(@"[VirtualDisplayBridge] Destroying %lu virtual display(s)", (unsigned long)activeDisplays().count);
+        bridgeLog("Destroying %lu virtual display(s)", (unsigned long)activeDisplays().count);
+        [retiringDisplays() addEntriesFromDictionary:activeDisplays()];
         [activeDisplays() removeAllObjects];
     }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), virtualDisplayCallbackQueue(), ^{
+        @synchronized (activeDisplays()) {
+            [retiringDisplays() removeAllObjects];
+        }
+    });
 }
 
 + (NSUInteger)activeVirtualDisplayCount {

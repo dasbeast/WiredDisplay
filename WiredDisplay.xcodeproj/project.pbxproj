@@ -32,6 +32,7 @@
 		DEE851312F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */; };
 		DEE851332F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */; };
 		DEE851342F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */; };
+		E0498A062D3AF3401AA00001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = E0498A052D3AF3401AA00001 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -102,6 +103,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E0498A062D3AF3401AA00001 /* Sparkle in Frameworks */,
 				DEE850F62F5D0DA400C44CD5 /* VideoToolbox.framework in Frameworks */,
 				DEE850F42F5D0D9600C44CD5 /* ScreenCaptureKit.framework in Frameworks */,
 				DEE850F82F5D0DB500C44CD5 /* Network.framework in Frameworks */,
@@ -288,6 +290,7 @@
 			);
 			name = DisplaySender;
 			packageProductDependencies = (
+				E0498A052D3AF3401AA00001 /* Sparkle */,
 			);
 			productName = DisplaySender;
 			productReference = DEE850CC2F5D0C6400C44CD5 /* DisplaySender.app */;
@@ -323,6 +326,9 @@
 			);
 			mainGroup = DEE850812F5D094C00C44CD5;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E0498A042D3AF3401AA00001 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = DEE8508B2F5D094C00C44CD5 /* Products */;
 			projectDirPath = "";
@@ -668,6 +674,8 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_SUFeedURL = "https://example.com/displaysender/appcast.xml";
+				INFOPLIST_KEY_SUPublicEDKey = "XmDzxJKWYs500FMKMsBUoRkTXqGv/KjpJXbkflHHnbI=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -702,6 +710,8 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_SUFeedURL = "https://example.com/displaysender/appcast.xml";
+				INFOPLIST_KEY_SUPublicEDKey = "XmDzxJKWYs500FMKMsBUoRkTXqGv/KjpJXbkflHHnbI=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -721,6 +731,17 @@
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E0498A042D3AF3401AA00001 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.7.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCConfigurationList section */
 		DEE850852F5D094C00C44CD5 /* Build configuration list for PBXProject "WiredDisplay" */ = {
@@ -760,6 +781,14 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		E0498A052D3AF3401AA00001 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E0498A042D3AF3401AA00001 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = DEE850822F5D094C00C44CD5 /* Project object */;
 }
