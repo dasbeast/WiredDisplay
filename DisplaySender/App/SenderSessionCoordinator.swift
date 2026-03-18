@@ -37,6 +37,9 @@ final class SenderSessionCoordinator {
     private(set) var estimatedDisplayLatencyMilliseconds: Double? { didSet { onChange?() } }
     private(set) var requestedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp { didSet { onChange?() } }
     private(set) var negotiatedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp { didSet { onChange?() } }
+    private(set) var streamingPipelinePreference: NetworkProtocol.StreamingPipelinePreference = .automatic { didSet { onChange?() } }
+    private(set) var resolvedStreamingPipelineMode: NetworkProtocol.StreamingPipelineMode =
+        NetworkProtocol.resolvedStreamingPipelineMode(for: .automatic) { didSet { onChange?() } }
 
     private(set) var configuredEndpointSummary: String = "-" { didSet { onChange?() } }
     private(set) var wiredPathAvailable = false { didSet { onChange?() } }
@@ -331,6 +334,12 @@ final class SenderSessionCoordinator {
         let captureHeight = effectiveCaptureHeight()
 
         print("[Sender] Starting session: \(captureWidth)x\(captureHeight)")
+        print(
+            "[Sender] Streaming pipeline: preference=\(streamingPipelinePreference.rawValue), " +
+            "resolved=\(resolvedStreamingPipelineMode.rawValue), " +
+            "tier=\(NetworkProtocol.detectedVideoHardwareTier.rawValue), " +
+            "chip=\"\(NetworkProtocol.currentChipBrandString)\""
+        )
 
         // Create virtual display so macOS extends the desktop onto it.
         let virtualDisplayID = virtualDisplayService.createDisplay(
@@ -387,7 +396,8 @@ final class SenderSessionCoordinator {
                 self.captureService.startCapture(
                     width: liveMode?.pixelWidth ?? captureWidth,
                     height: liveMode?.pixelHeight ?? captureHeight,
-                    framesPerSecond: NetworkProtocol.captureFramesPerSecond
+                    framesPerSecond: NetworkProtocol.captureFramesPerSecond,
+                    streamingPipelineMode: self.resolvedStreamingPipelineMode
                 )
             }
         }
@@ -413,7 +423,8 @@ final class SenderSessionCoordinator {
             self.captureService.startCapture(
                 width: live.pixelWidth,
                 height: live.pixelHeight,
-                framesPerSecond: NetworkProtocol.captureFramesPerSecond
+                framesPerSecond: NetworkProtocol.captureFramesPerSecond,
+                streamingPipelineMode: self.resolvedStreamingPipelineMode
             )
         }
     }
@@ -701,6 +712,12 @@ final class SenderSessionCoordinator {
             awaitingFirstRenderedFrame = false
             videoDatagramTransportService.disconnect()
         }
+    }
+
+    func setStreamingPipelinePreference(_ preference: NetworkProtocol.StreamingPipelinePreference) {
+        guard preference != streamingPipelinePreference else { return }
+        streamingPipelinePreference = preference
+        resolvedStreamingPipelineMode = NetworkProtocol.resolvedStreamingPipelineMode(for: preference)
     }
 
     private func requestRecoveryKeyFrameIfNeeded(

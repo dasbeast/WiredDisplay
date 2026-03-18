@@ -30,7 +30,12 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     var onCapturedAudio: ((AudioPacket) -> Void)?
     var onError: ((Error) -> Void)?
 
-    func startCapture(width: Int, height: Int, framesPerSecond: Int = 60) {
+    func startCapture(
+        width: Int,
+        height: Int,
+        framesPerSecond: Int = 60,
+        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode = .adaptiveUpscale
+    ) {
         stopCapture()
 
         isCapturing = true
@@ -46,7 +51,12 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
         Task {
             do {
-                try await startSCStream(width: width, height: height, framesPerSecond: framesPerSecond)
+                try await startSCStream(
+                    width: width,
+                    height: height,
+                    framesPerSecond: framesPerSecond,
+                    streamingPipelineMode: streamingPipelineMode
+                )
             } catch {
                 print("[CaptureService] SCStream failed: \(error). Falling back to synthetic capture.")
                 onError?(CaptureServiceError.screenCapturePermissionDenied(underlying: error))
@@ -71,7 +81,12 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - SCStream Setup
 
-    private func startSCStream(width: Int, height: Int, framesPerSecond: Int) async throws {
+    private func startSCStream(
+        width: Int,
+        height: Int,
+        framesPerSecond: Int,
+        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode
+    ) async throws {
         let available = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
 
         print("[CaptureService] Available displays: \(available.displays.map { "ID=\($0.displayID) \($0.width)x\($0.height)" })")
@@ -122,13 +137,19 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         var captureWidthPixels = max(1, Int((sourcePointsWidth * CGFloat(captureScale)).rounded()))
         var captureHeightPixels = max(1, Int((sourcePointsHeight * CGFloat(captureScale)).rounded()))
 
-        // Bound capture resolution for stable real-time encoding at target FPS.
-        let pixelBudget = max(1, NetworkProtocol.maxCapturePixelsAtTargetFPS)
         let totalPixels = captureWidthPixels * captureHeightPixels
-        if totalPixels > pixelBudget {
-            let downscale = sqrt(Double(pixelBudget) / Double(totalPixels))
-            captureWidthPixels = max(1, Int(Double(captureWidthPixels) * downscale))
-            captureHeightPixels = max(1, Int(Double(captureHeightPixels) * downscale))
+        let pipelineDescription: String
+        if streamingPipelineMode == .adaptiveUpscale {
+            // Bound capture resolution for stable real-time encoding at target FPS.
+            let pixelBudget = max(1, NetworkProtocol.maxCapturePixelsAtTargetFPS)
+            if totalPixels > pixelBudget {
+                let downscale = sqrt(Double(pixelBudget) / Double(totalPixels))
+                captureWidthPixels = max(1, Int(Double(captureWidthPixels) * downscale))
+                captureHeightPixels = max(1, Int(Double(captureHeightPixels) * downscale))
+            }
+            pipelineDescription = "\(streamingPipelineMode.rawValue), budget \(pixelBudget) px"
+        } else {
+            pipelineDescription = streamingPipelineMode.rawValue
         }
 
         // H.264 encoders are generally happiest with even dimensions.
@@ -140,7 +161,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         print(
             "[CaptureService] Stream source points=\(Int(sourcePointsWidth))x\(Int(sourcePointsHeight)) " +
             "scale=\(String(format: "%.2f", captureScale)) -> pixels=\(captureWidthPixels)x\(captureHeightPixels) " +
-            "(requested \(width)x\(height), budget \(pixelBudget) px)"
+            "(requested \(width)x\(height), pipeline \(pipelineDescription))"
         )
 
         let configuration = SCStreamConfiguration()

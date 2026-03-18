@@ -27,9 +27,11 @@ struct SenderRootView: View {
     @State private var endpointSummary = "-"
     @State private var negotiatedResolutionText = "-"
     @State private var videoTransportText = "TCP"
+    @State private var resolvedStreamingPipelineText = "-"
     @State private var wiredPathSummary = "unknown"
     @State private var wiredWarning = ""
     @State private var interfaceLines: [String] = []
+    @State private var selectedStreamingPipelinePreference: NetworkProtocol.StreamingPipelinePreference = .automatic
 
     // Display mode state
     @State private var availableDisplayModes: [VirtualDisplayMode] = []
@@ -40,6 +42,7 @@ struct SenderRootView: View {
         VStack(alignment: .leading, spacing: 12) {
             headerSection
             receiverSection
+            streamingPipelineSection
             actionSection
             if !availableDisplayModes.isEmpty {
                 displayModeSection
@@ -177,6 +180,37 @@ struct SenderRootView: View {
         }
     }
 
+    private var streamingPipelineSection: some View {
+        GroupBox("Streaming Pipeline") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Automatic uses direct/native capture on stronger Apple Silicon and adaptive low-res capture plus upscale on base-tier machines.")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+
+                Picker("Pipeline", selection: $selectedStreamingPipelinePreference) {
+                    ForEach(NetworkProtocol.StreamingPipelinePreference.allCases) { preference in
+                        Text(preference.shortLabel).tag(preference)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: selectedStreamingPipelinePreference) { _, newValue in
+                    coordinator.setStreamingPipelinePreference(newValue)
+                    refreshFromCoordinator()
+                }
+
+                Text("Resolved for this Mac: \(resolvedStreamingPipelineText)")
+                    .foregroundStyle(.secondary)
+                    .font(.system(.body, design: .monospaced))
+
+                if isSessionActive {
+                    Text("Changes take effect the next time capture starts.")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                }
+            }
+        }
+    }
+
     private var actionSection: some View {
         HStack(spacing: 10) {
             if isSessionActive {
@@ -223,6 +257,7 @@ struct SenderRootView: View {
                 Text("Selected Receiver: \(selectedReceiver()?.displayName ?? "manual")")
                 Text("Configured Endpoint: \(endpointSummary)")
                 Text("Video Transport: \(videoTransportText)")
+                Text("Streaming Pipeline: \(selectedStreamingPipelinePreference.label) -> \(resolvedStreamingPipelineText)")
                 Text("Negotiated Display: \(negotiatedResolutionText)")
                 Text("Wired Path: \(wiredPathSummary)")
 
@@ -318,6 +353,10 @@ struct SenderRootView: View {
 
         endpointSummary = coordinator.configuredEndpointSummary
         videoTransportText = coordinator.negotiatedVideoTransportMode.rawValue.uppercased()
+        resolvedStreamingPipelineText = coordinator.resolvedStreamingPipelineMode.label
+        if selectedStreamingPipelinePreference != coordinator.streamingPipelinePreference {
+            selectedStreamingPipelinePreference = coordinator.streamingPipelinePreference
+        }
         negotiatedResolutionText = "\(coordinator.targetWidth)x\(coordinator.targetHeight)"
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         wiredWarning = coordinator.wiredPathAvailable ? "" : "No wired route currently available. Verify Thunderbolt Bridge and cable link."

@@ -181,6 +181,27 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             let outputWidth  = Int(view.drawableSize.width)
             let outputHeight = Int(view.drawableSize.height)
 
+            let shouldUseSpatialUpscale = shouldUseSpatialUpscale(
+                inputWidth: inputWidth,
+                inputHeight: inputHeight,
+                outputWidth: outputWidth,
+                outputHeight: outputHeight
+            )
+
+            guard shouldUseSpatialUpscale else {
+                releaseScalerResources()
+                drawDirectToDrawable(
+                    view: view,
+                    commandBuffer: commandBuffer,
+                    drawable: drawable,
+                    pipelineState: pipelineState,
+                    vertexBuffer: vertexBuffer,
+                    samplerState: samplerState,
+                    textures: textures
+                )
+                return
+            }
+
             // Rebuild intermediate texture and MetalFX scaler when dimensions change.
             if inputWidth != currentInputWidth
                 || inputHeight != currentInputHeight
@@ -237,9 +258,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             // --- Pass 2: MetalFX Spatial Upscale → private upscaled texture ---
             guard let spatialScaler, let upscaledTexture else {
-                // Scaler unavailable after Pass 1 — present intermediate directly via fallback.
-                commandBuffer.present(drawable)
-                commandBuffer.commit()
+                // Scaler unavailable after Pass 1 — fall back to the direct render path.
+                drawDirectToDrawable(
+                    view: view,
+                    commandBuffer: commandBuffer,
+                    drawable: drawable,
+                    pipelineState: pipelineState,
+                    vertexBuffer: vertexBuffer,
+                    samplerState: samplerState,
+                    textures: textures
+                )
                 return
             }
 
@@ -336,6 +364,41 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     "\(inputWidth)x\(inputHeight) → \(outputWidth)x\(outputHeight)"
                 )
             }
+        }
+
+        private func releaseScalerResources() {
+            spatialScaler = nil
+            intermediateColorTexture = nil
+            upscaledTexture = nil
+            currentInputWidth = 0
+            currentInputHeight = 0
+            currentOutputWidth = 0
+            currentOutputHeight = 0
+        }
+
+        private func shouldUseSpatialUpscale(
+            inputWidth: Int,
+            inputHeight: Int,
+            outputWidth: Int,
+            outputHeight: Int
+        ) -> Bool {
+            guard inputWidth > 0,
+                  inputHeight > 0,
+                  outputWidth > 0,
+                  outputHeight > 0 else {
+                return false
+            }
+
+            // Use the direct path when the frame already matches the output, when the view is
+            // downscaling, or when the aspect ratio differs enough that a straight upscale would
+            // stretch the image instead of preserving the sender's geometry.
+            guard outputWidth > inputWidth || outputHeight > inputHeight else {
+                return false
+            }
+
+            let inputAspect = Double(inputWidth) / Double(inputHeight)
+            let outputAspect = Double(outputWidth) / Double(outputHeight)
+            return abs(inputAspect - outputAspect) < 0.01
         }
 
         /// Fallback: direct single-pass render to drawable when MetalFX is unavailable.

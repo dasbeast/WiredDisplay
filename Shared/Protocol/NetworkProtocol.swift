@@ -31,16 +31,107 @@ enum NetworkProtocol {
     static let targetVideoBitrateBps: Int = 300_000_000
     static let minVideoBitrateBps: Int = 50_000_000
     static let maxVideoBitrateBps: Int = 2_000_000_000  // 2 Gbps – well within Thunderbolt 3 limits
-    // HEVC pixel budget: scaled to the machine's Media Engine tier.
+    enum VideoHardwareTier: String, Codable, Sendable {
+        case highPerformanceRetina
+        case balancedRetina
+
+        var label: String {
+            switch self {
+            case .highPerformanceRetina:
+                return "High-Performance Retina"
+            case .balancedRetina:
+                return "Balanced Retina"
+            }
+        }
+    }
+
+    enum StreamingPipelineMode: String, Codable, Sendable {
+        case nativeDirect
+        case adaptiveUpscale
+
+        var label: String {
+            switch self {
+            case .nativeDirect:
+                return "Native Direct"
+            case .adaptiveUpscale:
+                return "Adaptive Upscale"
+            }
+        }
+    }
+
+    enum StreamingPipelinePreference: String, Codable, Sendable, CaseIterable, Identifiable {
+        case automatic
+        case nativeDirect
+        case adaptiveUpscale
+
+        var id: String { rawValue }
+
+        var shortLabel: String {
+            switch self {
+            case .automatic:
+                return "Auto"
+            case .nativeDirect:
+                return "Direct"
+            case .adaptiveUpscale:
+                return "Upscale"
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .automatic:
+                return "Automatic"
+            case .nativeDirect:
+                return "Native Direct"
+            case .adaptiveUpscale:
+                return "Adaptive Upscale"
+            }
+        }
+    }
+
+    static var currentChipBrandString: String { chipBrandString() }
+
+    static var detectedVideoHardwareTier: VideoHardwareTier {
+        let chip = chipBrandString()
+        if chip.contains("Pro") || chip.contains("Max") || chip.contains("Ultra") {
+            return .highPerformanceRetina
+        }
+        return .balancedRetina
+    }
+
+    static var defaultStreamingPipelineMode: StreamingPipelineMode {
+        switch detectedVideoHardwareTier {
+        case .highPerformanceRetina:
+            return .nativeDirect
+        case .balancedRetina:
+            return .adaptiveUpscale
+        }
+    }
+
+    static func resolvedStreamingPipelineMode(
+        for preference: StreamingPipelinePreference
+    ) -> StreamingPipelineMode {
+        switch preference {
+        case .automatic:
+            return defaultStreamingPipelineMode
+        case .nativeDirect:
+            return .nativeDirect
+        case .adaptiveUpscale:
+            return .adaptiveUpscale
+        }
+    }
+
+    // HEVC pixel budget used by the adaptive-upscale path.
     // Pro / Max / Ultra chips have a dedicated media engine that handles 5K at 60fps.
     // Base M-series chips share the media engine with other workloads; cap at 4K to
     // prevent hardware encoder starvation and frame-drop cascades.
     static var maxCapturePixelsAtTargetFPS: Int {
-        let chip = chipBrandString()
-        if chip.contains("Pro") || chip.contains("Max") || chip.contains("Ultra") {
+        switch detectedVideoHardwareTier {
+        case .highPerformanceRetina:
             return 14_745_600  // 5K budget: 5120×2880
+        case .balancedRetina:
+            return 8_847_360   // 4K budget: 3840×2304 for base M1/M2/M3/M4
         }
-        return 8_847_360       // 4K budget: 3840×2304 for base M1/M2/M3/M4
     }
 
     /// Reads the processor brand string via sysctl (e.g. "Apple M3 Max").
