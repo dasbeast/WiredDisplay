@@ -1,0 +1,15 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>DisplaySender</title>
+        <item>
+            <title>1.0</title>
+            <pubDate>Wed, 18 Mar 2026 16:51:53 -0500</pubDate>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.2</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://baileykiehl.com/WDisplay/DisplaySender-1.0.zip" length="3045446" type="application/octet-stream" sparkle:edSignature="0mZSvJCiaEupz2kmjuMiqPKMPmfJOjaIMycJIHegyInFUkGv/YlcFFqJZ7pTGt1rUS3Z7WpnoVmpiNhdVQDECg=="/>
+        </item>
+    </channel>
+</rss>

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WiredDisplay for macOS</title>
+  <style>
+    :root {
+      --bg: #071521;
+      --bg-soft: #0d2232;
+      --panel: rgba(10, 27, 41, 0.78);
+      --panel-strong: rgba(9, 21, 31, 0.92);
+      --line: rgba(162, 208, 255, 0.16);
+      --text: #ecf5ff;
+      --muted: #9ab4c9;
+      --accent: #52c7ff;
+      --accent-2: #38f2c2;
+      --warn: #ffd15c;
+      --shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+      --radius: 28px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: "SF Pro Display", "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top, rgba(82, 199, 255, 0.18), transparent 34%),
+        radial-gradient(circle at 85% 12%, rgba(56, 242, 194, 0.16), transparent 26%),
+        linear-gradient(180deg, #08131d 0%, #06121a 32%, #081926 100%);
+      min-height: 100vh;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 64px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 44px;
+      border: 1px solid var(--line);
+      border-radius: 36px;
+      background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.05), transparent 40%),
+        linear-gradient(180deg, rgba(12, 35, 53, 0.92), rgba(7, 20, 31, 0.92));
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -12% -20% auto;
+      width: 420px;
+      height: 420px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(82, 199, 255, 0.28), transparent 62%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border: 1px solid rgba(82, 199, 255, 0.18);
+      border-radius: 999px;
+      background: rgba(82, 199, 255, 0.08);
+      color: #d8efff;
+      font-size: 0.9rem;
+      letter-spacing: 0.03em;
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      line-height: 1.05;
+    }
+
+    h1 {
+      margin-top: 22px;
+      max-width: 12ch;
+      font-size: clamp(2.8rem, 8vw, 5.8rem);
+      letter-spacing: -0.05em;
+    }
+
+    .hero p {
+      max-width: 60ch;
+      margin: 22px 0 0;
+      font-size: 1.08rem;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 30px;
+    }
+
+    .button,
+    .button-secondary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 15px 22px;
+      border-radius: 16px;
+      text-decoration: none;
+      font-weight: 700;
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+
+    .button {
+      background: linear-gradient(135deg, var(--accent), #3e9cff);
+      color: #02111c;
+      box-shadow: 0 18px 40px rgba(82, 199, 255, 0.22);
+    }
+
+    .button-secondary {
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      border: 1px solid var(--line);
+    }
+
+    .button:hover,
+    .button-secondary:hover {
+      transform: translateY(-1px);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 18px;
+      margin-top: 22px;
+    }
+
+    .card {
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .download {
+      grid-column: span 6;
+    }
+
+    .wide {
+      grid-column: span 12;
+    }
+
+    .half {
+      grid-column: span 6;
+    }
+
+    .third {
+      grid-column: span 4;
+    }
+
+    .card h2 {
+      font-size: 1.55rem;
+      letter-spacing: -0.03em;
+    }
+
+    .card h3 {
+      font-size: 1.16rem;
+      letter-spacing: -0.02em;
+    }
+
+    .lede {
+      margin: 12px 0 0;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .download-list,
+    .step-list,
+    .plain-list {
+      margin: 18px 0 0;
+      padding-left: 20px;
+      color: var(--muted);
+      line-height: 1.75;
+    }
+
+    .download-list li,
+    .step-list li,
+    .plain-list li {
+      margin: 8px 0;
+    }
+
+    .inline-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      text-decoration: none;
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+
+    .note {
+      margin-top: 16px;
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(255, 209, 92, 0.08);
+      border: 1px solid rgba(255, 209, 92, 0.18);
+      color: #ffe9ab;
+      line-height: 1.65;
+    }
+
+    .code {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.07);
+      color: #e9f7ff;
+      font-family: "SF Mono", "JetBrains Mono", monospace;
+      font-size: 0.92rem;
+    }
+
+    .footer {
+      margin-top: 24px;
+      padding: 22px 24px 8px;
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.7;
+      text-align: center;
+    }
+
+    @media (max-width: 900px) {
+      .download,
+      .wide,
+      .half,
+      .third {
+        grid-column: span 12;
+      }
+
+      .hero {
+        padding: 28px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="eyebrow">WiredDisplay for macOS</div>
+      <h1>Use one Mac as a wired display for another.</h1>
+      <p>
+        WiredDisplay is a two-app setup for low-latency Mac-to-Mac display streaming over a wired connection.
+        One Mac runs <strong>DisplayReceiver</strong> and acts like the monitor. The other runs <strong>DisplaySender</strong>
+        and streams a virtual display to it.
+      </p>
+      <div class="cta-row">
+        <a class="button" href="./DisplayReceiver-1.0.zip">Download DisplayReceiver</a>
+        <a class="button-secondary" href="./DisplaySender-1.0.zip">Download DisplaySender</a>
+        <a class="button-secondary" href="#setup">Setup Guide</a>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card download">
+        <h2>1. Download on the Mac that will act as the monitor</h2>
+        <p class="lede">
+          Install <strong>DisplayReceiver</strong> on the Mac that should receive video and audio.
+        </p>
+        <div class="inline-links">
+          <a class="pill" href="./DisplayReceiver-1.0.zip">DisplayReceiver.zip</a>
+          <a class="pill" href="./DisplayReceiver-appcast.xml">Receiver update feed</a>
+        </div>
+        <ol class="download-list">
+          <li>Download and unzip <strong>DisplayReceiver</strong>.</li>
+          <li>Move the app into your <span class="code">Applications</span> folder.</li>
+          <li>Launch it once so macOS can register it properly.</li>
+          <li>Leave it running. It lives in the menu bar and waits for a sender to connect.</li>
+        </ol>
+      </article>
+
+      <article class="card download">
+        <h2>2. Download on the Mac that will send the display</h2>
+        <p class="lede">
+          Install <strong>DisplaySender</strong> on the Mac that should create and stream the virtual display.
+        </p>
+        <div class="inline-links">
+          <a class="pill" href="./DisplaySender-1.0.zip">DisplaySender.zip</a>
+          <a class="pill" href="./appcast.xml">Sender update feed</a>
+        </div>
+        <ol class="download-list">
+          <li>Download and unzip <strong>DisplaySender</strong>.</li>
+          <li>Move the app into your <span class="code">Applications</span> folder.</li>
+          <li>Open it and allow any macOS prompts it needs.</li>
+          <li>Use the app to discover the receiver and start streaming.</li>
+        </ol>
+      </article>
+
+      <article class="card wide" id="setup">
+        <h2>Setup Checklist</h2>
+        <ol class="step-list">
+          <li>Connect both Macs to the same wired network path. Thunderbolt Bridge or a direct fast local network is the intended setup.</li>
+          <li>Launch <strong>DisplayReceiver</strong> first on the Mac that will act as the display.</li>
+          <li>Launch <strong>DisplaySender</strong> on the Mac that will stream.</li>
+          <li>In the sender app, pick the receiver from the discovered list.</li>
+          <li>Start with <strong>Connect &amp; Stream TCP</strong>. It is usually the most stable path for first setup.</li>
+          <li>Once the session starts, the receiver should open full screen automatically.</li>
+          <li>If needed, try <strong>UDP</strong> later for lower-latency video after the baseline TCP path is working.</li>
+        </ol>
+      </article>
+
+      <article class="card third">
+        <h3>What each app does</h3>
+        <ul class="plain-list">
+          <li><strong>DisplayReceiver</strong> listens on the network, receives frames, and shows the stream full screen.</li>
+          <li><strong>DisplaySender</strong> creates a virtual display, captures it, and streams video and audio.</li>
+          <li>The top-level <strong>WiredDisplay</strong> app is not the one you want to install.</li>
+        </ul>
+      </article>
+
+      <article class="card third">
+        <h3>Permissions you may see</h3>
+        <ul class="plain-list">
+          <li><strong>Screen Recording</strong> on the sender Mac so it can capture the virtual display.</li>
+          <li><strong>Local Network</strong> so the apps can discover and connect to each other.</li>
+          <li>macOS may also ask you to confirm opening an app downloaded from the internet the first time.</li>
+        </ul>
+      </article>
+
+      <article class="card third">
+        <h3>Updates</h3>
+        <ul class="plain-list">
+          <li>Both apps include Sparkle-based self-updates.</li>
+          <li>Use <strong>Check for Updates…</strong> inside each app if you want to verify you are on the latest version.</li>
+          <li>Sender and receiver are updated separately, so install updates on both Macs when available.</li>
+        </ul>
+      </article>
+
+      <article class="card half">
+        <h2>First Launch Tips</h2>
+        <p class="lede">
+          If macOS blocks the app the first time, move it to <span class="code">Applications</span>, then open it again.
+          If you still get a warning, right-click the app and choose <strong>Open</strong>.
+        </p>
+        <div class="note">
+          If the app does not show up immediately after you unzip it, make sure you launched the actual app bundle and not the ZIP file preview.
+        </div>
+      </article>
+
+      <article class="card half">
+        <h2>Troubleshooting</h2>
+        <ul class="plain-list">
+          <li>If the receiver does not appear in the sender list, make sure both Macs are on the same network and the receiver is already running.</li>
+          <li>If setup feels unstable, use TCP first and only switch to UDP after basic streaming is working.</li>
+          <li>If macOS permission prompts were denied earlier, re-enable them in System Settings and relaunch the app.</li>
+          <li>If an app icon in Finder or the Dock looks stale after updating, quit and relaunch the app.</li>
+        </ul>
+      </article>
+    </section>
+
+    <div class="footer">
+      WiredDisplay is currently built for macOS and intended for two-Mac wired display streaming.
+      Host this file as <span class="code">index.html</span> in the same folder as the downloadable ZIP files so the buttons work without edits.
+    </div>
+  </div>
+</body>
+</html>
