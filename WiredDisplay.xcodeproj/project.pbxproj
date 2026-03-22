@@ -33,6 +33,7 @@
 		DEE851332F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */; };
 		DEE851342F5D154700C44CD5 /* AudioFrameTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE851322F5D154700C44CD5 /* AudioFrameTypes.swift */; };
 		E0498A062D3AF3401AA00001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = E0498A052D3AF3401AA00001 /* Sparkle */; };
+		E0A9A0012F6A000100C44CD5 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = E0498A052D3AF3401AA00001 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -92,6 +93,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E0A9A0012F6A000100C44CD5 /* Sparkle in Frameworks */,
 				DEE850F92F5D0DCB00C44CD5 /* VideoToolbox.framework in Frameworks */,
 				DEE850FE2F5D0DE700C44CD5 /* MetalKit.framework in Frameworks */,
 				DEE850FC2F5D0DDE00C44CD5 /* Metal.framework in Frameworks */,
@@ -268,6 +270,7 @@
 			);
 			name = DisplayReceiver;
 			packageProductDependencies = (
+				E0498A052D3AF3401AA00001 /* Sparkle */,
 			);
 			productName = DisplayReceiver;
 			productReference = DEE850B12F5D0C4900C44CD5 /* DisplayReceiver.app */;
@@ -541,8 +544,11 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DisplayReceiver/Info.plist;
+				INFOPLIST_KEY_SUEnableInstallerLauncherService = YES;
+				INFOPLIST_KEY_SUFeedURL = "https://baileykiehl.com/WDisplay/DisplayReceiver-appcast.xml";
+				INFOPLIST_KEY_SUPublicEDKey = "XmDzxJKWYs500FMKMsBUoRkTXqGv/KjpJXbkflHHnbI=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -573,8 +579,11 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DisplayReceiver/Info.plist;
+				INFOPLIST_KEY_SUEnableInstallerLauncherService = YES;
+				INFOPLIST_KEY_SUFeedURL = "https://baileykiehl.com/WDisplay/DisplayReceiver-appcast.xml";
+				INFOPLIST_KEY_SUPublicEDKey = "XmDzxJKWYs500FMKMsBUoRkTXqGv/KjpJXbkflHHnbI=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -672,10 +681,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_SUFeedURL = "https://example.com/displaysender/appcast.xml";
-				INFOPLIST_KEY_SUPublicEDKey = "XmDzxJKWYs500FMKMsBUoRkTXqGv/KjpJXbkflHHnbI=";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DisplaySender/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -708,10 +715,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_SUFeedURL = "https://example.com/displaysender/appcast.xml";
-				INFOPLIST_KEY_SUPublicEDKey = "XmDzxJKWYs500FMKMsBUoRkTXqGv/KjpJXbkflHHnbI=";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DisplaySender/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -731,17 +736,6 @@
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		E0498A042D3AF3401AA00001 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/sparkle-project/Sparkle";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.7.1;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCConfigurationList section */
 		DEE850852F5D094C00C44CD5 /* Build configuration list for PBXProject "WiredDisplay" */ = {
@@ -781,6 +775,17 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E0498A042D3AF3401AA00001 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.7.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		E0498A052D3AF3401AA00001 /* Sparkle */ = {

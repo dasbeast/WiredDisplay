@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ReceiverMenuBarView: View {
     @ObservedObject var appController: ReceiverAppController
+    @ObservedObject var updater: DisplayReceiverUpdater
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -59,6 +60,10 @@ struct ReceiverMenuBarView: View {
                     appController.presentReceiverWindow(fullScreen: true)
                 }
             }
+
+            Divider()
+
+            DisplayReceiverCheckForUpdatesView(updater: updater.updater)
 
             Divider()
 
