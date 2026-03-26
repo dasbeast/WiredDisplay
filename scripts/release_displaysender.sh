@@ -83,6 +83,8 @@ xcodebuild \
   -configuration "$CONFIGURATION" \
   -destination 'platform=macOS' \
   -derivedDataPath "$DERIVED_DATA_PATH" \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
   build
 
 APP_PATH="$DERIVED_DATA_PATH/Build/Products/$CONFIGURATION/$SCHEME.app"
