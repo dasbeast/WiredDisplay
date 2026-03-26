@@ -107,7 +107,6 @@ require_file "$SIGN_UPDATE"
 
 SHORT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")"
 BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO_PLIST")"
-BUNDLE_IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")"
 RELEASE_DIR="$ROOT_DIR/release/DisplayReceiver-$SHORT_VERSION"
 ZIP_FILENAME="DisplayReceiver-$SHORT_VERSION.zip"
 ZIP_PATH="$RELEASE_DIR/$ZIP_FILENAME"
@@ -116,7 +115,6 @@ NOTARY_ZIP_PATH="/tmp/DisplayReceiver-$SHORT_VERSION-notarize.zip"
 LEGACY_NOTARY_ZIP_PATH="$RELEASE_DIR/DisplayReceiver-$SHORT_VERSION-notarize.zip"
 DOWNLOAD_PREFIX="${FEED_BASE_URL%/}/"
 RECEIVER_FEED_URL="${WDISPLAY_RECEIVER_SU_FEED_URL:-${DOWNLOAD_PREFIX}${APPCAST_FILENAME}}"
-EXPANDED_ENTITLEMENTS_PATH="$RELEASE_DIR/DisplayReceiver.entitlements"
 
 mkdir -p "$RELEASE_DIR"
 rm -f "$LEGACY_NOTARY_ZIP_PATH"
@@ -127,11 +125,6 @@ echo "Injecting Sparkle keys into receiver bundle..."
 /usr/libexec/PlistBuddy -c "Delete :SUEnableInstallerLauncherService" "$INFO_PLIST" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :SUFeedURL string $RECEIVER_FEED_URL" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_PUBLIC_ED_KEY" "$INFO_PLIST"
-/usr/libexec/PlistBuddy -c "Add :SUEnableInstallerLauncherService bool YES" "$INFO_PLIST"
-
-echo "Expanding receiver entitlements for $BUNDLE_IDENTIFIER..."
-perl -pe 's/\$\(PRODUCT_BUNDLE_IDENTIFIER\)/'"$BUNDLE_IDENTIFIER"'/g' \
-  "$ROOT_DIR/DisplayReceiver/DisplayReceiver.entitlements" > "$EXPANDED_ENTITLEMENTS_PATH"
 
 echo "Re-signing Sparkle helper components..."
 sign_with_identity "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
@@ -143,7 +136,7 @@ sign_with_identity "$APP_PATH/Contents/Frameworks/Sparkle.framework"
 echo "Re-signing DisplayReceiver.app..."
 sign_with_identity \
   "$APP_PATH" \
-  --entitlements "$EXPANDED_ENTITLEMENTS_PATH"
+  --entitlements "$ROOT_DIR/DisplayReceiver/DisplayReceiver.entitlements"
 
 echo "Creating notarization archive..."
 rm -f "$NOTARY_ZIP_PATH"
