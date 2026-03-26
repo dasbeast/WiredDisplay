@@ -12,5 +12,20 @@ mkdir -p "$CLANG_MODULE_CACHE_PATH" "$SWIFTPM_MODULECACHE_OVERRIDE"
 
 swift test --parallel
 
-xcodebuild -project WiredDisplay.xcodeproj -scheme DisplaySender -configuration Debug -destination 'platform=macOS' build
-xcodebuild -project WiredDisplay.xcodeproj -scheme DisplayReceiver -configuration Debug -destination 'platform=macOS' build
+xcodebuild \
+  -project WiredDisplay.xcodeproj \
+  -scheme DisplaySender \
+  -configuration Debug \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  build
+
+xcodebuild \
+  -project WiredDisplay.xcodeproj \
+  -scheme DisplayReceiver \
+  -configuration Debug \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  build
