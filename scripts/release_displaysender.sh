@@ -65,6 +65,18 @@ require_file() {
   fi
 }
 
+sign_with_identity() {
+  local target_path="$1"
+  shift
+
+  codesign \
+    --force \
+    --sign "$CODE_SIGN_IDENTITY" \
+    --options runtime \
+    "$@" \
+    "$target_path"
+}
+
 require_command xcodebuild
 require_command ditto
 require_command plutil
@@ -110,14 +122,17 @@ DOWNLOAD_PREFIX="${FEED_BASE_URL%/}/"
 mkdir -p "$RELEASE_DIR"
 rm -f "$LEGACY_NOTARY_ZIP_PATH"
 
+echo "Re-signing Sparkle helper components..."
+sign_with_identity "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
+sign_with_identity "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
+sign_with_identity "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
+sign_with_identity "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app"
+sign_with_identity "$APP_PATH/Contents/Frameworks/Sparkle.framework"
+
 echo "Re-signing DisplaySender.app with Developer ID..."
-codesign \
-  --force \
-  --deep \
-  --sign "$CODE_SIGN_IDENTITY" \
-  --options runtime \
-  --entitlements "$ROOT_DIR/DisplaySender/DisplaySender.entitlements" \
-  "$APP_PATH"
+sign_with_identity \
+  "$APP_PATH" \
+  --entitlements "$ROOT_DIR/DisplaySender/DisplaySender.entitlements"
 
 echo "Creating notarization archive..."
 rm -f "$NOTARY_ZIP_PATH"
