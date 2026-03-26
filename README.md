@@ -45,22 +45,6 @@ The top-level `WiredDisplay` target is currently just a placeholder shell. The a
   - Control traffic remains on `TCP`.
   - Audio still remains on `TCP`.
 
-## Display Modes
-
-The sender now reads back the virtual display's actual available and active modes and exposes them in the sender UI.
-
-Important detail:
-
-- The requested receiver metrics are only the starting point.
-- macOS can still select or restore a different active mode for the synthetic display.
-- Different sender Macs can land on different active modes even with the same receiver.
-
-That is why the sender UI shows:
-
-- the negotiated receiver display
-- the active virtual display mode
-- a mode picker so you can choose the sharpness/performance tradeoff per sender Mac
-
 ## Repository Layout
 
 - `DisplaySender/App`
@@ -90,6 +74,24 @@ xcodebuild -project WiredDisplay.xcodeproj -scheme DisplaySender build
 xcodebuild -project WiredDisplay.xcodeproj -scheme DisplayReceiver build
 ```
 
+## Tests And CI
+
+The shared protocol layer now has a lightweight SwiftPM package and unit test suite. Run the full local validation pass with:
+
+```sh
+./scripts/ci.sh
+```
+
+That script runs:
+
+- `swift test --parallel`
+- `xcodebuild` for `DisplaySender`
+- `xcodebuild` for `DisplayReceiver`
+
+GitHub Actions mirrors the same checks in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+For tagged release automation and the required GitHub secrets, see [`docs/ci-cd.md`](docs/ci-cd.md).
+
 ## Typical Run Flow
 
 1. Launch `DisplayReceiver`.
@@ -97,14 +99,13 @@ xcodebuild -project WiredDisplay.xcodeproj -scheme DisplayReceiver build
 3. Launch `DisplaySender`.
 4. Pick the receiver from the discovered list.
 5. Choose `Connect & Stream TCP` or `Connect & Stream UDP`.
-6. After the session starts, inspect the active display mode in the sender UI.
-7. If needed, switch display mode to balance sharpness, FPS, and latency.
+6. Choose the preset and pipeline that fit the sender Mac and network path.
+7. After the session starts, watch the sender stats for FPS and latency.
 
 ## Known Constraints
 
 - The project uses private `CGVirtualDisplay` APIs.
-- Actual active display mode can differ from the requested mode.
-- Display behavior can vary between sender Macs because macOS may restore different saved modes for the same synthetic display identity.
+- Effective latency and sharpness still vary by sender Mac, selected preset, and chosen network path.
 - `UDP` video is available, but `TCP` is still the reference path for stability.
 - Audio playback is app-level audio forwarding. It does not create a new macOS system output device in Sound settings.
 

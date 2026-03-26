@@ -141,7 +141,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         let pipelineDescription: String
         if streamingPipelineMode == .adaptiveUpscale {
             // Bound capture resolution for stable real-time encoding at target FPS.
-            let pixelBudget = max(1, NetworkProtocol.maxCapturePixelsAtTargetFPS)
+            // Adaptive Upscale should remain the lower-latency path regardless of chip tier.
+            let pixelBudget = max(1, NetworkProtocol.adaptiveUpscaleCapturePixelBudget)
             if totalPixels > pixelBudget {
                 let downscale = sqrt(Double(pixelBudget) / Double(totalPixels))
                 captureWidthPixels = max(1, Int(Double(captureWidthPixels) * downscale))

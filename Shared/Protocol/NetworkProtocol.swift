@@ -122,17 +122,10 @@ enum NetworkProtocol {
     }
 
     // HEVC pixel budget used by the adaptive-upscale path.
-    // Pro / Max / Ultra chips have a dedicated media engine that handles 5K at 60fps.
-    // Base M-series chips share the media engine with other workloads; cap at 4K to
-    // prevent hardware encoder starvation and frame-drop cascades.
-    static var maxCapturePixelsAtTargetFPS: Int {
-        switch detectedVideoHardwareTier {
-        case .highPerformanceRetina:
-            return 14_745_600  // 5K budget: 5120×2880
-        case .balancedRetina:
-            return 8_847_360   // 4K budget: 3840×2304 for base M1/M2/M3/M4
-        }
-    }
+    // Keep this mode meaningfully lighter than native/direct on every chip tier so the
+    // "upscale" option consistently trades sharpness for lower encode latency instead of
+    // silently capturing full-resolution 5K on Pro / Max / Ultra machines.
+    static let adaptiveUpscaleCapturePixelBudget: Int = 8_847_360  // 3840×2304-class budget
 
     /// Reads the processor brand string via sysctl (e.g. "Apple M3 Max").
     private static func chipBrandString() -> String {
@@ -159,6 +152,25 @@ enum NetworkProtocol {
         let pixelsPerSecond = Double(safeWidth * safeHeight * safeFPS)
         let target = Int(pixelsPerSecond * 0.20) // bits-per-pixel-per-frame heuristic
         return min(max(target, minVideoBitrateBps), maxVideoBitrateBps)
+    }
+
+    static func negotiatedVideoTransport(
+        requested: VideoTransportMode,
+        canAcceptDatagrams: Bool
+    ) -> VideoTransportMode {
+        if requested == .udp && canAcceptDatagrams {
+            return .udp
+        }
+        return .tcp
+    }
+
+    static func keyFrameIntervalFrames(for videoTransportMode: VideoTransportMode) -> Int {
+        switch videoTransportMode {
+        case .tcp:
+            return targetFramesPerSecond * keyFrameIntervalSeconds
+        case .udp:
+            return udpKeyFrameIntervalFrames
+        }
     }
 
     // MARK: - Binary Wire Format for Video Frames
@@ -313,6 +325,118 @@ struct HeartbeatPayload: Codable, Sendable {
     let renderedFrameSenderTimestampNanoseconds: UInt64?
     /// Receiver-local render timestamp for the most recently rendered frame.
     let renderedFrameReceiverTimestampNanoseconds: UInt64?
+}
+
+struct SenderHeartbeatEvaluation: Equatable, Sendable {
+    let roundTripMilliseconds: Double
+    let receiverClockOffsetNanoseconds: Int64
+    let displayLatencyMilliseconds: Double?
+    let shouldClearAwaitingFirstRenderedFrame: Bool
+    let shouldRequestRecoveryKeyFrame: Bool
+}
+
+struct ReceiverFrameTimingSnapshot: Equatable, Sendable {
+    let averageFrameIntervalMilliseconds: Double?
+    let estimatedJitterMilliseconds: Double?
+}
+
+extension NetworkProtocol {
+    static func evaluateSenderHeartbeat(
+        _ heartbeat: HeartbeatPayload,
+        localReceiveTimestampNanoseconds: UInt64,
+        negotiatedVideoTransportMode: VideoTransportMode,
+        awaitingFirstRenderedFrame: Bool
+    ) -> SenderHeartbeatEvaluation? {
+        guard let originTimestampNanoseconds = heartbeat.originTimestampNanoseconds,
+              let receiveTimestampNanoseconds = heartbeat.receiveTimestampNanoseconds else {
+            return nil
+        }
+
+        let receiverProcessingNanoseconds = max(
+            0,
+            Int64(heartbeat.transmitTimestampNanoseconds) - Int64(receiveTimestampNanoseconds)
+        )
+        let localElapsedNanoseconds = max(
+            0,
+            Int64(localReceiveTimestampNanoseconds) - Int64(originTimestampNanoseconds)
+        )
+        let roundTripNanoseconds = max(0, localElapsedNanoseconds - receiverProcessingNanoseconds)
+
+        let receiverClockOffsetNanoseconds =
+            ((Int64(receiveTimestampNanoseconds) - Int64(originTimestampNanoseconds))
+             + (Int64(heartbeat.transmitTimestampNanoseconds) - Int64(localReceiveTimestampNanoseconds))) / 2
+
+        let shouldClearAwaitingFirstRenderedFrame =
+            negotiatedVideoTransportMode == .udp && heartbeat.renderedFrameIndex != nil
+        let shouldRequestRecoveryKeyFrame =
+            negotiatedVideoTransportMode == .udp &&
+            awaitingFirstRenderedFrame &&
+            heartbeat.renderedFrameIndex == nil
+
+        let displayLatencyMilliseconds: Double?
+        if let renderedFrameSenderTimestampNanoseconds = heartbeat.renderedFrameSenderTimestampNanoseconds,
+           let renderedFrameReceiverTimestampNanoseconds = heartbeat.renderedFrameReceiverTimestampNanoseconds {
+            let senderTimestampOnReceiverClock =
+                Int64(renderedFrameSenderTimestampNanoseconds) + receiverClockOffsetNanoseconds
+            let displayLatencyNanoseconds =
+                Int64(renderedFrameReceiverTimestampNanoseconds) - senderTimestampOnReceiverClock
+            if displayLatencyNanoseconds >= 0 {
+                displayLatencyMilliseconds = Double(displayLatencyNanoseconds) / 1_000_000.0
+            } else {
+                displayLatencyMilliseconds = nil
+            }
+        } else {
+            displayLatencyMilliseconds = nil
+        }
+
+        return SenderHeartbeatEvaluation(
+            roundTripMilliseconds: Double(roundTripNanoseconds) / 1_000_000.0,
+            receiverClockOffsetNanoseconds: receiverClockOffsetNanoseconds,
+            displayLatencyMilliseconds: displayLatencyMilliseconds,
+            shouldClearAwaitingFirstRenderedFrame: shouldClearAwaitingFirstRenderedFrame,
+            shouldRequestRecoveryKeyFrame: shouldRequestRecoveryKeyFrame
+        )
+    }
+
+    static func nextReceiverFrameTimingSnapshot(
+        previousArrivalNanoseconds: UInt64?,
+        previousSmoothedIntervalMilliseconds: Double?,
+        previousSmoothedJitterMilliseconds: Double?,
+        arrivalNanoseconds: UInt64
+    ) -> ReceiverFrameTimingSnapshot {
+        guard let previousArrivalNanoseconds,
+              arrivalNanoseconds >= previousArrivalNanoseconds else {
+            return ReceiverFrameTimingSnapshot(
+                averageFrameIntervalMilliseconds: previousSmoothedIntervalMilliseconds,
+                estimatedJitterMilliseconds: previousSmoothedJitterMilliseconds
+            )
+        }
+
+        let intervalMilliseconds = Double(arrivalNanoseconds - previousArrivalNanoseconds) / 1_000_000.0
+        let alpha = 0.12
+
+        let smoothedIntervalMilliseconds: Double
+        if let previousSmoothedIntervalMilliseconds {
+            smoothedIntervalMilliseconds =
+                (alpha * intervalMilliseconds) + ((1.0 - alpha) * previousSmoothedIntervalMilliseconds)
+        } else {
+            smoothedIntervalMilliseconds = intervalMilliseconds
+        }
+
+        let absoluteDeviation = abs(intervalMilliseconds - smoothedIntervalMilliseconds)
+        let smoothedJitterMilliseconds: Double
+        if let previousSmoothedJitterMilliseconds {
+            smoothedJitterMilliseconds =
+                (alpha * absoluteDeviation) + ((1.0 - alpha) * previousSmoothedJitterMilliseconds)
+        } else {
+            smoothedJitterMilliseconds = absoluteDeviation
+        }
+
+        return ReceiverFrameTimingSnapshot(
+            averageFrameIntervalMilliseconds: smoothedIntervalMilliseconds,
+            estimatedJitterMilliseconds: smoothedJitterMilliseconds
+        )
+    }
 }
 
 /// Receiver -> sender recovery request when compressed decode loses reference state.

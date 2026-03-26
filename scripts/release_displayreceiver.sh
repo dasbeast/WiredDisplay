@@ -13,6 +13,7 @@ REMOTE_DIR="${WDISPLAY_RECEIVER_REMOTE_DIR:-public_html/WDisplay}"
 APPCAST_FILENAME="${WDISPLAY_RECEIVER_APPCAST_FILENAME:-DisplayReceiver-appcast.xml}"
 CODE_SIGN_IDENTITY="${WDISPLAY_RECEIVER_CODE_SIGN_IDENTITY:-Developer ID Application: Bailey Kiehl (4V28UB843Z)}"
 NOTARY_PROFILE="${WDISPLAY_NOTARY_PROFILE:-wdisplay-notary}"
+SPARKLE_PUBLIC_ED_KEY="${WDISPLAY_SPARKLE_PUBLIC_ED_KEY:-XmDzxJKWYs500FMKMsBUoRkTXqGv/KjpJXbkflHHnbI=}"
 SKIP_UPLOAD="${WDISPLAY_SKIP_UPLOAD:-0}"
 
 usage() {
@@ -99,6 +100,7 @@ APPCAST_PATH="$RELEASE_DIR/$APPCAST_FILENAME"
 NOTARY_ZIP_PATH="/tmp/DisplayReceiver-$SHORT_VERSION-notarize.zip"
 LEGACY_NOTARY_ZIP_PATH="$RELEASE_DIR/DisplayReceiver-$SHORT_VERSION-notarize.zip"
 DOWNLOAD_PREFIX="${FEED_BASE_URL%/}/"
+RECEIVER_FEED_URL="${WDISPLAY_RECEIVER_SU_FEED_URL:-${DOWNLOAD_PREFIX}${APPCAST_FILENAME}}"
 
 mkdir -p "$RELEASE_DIR"
 rm -f "$LEGACY_NOTARY_ZIP_PATH"
@@ -107,8 +109,8 @@ echo "Injecting Sparkle keys into receiver bundle..."
 /usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$INFO_PLIST" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$INFO_PLIST" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Delete :SUEnableInstallerLauncherService" "$INFO_PLIST" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add :SUFeedURL string https://baileykiehl.com/WDisplay/DisplayReceiver-appcast.xml" "$INFO_PLIST"
-/usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string XmDzxJKWYs500FMKMsBUoRkTXqGv/KjpJXbkflHHnbI=" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Add :SUFeedURL string $RECEIVER_FEED_URL" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_PUBLIC_ED_KEY" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Add :SUEnableInstallerLauncherService bool YES" "$INFO_PLIST"
 
 echo "Re-signing DisplayReceiver.app..."

@@ -243,12 +243,10 @@ final class ReceiverSessionCoordinator {
                 peerName = hello.senderName
                 if hello.requestedProtocolVersion == NetworkProtocol.protocolVersion {
                     let requestedTransport = hello.preferredVideoTransport ?? .tcp
-                    let negotiatedTransport: NetworkProtocol.VideoTransportMode
-                    if requestedTransport == .udp && videoDatagramListenerService.canAcceptDatagrams {
-                        negotiatedTransport = .udp
-                    } else {
-                        negotiatedTransport = .tcp
-                    }
+                    let negotiatedTransport = NetworkProtocol.negotiatedVideoTransport(
+                        requested: requestedTransport,
+                        canAcceptDatagrams: videoDatagramListenerService.canAcceptDatagrams
+                    )
                     listenerService.sendHelloAck(
                         accepted: true,
                         reason: nil,
@@ -316,30 +314,18 @@ final class ReceiverSessionCoordinator {
         _ = metadata
         latestFrameLatencyMilliseconds = nil
 
-        if let previousArrival = lastFrameArrivalNanoseconds, arrivalNanoseconds >= previousArrival {
-            let intervalMs = Double(arrivalNanoseconds - previousArrival) / 1_000_000.0
-            let alpha = 0.12
-
-            if let current = smoothedIntervalMilliseconds {
-                let next = (alpha * intervalMs) + ((1.0 - alpha) * current)
-                smoothedIntervalMilliseconds = next
-            } else {
-                smoothedIntervalMilliseconds = intervalMs
-            }
-
-            if let smoothed = smoothedIntervalMilliseconds {
-                let absoluteDeviation = abs(intervalMs - smoothed)
-                if let currentJitter = smoothedJitterMilliseconds {
-                    smoothedJitterMilliseconds = (alpha * absoluteDeviation) + ((1.0 - alpha) * currentJitter)
-                } else {
-                    smoothedJitterMilliseconds = absoluteDeviation
-                }
-            }
-        }
+        let timingSnapshot = NetworkProtocol.nextReceiverFrameTimingSnapshot(
+            previousArrivalNanoseconds: lastFrameArrivalNanoseconds,
+            previousSmoothedIntervalMilliseconds: smoothedIntervalMilliseconds,
+            previousSmoothedJitterMilliseconds: smoothedJitterMilliseconds,
+            arrivalNanoseconds: arrivalNanoseconds
+        )
 
         lastFrameArrivalNanoseconds = arrivalNanoseconds
-        averageFrameIntervalMilliseconds = smoothedIntervalMilliseconds
-        estimatedJitterMilliseconds = smoothedJitterMilliseconds
+        smoothedIntervalMilliseconds = timingSnapshot.averageFrameIntervalMilliseconds
+        smoothedJitterMilliseconds = timingSnapshot.estimatedJitterMilliseconds
+        averageFrameIntervalMilliseconds = timingSnapshot.averageFrameIntervalMilliseconds
+        estimatedJitterMilliseconds = timingSnapshot.estimatedJitterMilliseconds
     }
 
     private func updateInboundMetrics(payloadByteCount: Int, atNanoseconds now: UInt64) {

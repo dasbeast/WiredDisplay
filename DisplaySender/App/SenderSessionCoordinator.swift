@@ -304,7 +304,7 @@ final class SenderSessionCoordinator {
         requestedVideoTransportMode = videoTransportMode
         negotiatedVideoTransportMode = videoTransportMode
         frameDispatchGate.setNegotiatedMode(videoTransportMode)
-        encoderService.setPreferredKeyFrameIntervalFrames(keyFrameIntervalFrames(for: videoTransportMode))
+        encoderService.setPreferredKeyFrameIntervalFrames(NetworkProtocol.keyFrameIntervalFrames(for: videoTransportMode))
         sentFrameCount = 0
         droppedOutboundFrameCount = 0
         lastErrorMessage = nil
@@ -768,7 +768,7 @@ final class SenderSessionCoordinator {
     private func applyNegotiatedVideoTransport(_ videoTransportMode: NetworkProtocol.VideoTransportMode) {
         negotiatedVideoTransportMode = videoTransportMode
         frameDispatchGate.setNegotiatedMode(videoTransportMode)
-        encoderService.setPreferredKeyFrameIntervalFrames(keyFrameIntervalFrames(for: videoTransportMode))
+        encoderService.setPreferredKeyFrameIntervalFrames(NetworkProtocol.keyFrameIntervalFrames(for: videoTransportMode))
         if videoTransportMode == .udp {
             if let desiredHost {
                 videoDatagramTransportService.connect(host: desiredHost, port: desiredPort)
@@ -811,69 +811,43 @@ final class SenderSessionCoordinator {
         encoderService.requestKeyFrame()
     }
 
-    private func keyFrameIntervalFrames(for videoTransportMode: NetworkProtocol.VideoTransportMode) -> Int {
-        switch videoTransportMode {
-        case .tcp:
-            return NetworkProtocol.targetFramesPerSecond * NetworkProtocol.keyFrameIntervalSeconds
-        case .udp:
-            return NetworkProtocol.udpKeyFrameIntervalFrames
-        }
-    }
-
     private func updateLatencyMetrics(
         from heartbeat: HeartbeatPayload,
         localReceiveTimestampNanoseconds: UInt64
     ) {
-        guard let originTimestampNanoseconds = heartbeat.originTimestampNanoseconds,
-              let receiveTimestampNanoseconds = heartbeat.receiveTimestampNanoseconds else {
+        guard let evaluation = NetworkProtocol.evaluateSenderHeartbeat(
+            heartbeat,
+            localReceiveTimestampNanoseconds: localReceiveTimestampNanoseconds,
+            negotiatedVideoTransportMode: negotiatedVideoTransportMode,
+            awaitingFirstRenderedFrame: awaitingFirstRenderedFrame
+        ) else {
             return
         }
 
-        let receiverProcessingNanoseconds = max(
-            0,
-            Int64(heartbeat.transmitTimestampNanoseconds) - Int64(receiveTimestampNanoseconds)
-        )
-        let localElapsedNanoseconds = max(
-            0,
-            Int64(localReceiveTimestampNanoseconds) - Int64(originTimestampNanoseconds)
-        )
-        let roundTripNanoseconds = max(0, localElapsedNanoseconds - receiverProcessingNanoseconds)
         heartbeatRoundTripMilliseconds = smoothMetric(
             current: heartbeatRoundTripMilliseconds,
-            sample: Double(roundTripNanoseconds) / 1_000_000.0,
+            sample: evaluation.roundTripMilliseconds,
             alpha: 0.20
         )
 
-        let receiverClockOffsetNanoseconds =
-            ((Int64(receiveTimestampNanoseconds) - Int64(originTimestampNanoseconds))
-             + (Int64(heartbeat.transmitTimestampNanoseconds) - Int64(localReceiveTimestampNanoseconds))) / 2
-        estimatedReceiverClockOffsetNanoseconds = receiverClockOffsetNanoseconds
+        estimatedReceiverClockOffsetNanoseconds = evaluation.receiverClockOffsetNanoseconds
 
-        if negotiatedVideoTransportMode == .udp {
-            if heartbeat.renderedFrameIndex != nil {
-                awaitingFirstRenderedFrame = false
-                frameDispatchGate.setAwaitingFirstRenderedFrame(false)
-            } else if awaitingFirstRenderedFrame {
-                requestRecoveryKeyFrameIfNeeded(
-                    minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
-                )
-            }
+        if evaluation.shouldClearAwaitingFirstRenderedFrame {
+            awaitingFirstRenderedFrame = false
+            frameDispatchGate.setAwaitingFirstRenderedFrame(false)
+        } else if evaluation.shouldRequestRecoveryKeyFrame {
+            requestRecoveryKeyFrameIfNeeded(
+                minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
+            )
         }
 
-        guard let renderedFrameSenderTimestampNanoseconds = heartbeat.renderedFrameSenderTimestampNanoseconds,
-              let renderedFrameReceiverTimestampNanoseconds = heartbeat.renderedFrameReceiverTimestampNanoseconds else {
+        guard let displayLatencyMilliseconds = evaluation.displayLatencyMilliseconds else {
             return
         }
 
-        let senderTimestampOnReceiverClock =
-            Int64(renderedFrameSenderTimestampNanoseconds) + receiverClockOffsetNanoseconds
-        let displayLatencyNanoseconds =
-            Int64(renderedFrameReceiverTimestampNanoseconds) - senderTimestampOnReceiverClock
-        guard displayLatencyNanoseconds >= 0 else { return }
-
         estimatedDisplayLatencyMilliseconds = smoothMetric(
             current: estimatedDisplayLatencyMilliseconds,
-            sample: Double(displayLatencyNanoseconds) / 1_000_000.0,
+            sample: displayLatencyMilliseconds,
             alpha: 0.15
         )
     }

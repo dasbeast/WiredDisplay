@@ -22,6 +22,7 @@ struct SenderRootView: View {
     @State private var receiverHostInput = UserDefaults.standard.string(forKey: SenderRootView.savedHostKey) ?? ""
     @State private var portInput = UserDefaults.standard.string(forKey: SenderRootView.savedPortKey) ?? String(NetworkProtocol.defaultPort)
     @State private var selectedReceiverID: String?
+    @State private var selectedReceiverPathIDs: [String: String] = [:]
     @State private var selectedDisplayResolutionPreference =
         SenderSessionCoordinator.DisplayResolutionPreference(
             rawValue: UserDefaults.standard.string(forKey: SenderRootView.savedDisplayResolutionPreferenceKey) ?? ""
@@ -52,11 +53,6 @@ struct SenderRootView: View {
             rawValue: UserDefaults.standard.string(forKey: SenderRootView.savedStreamingPipelinePreferenceKey) ?? ""
         ) ?? .automatic
 
-    // Display mode state
-    @State private var availableDisplayModes: [VirtualDisplayMode] = []
-    @State private var activeDisplayModeText = "-"
-    @State private var selectedModeID: String? = nil
-	
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -65,9 +61,6 @@ struct SenderRootView: View {
                 displayResolutionSection
                 streamingPipelineSection
                 actionSection
-                if !availableDisplayModes.isEmpty {
-                    displayModeSection
-                }
                 statusSection
                 nerdStatsSection
             }
@@ -141,10 +134,15 @@ struct SenderRootView: View {
                     ForEach(discoveryService.receivers) { receiver in
                         ReceiverOptionRow(
                             receiver: receiver,
-                            isSelected: selectedReceiverID == receiver.id
-                        ) {
-                            selectedReceiverID = receiver.id
-                        }
+                            selectedPathID: selectedPathID(for: receiver),
+                            isSelected: selectedReceiverID == receiver.id,
+                            onSelectPath: { pathID in
+                                selectedReceiverPathIDs[receiver.id] = pathID
+                            },
+                            onSelect: {
+                                selectedReceiverID = receiver.id
+                            }
+                        )
                     }
                 }
             }
@@ -219,45 +217,10 @@ struct SenderRootView: View {
         }
     }
 
-    private var displayModeSection: some View {
-        GroupBox("Display Mode") {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Active:")
-                        .foregroundStyle(.secondary)
-                    Text(activeDisplayModeText)
-                        .font(.system(.body, design: .monospaced))
-                }
-
-                if availableDisplayModes.count > 1 {
-                    Divider()
-
-                    Text("Switch mode live — capture restarts automatically.")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
-
-                    Picker("Mode", selection: $selectedModeID) {
-                        ForEach(availableDisplayModes) { mode in
-                            Text(mode.label).tag(Optional(mode.id))
-                        }
-                    }
-                    .pickerStyle(.radioGroup)
-                    .onChange(of: selectedModeID) { _, newID in
-                        guard let newID,
-                              let mode = availableDisplayModes.first(where: { $0.id == newID }),
-                              newID != coordinator.activeDisplayMode?.id
-                        else { return }
-                        coordinator.changeDisplayMode(mode)
-                    }
-                }
-            }
-        }
-    }
-
     private var streamingPipelineSection: some View {
         GroupBox("Streaming Pipeline") {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Automatic uses direct/native capture on stronger Apple Silicon and adaptive low-res capture plus upscale on base-tier machines.")
+                Text("Automatic uses direct/native capture on stronger Apple Silicon. Adaptive Upscale always captures below native resolution and lets the receiver scale back up for lower latency.")
                     .foregroundStyle(.secondary)
                     .font(.callout)
 
@@ -412,7 +375,8 @@ struct SenderRootView: View {
 
     private func resolvedConnectionTarget() -> (host: String, port: UInt16)? {
         if let selectedReceiver = selectedReceiver() {
-            return (host: selectedReceiver.host, port: selectedReceiver.port)
+            let selectedPathHost = selectedPath(for: selectedReceiver)?.host ?? selectedReceiver.host
+            return (host: selectedPathHost, port: selectedReceiver.port)
         }
 
         let manualHost = receiverHostInput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -426,7 +390,19 @@ struct SenderRootView: View {
     private func reconcileDiscoveredReceivers(_ receivers: [DiscoveredReceiver]) {
         guard !receivers.isEmpty else {
             selectedReceiverID = nil
+            selectedReceiverPathIDs.removeAll()
             return
+        }
+
+        let validReceiverIDs = Set(receivers.map(\.id))
+        selectedReceiverPathIDs = selectedReceiverPathIDs.filter { validReceiverIDs.contains($0.key) }
+
+        for receiver in receivers {
+            guard let defaultPath = receiver.pathOptions.first else { continue }
+            if selectedReceiverPathIDs[receiver.id] == nil ||
+                !receiver.pathOptions.contains(where: { $0.id == selectedReceiverPathIDs[receiver.id] }) {
+                selectedReceiverPathIDs[receiver.id] = defaultPath.id
+            }
         }
 
         if let selectedReceiverID,
@@ -444,6 +420,15 @@ struct SenderRootView: View {
         }
 
         selectedReceiverID = receivers.first?.id
+    }
+
+    private func selectedPathID(for receiver: DiscoveredReceiver) -> String {
+        selectedReceiverPathIDs[receiver.id] ?? receiver.pathOptions.first?.id ?? receiver.host
+    }
+
+    private func selectedPath(for receiver: DiscoveredReceiver) -> DiscoveryPathOption? {
+        let currentPathID = selectedPathID(for: receiver)
+        return receiver.pathOptions.first(where: { $0.id == currentPathID }) ?? receiver.pathOptions.first
     }
 
     private func refreshFromCoordinator() {
@@ -475,17 +460,6 @@ struct SenderRootView: View {
         wiredWarning = coordinator.wiredPathAvailable ? "" : "No wired route currently available. Verify Thunderbolt Bridge and cable link."
         interfaceLines = coordinator.localInterfaceDescriptions
 
-        availableDisplayModes = coordinator.availableDisplayModes
-        if let active = coordinator.activeDisplayMode {
-            activeDisplayModeText = active.shortDescription
-            // Keep the picker in sync with the active mode without triggering onChange.
-            if selectedModeID != active.id {
-                selectedModeID = active.id
-            }
-        } else if coordinator.availableDisplayModes.isEmpty {
-            activeDisplayModeText = "-"
-            selectedModeID = nil
-        }
     }
 
     private func statusText(for state: SenderSessionCoordinator.SessionState) -> String {
@@ -557,30 +531,35 @@ struct SenderRootView: View {
 
 private struct ReceiverOptionRow: View {
     let receiver: DiscoveredReceiver
+    let selectedPathID: String
     let isSelected: Bool
+    let onSelectPath: (String) -> Void
     let onSelect: () -> Void
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(alignment: .top, spacing: 12) {
-                ReceiverThumbnailView(kind: receiver.visualKind)
-                    .frame(width: 132, height: 88)
+        HStack(alignment: .top, spacing: 12) {
+            ReceiverThumbnailView(kind: receiver.visualKind)
+                .frame(width: 132, height: 88)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(receiver.displayName)
-                        .font(.headline)
-                    if let displayDescriptor = receiver.displayDescriptor {
-                        Text(displayDescriptor)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(receiver.endpointSummary)
-                        .font(.system(.caption, design: .monospaced))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(receiver.displayName)
+                    .font(.headline)
+                if let displayDescriptor = receiver.displayDescriptor {
+                    Text(displayDescriptor)
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
                 }
+                Text(receiver.endpointSummary)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Text(pathSummaryText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
-                Spacer(minLength: 8)
+            Spacer(minLength: 8)
 
+            VStack(alignment: .trailing, spacing: 6) {
                 if receiver.prefersWiredPath {
                     Text("Wired")
                         .font(.caption.weight(.semibold))
@@ -590,22 +569,64 @@ private struct ReceiverOptionRow: View {
                         .foregroundStyle(.green)
                 }
 
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.6))
+                if receiver.pathOptions.count > 1 {
+                    Menu {
+                        ForEach(receiver.pathOptions, id: \.id) { option in
+                            Button {
+                                onSelectPath(option.id)
+                            } label: {
+                                if option.id == selectedPathID {
+                                    Label(option.kind.discoveryLabel, systemImage: "checkmark")
+                                } else {
+                                    Text(option.kind.discoveryLabel)
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(selectedPathLabel, systemImage: "arrow.triangle.branch")
+                            .font(.caption.weight(.medium))
+                    }
+                    .menuStyle(.borderlessButton)
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
-            .background(backgroundStyle)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
-            )
+
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.6))
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(backgroundStyle)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(isSelected ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture(perform: onSelect)
     }
 
     private var backgroundStyle: some ShapeStyle {
         isSelected ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08)
+    }
+
+    private var selectedPath: DiscoveryPathOption? {
+        receiver.pathOptions.first(where: { $0.id == selectedPathID }) ?? receiver.pathOptions.first
+    }
+
+    private var selectedPathLabel: String {
+        selectedPath?.kind.discoveryLabel ?? "Path"
+    }
+
+    private var pathSummaryText: String {
+        guard let defaultPath = receiver.pathOptions.first else {
+            return "Default: Unknown"
+        }
+
+        let alternateLabels = receiver.pathOptions.dropFirst().map(\.kind.discoveryLabel)
+        if alternateLabels.isEmpty {
+            return "Default: \(defaultPath.kind.discoveryLabel)"
+        }
+
+        return "Default: \(defaultPath.kind.discoveryLabel)  Also available: \(alternateLabels.joined(separator: ", "))"
     }
 }
 

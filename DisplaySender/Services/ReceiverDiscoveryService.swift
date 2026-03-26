@@ -21,6 +21,7 @@ struct DiscoveredReceiver: Identifiable, Equatable {
     let endpointSummary: String
     let prefersWiredPath: Bool
     let visualKind: DiscoveredReceiverVisualKind
+    let pathOptions: [DiscoveryPathOption]
 }
 
 @MainActor
@@ -38,6 +39,7 @@ final class ReceiverDiscoveryService: NSObject, ObservableObject {
         static let displayName = "displayName"
         static let preferredHost = "preferredHost"
         static let preferredHostIsWired = "preferredHostIsWired"
+        static let pathOptions = "pathOptions"
     }
 
     override init() {
@@ -110,56 +112,60 @@ final class ReceiverDiscoveryService: NSObject, ObservableObject {
             port: UInt16(service.port),
             endpointSummary: "\(host):\(service.port)",
             prefersWiredPath: resolvedHost.prefersWiredPath,
-            visualKind: visualKind
+            visualKind: visualKind,
+            pathOptions: pathOptions(for: service, textRecord: textRecord, preferredHost: host)
         )
+    }
+
+    private func pathOptions(
+        for service: NetService,
+        textRecord: [String: Data]?,
+        preferredHost: String
+    ) -> [DiscoveryPathOption] {
+        if let serialized = txtString(for: TXTRecordKey.pathOptions, in: textRecord) {
+            let advertisedOptions = NetworkDiagnostics.parseDiscoveryPathOptions(serialized)
+            if !advertisedOptions.isEmpty {
+                return NetworkDiagnostics.orderedUniqueDiscoveryPathOptions(
+                    advertisedOptions,
+                    preferredHost: preferredHost
+                )
+            }
+        }
+
+        let fallbackOptions = (service.addresses ?? []).compactMap { address -> DiscoveryPathOption? in
+            guard let host = numericHost(from: address) else { return nil }
+            let kind: LocalInterfaceKind
+            if host.hasPrefix("169.254.") {
+                kind = .thunderboltBridge
+            } else {
+                kind = .other
+            }
+            return DiscoveryPathOption(host: host, kind: kind)
+        }
+
+        if !fallbackOptions.isEmpty {
+            return NetworkDiagnostics.orderedUniqueDiscoveryPathOptions(
+                fallbackOptions,
+                preferredHost: preferredHost
+            )
+        }
+
+        return [DiscoveryPathOption(host: preferredHost, kind: .other)]
     }
 
     private func preferredHost(
         for service: NetService,
         textRecord: [String: Data]?
     ) -> (host: String, prefersWiredPath: Bool)? {
-        if let advertisedHost = txtString(for: TXTRecordKey.preferredHost, in: textRecord),
-           !advertisedHost.isEmpty {
-            let prefersWiredPath = txtString(for: TXTRecordKey.preferredHostIsWired, in: textRecord) == "1" ||
-                NetworkDiagnostics.looksLikeWiredPreferredHost(advertisedHost)
-            return (host: advertisedHost, prefersWiredPath: prefersWiredPath)
-        }
+        let resolvedHosts = (service.addresses ?? []).compactMap(numericHost(from:))
+        let resolvedHost = NetworkDiagnostics.resolvePreferredDiscoveryHost(
+            advertisedHost: txtString(for: TXTRecordKey.preferredHost, in: textRecord),
+            advertisedHostIsWired: txtString(for: TXTRecordKey.preferredHostIsWired, in: textRecord) == "1",
+            resolvedHosts: resolvedHosts,
+            fallbackHostName: service.hostName
+        )
 
-        var candidates: [(host: String, score: Int, prefersWiredPath: Bool)] = []
-
-        for address in service.addresses ?? [] {
-            guard let host = numericHost(from: address) else { continue }
-            let prefersWiredPath = host.hasPrefix("169.254.")
-            let score: Int
-            if prefersWiredPath {
-                score = 0
-            } else if host.contains(":") {
-                score = 3
-            } else if host.hasPrefix("10.") || host.hasPrefix("192.168.") || host.hasPrefix("172.") {
-                score = 1
-            } else {
-                score = 2
-            }
-            candidates.append((host: host, score: score, prefersWiredPath: prefersWiredPath))
-        }
-
-        if let bestCandidate = candidates.sorted(by: { lhs, rhs in
-            if lhs.score != rhs.score {
-                return lhs.score < rhs.score
-            }
-            return lhs.host < rhs.host
-        }).first {
-            return (host: bestCandidate.host, prefersWiredPath: bestCandidate.prefersWiredPath)
-        }
-
-        if let hostName = service.hostName?
-            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !hostName.isEmpty {
-            return (host: hostName, prefersWiredPath: false)
-        }
-
-        return nil
+        return resolvedHost.map { (host: $0.host, prefersWiredPath: $0.prefersWiredPath) }
     }
 
     private func numericHost(from addressData: Data) -> String? {

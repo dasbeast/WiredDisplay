@@ -8,6 +8,7 @@ private enum ReceiverAdvertisementTXTRecordKey {
     static let displayName = "displayName"
     static let preferredHost = "preferredHost"
     static let preferredHostIsWired = "preferredHostIsWired"
+    static let pathOptions = "pathOptions"
 }
 
 private enum AdvertisedReceiverVisualKind: String {
@@ -73,6 +74,7 @@ private struct ReceiverAdvertisementProfile {
     let deviceFamily: AdvertisedReceiverVisualKind
     let preferredHost: String?
     let preferredHostIsWired: Bool
+    let pathOptions: [DiscoveryPathOption]
 
     var txtRecordData: Data? {
         var textRecord: [String: Data] = [
@@ -88,6 +90,11 @@ private struct ReceiverAdvertisementProfile {
             textRecord[ReceiverAdvertisementTXTRecordKey.preferredHostIsWired] = Data((preferredHostIsWired ? "1" : "0").utf8)
         }
 
+        let serializedPathOptions = NetworkDiagnostics.serializeDiscoveryPathOptions(pathOptions)
+        if !serializedPathOptions.isEmpty {
+            textRecord[ReceiverAdvertisementTXTRecordKey.pathOptions] = Data(serializedPathOptions.utf8)
+        }
+
         return NetService.data(fromTXTRecord: textRecord)
     }
 
@@ -97,6 +104,7 @@ private struct ReceiverAdvertisementProfile {
         let normalizedReceiverName = receiverName.lowercased()
         let normalizedDisplayName = displayName?.lowercased() ?? ""
         let preferredAddress = NetworkDiagnostics.preferredDiscoveryIPv4Address()
+        let pathOptions = NetworkDiagnostics.discoveryPathOptions()
         let hardwareModel = hardwareModelIdentifier()
 
         if hardwareModel.hasPrefix("Macmini") || normalizedReceiverName.contains("mac mini") {
@@ -104,7 +112,8 @@ private struct ReceiverAdvertisementProfile {
                 displayName: displayName,
                 deviceFamily: .macMini,
                 preferredHost: preferredAddress?.address,
-                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+                pathOptions: pathOptions
             )
         }
 
@@ -113,7 +122,8 @@ private struct ReceiverAdvertisementProfile {
                 displayName: displayName,
                 deviceFamily: .macStudio,
                 preferredHost: preferredAddress?.address,
-                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+                pathOptions: pathOptions
             )
         }
 
@@ -122,7 +132,8 @@ private struct ReceiverAdvertisementProfile {
                 displayName: displayName,
                 deviceFamily: .macbookAir,
                 preferredHost: preferredAddress?.address,
-                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+                pathOptions: pathOptions
             )
         }
 
@@ -131,7 +142,8 @@ private struct ReceiverAdvertisementProfile {
                 displayName: displayName,
                 deviceFamily: .macbookPro,
                 preferredHost: preferredAddress?.address,
-                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+                pathOptions: pathOptions
             )
         }
 
@@ -140,7 +152,8 @@ private struct ReceiverAdvertisementProfile {
                 displayName: displayName,
                 deviceFamily: .imac,
                 preferredHost: preferredAddress?.address,
-                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+                pathOptions: pathOptions
             )
         }
 
@@ -149,7 +162,8 @@ private struct ReceiverAdvertisementProfile {
                 displayName: displayName,
                 deviceFamily: .studioDisplay,
                 preferredHost: preferredAddress?.address,
-                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+                pathOptions: pathOptions
             )
         }
 
@@ -158,7 +172,8 @@ private struct ReceiverAdvertisementProfile {
                 displayName: displayName,
                 deviceFamily: .imac,
                 preferredHost: preferredAddress?.address,
-                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+                pathOptions: pathOptions
             )
         }
 
@@ -169,7 +184,8 @@ private struct ReceiverAdvertisementProfile {
                 displayName: displayName,
                 deviceFamily: .macbookPro,
                 preferredHost: preferredAddress?.address,
-                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+                pathOptions: pathOptions
             )
         }
 
@@ -180,7 +196,8 @@ private struct ReceiverAdvertisementProfile {
                     displayName: displayName,
                     deviceFamily: .imac,
                     preferredHost: preferredAddress?.address,
-                    preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+                    preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+                    pathOptions: pathOptions
                 )
             }
         }
@@ -189,7 +206,8 @@ private struct ReceiverAdvertisementProfile {
             displayName: displayName,
             deviceFamily: .display,
             preferredHost: preferredAddress?.address,
-            preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false
+            preferredHostIsWired: preferredAddress?.isWiredPreferred ?? false,
+            pathOptions: pathOptions
         )
     }
 

@@ -34,6 +34,21 @@ enum LocalInterfaceKind: String, Sendable {
             return 3
         }
     }
+
+    nonisolated var discoveryLabel: String {
+        switch self {
+        case .thunderboltBridge:
+            return "Thunderbolt"
+        case .wiredEthernet:
+            return "Ethernet"
+        case .wifi:
+            return "Wi-Fi"
+        case .bridge:
+            return "Bridge"
+        case .other:
+            return "Other"
+        }
+    }
 }
 
 struct LocalInterfaceAddress: Sendable {
@@ -43,6 +58,18 @@ struct LocalInterfaceAddress: Sendable {
 
     nonisolated var isLinkLocal: Bool { address.hasPrefix("169.254.") }
     nonisolated var isWiredPreferred: Bool { kind.isWiredPreferred }
+}
+
+struct DiscoveryPathOption: Equatable, Hashable, Sendable {
+    let host: String
+    let kind: LocalInterfaceKind
+
+    nonisolated var id: String { host }
+}
+
+struct ResolvedDiscoveryHost: Equatable, Sendable {
+    let host: String
+    let prefersWiredPath: Bool
 }
 
 enum NetworkDiagnostics {
@@ -105,6 +132,104 @@ enum NetworkDiagnostics {
         return addresses.min(by: { lhs, rhs in
             compareLocalInterfaces(lhs, rhs)
         })
+    }
+
+    nonisolated static func discoveryPathOptions() -> [DiscoveryPathOption] {
+        var seenHosts = Set<String>()
+        return localIPv4Addresses().compactMap { address in
+            guard seenHosts.insert(address.address).inserted else { return nil }
+            return DiscoveryPathOption(host: address.address, kind: address.kind)
+        }
+    }
+
+    nonisolated static func serializeDiscoveryPathOptions(_ options: [DiscoveryPathOption]) -> String {
+        options.map { "\($0.kind.rawValue)=\($0.host)" }.joined(separator: ",")
+    }
+
+    nonisolated static func parseDiscoveryPathOptions(_ payload: String) -> [DiscoveryPathOption] {
+        payload
+            .split(separator: ",")
+            .compactMap { entry -> DiscoveryPathOption? in
+                let parts = entry.split(separator: "=", maxSplits: 1)
+                guard parts.count == 2,
+                      let kind = LocalInterfaceKind(rawValue: String(parts[0])) else {
+                    return nil
+                }
+
+                let host = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !host.isEmpty else { return nil }
+                return DiscoveryPathOption(host: host, kind: kind)
+            }
+    }
+
+    nonisolated static func orderedUniqueDiscoveryPathOptions(
+        _ options: [DiscoveryPathOption],
+        preferredHost: String
+    ) -> [DiscoveryPathOption] {
+        var seenHosts = Set<String>()
+        let uniqueOptions = options.filter { seenHosts.insert($0.host).inserted }
+
+        return uniqueOptions.sorted { lhs, rhs in
+            if lhs.host == preferredHost, rhs.host != preferredHost {
+                return true
+            }
+            if rhs.host == preferredHost, lhs.host != preferredHost {
+                return false
+            }
+            if lhs.kind.priorityScore != rhs.kind.priorityScore {
+                return lhs.kind.priorityScore < rhs.kind.priorityScore
+            }
+            return lhs.host < rhs.host
+        }
+    }
+
+    nonisolated static func resolvePreferredDiscoveryHost(
+        advertisedHost: String?,
+        advertisedHostIsWired: Bool = false,
+        resolvedHosts: [String],
+        fallbackHostName: String?
+    ) -> ResolvedDiscoveryHost? {
+        if let advertisedHost {
+            let trimmedHost = advertisedHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedHost.isEmpty {
+                return ResolvedDiscoveryHost(
+                    host: trimmedHost,
+                    prefersWiredPath: advertisedHostIsWired || looksLikeWiredPreferredHost(trimmedHost)
+                )
+            }
+        }
+
+        let candidates = resolvedHosts.compactMap { host -> ResolvedDiscoveryHost? in
+            let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedHost.isEmpty else { return nil }
+            return ResolvedDiscoveryHost(
+                host: trimmedHost,
+                prefersWiredPath: looksLikeWiredPreferredHost(trimmedHost)
+            )
+        }
+
+        if let bestCandidate = candidates.min(by: { lhs, rhs in
+            let lhsScore = discoveryHostPreferenceScore(for: lhs.host)
+            let rhsScore = discoveryHostPreferenceScore(for: rhs.host)
+            if lhsScore != rhsScore {
+                return lhsScore < rhsScore
+            }
+            return lhs.host < rhs.host
+        }) {
+            return bestCandidate
+        }
+
+        if let fallbackHostName {
+            let trimmedHost = fallbackHostName
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedHost.isEmpty {
+                return ResolvedDiscoveryHost(host: trimmedHost, prefersWiredPath: false)
+            }
+        }
+
+        return nil
     }
 
     nonisolated static func looksLikeWiredPreferredHost(_ host: String) -> Bool {
@@ -191,6 +316,19 @@ final class WiredPathStatusMonitor {
 }
 
 private extension NetworkDiagnostics {
+    nonisolated static func discoveryHostPreferenceScore(for host: String) -> Int {
+        if looksLikeWiredPreferredHost(host) {
+            return 0
+        }
+        if host.hasPrefix("10.") || host.hasPrefix("192.168.") || host.hasPrefix("172.") {
+            return 1
+        }
+        if host.contains(":") {
+            return 3
+        }
+        return 2
+    }
+
     nonisolated static func compareLocalInterfaces(_ lhs: LocalInterfaceAddress, _ rhs: LocalInterfaceAddress) -> Bool {
         let lhsScore = hostPreferenceScore(for: lhs)
         let rhsScore = hostPreferenceScore(for: rhs)

@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Run project CI script
+        run: ./scripts/ci.sh
+
+  release:
+    needs: validate
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      WDISPLAY_NOTARY_PROFILE: wireddisplay-ci
+      WDISPLAY_SSH_HOST: ${{ secrets.WDISPLAY_SSH_HOST }}
+      WDISPLAY_SSH_USER: ${{ secrets.WDISPLAY_SSH_USER }}
+      WDISPLAY_FEED_BASE_URL: ${{ secrets.WDISPLAY_FEED_BASE_URL }}
+      WDISPLAY_REMOTE_DIR: ${{ secrets.WDISPLAY_REMOTE_DIR }}
+      WDISPLAY_RECEIVER_FEED_BASE_URL: ${{ secrets.WDISPLAY_RECEIVER_FEED_BASE_URL }}
+      WDISPLAY_RECEIVER_REMOTE_DIR: ${{ secrets.WDISPLAY_RECEIVER_REMOTE_DIR }}
+      WDISPLAY_RECEIVER_APPCAST_FILENAME: ${{ secrets.WDISPLAY_RECEIVER_APPCAST_FILENAME }}
+      WDISPLAY_RECEIVER_SU_FEED_URL: ${{ secrets.WDISPLAY_RECEIVER_SU_FEED_URL }}
+      WDISPLAY_CODE_SIGN_IDENTITY: ${{ secrets.WDISPLAY_CODE_SIGN_IDENTITY }}
+      WDISPLAY_RECEIVER_CODE_SIGN_IDENTITY: ${{ secrets.WDISPLAY_RECEIVER_CODE_SIGN_IDENTITY }}
+      WDISPLAY_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.WDISPLAY_SPARKLE_PUBLIC_ED_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Validate required release secrets
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          WDISPLAY_SSH_KEY: ${{ secrets.WDISPLAY_SSH_KEY }}
+        run: |
+          required_vars=(
+            APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64
+            APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD
+            APPLE_KEYCHAIN_PASSWORD
+            APPLE_NOTARY_ISSUER_ID
+            APPLE_NOTARY_KEY_ID
+            APPLE_NOTARY_KEY_P8
+            SPARKLE_PRIVATE_KEY
+            WDISPLAY_SSH_HOST
+            WDISPLAY_SSH_USER
+            WDISPLAY_SSH_KEY
+          )
+
+          missing=()
+          for var_name in "${required_vars[@]}"; do
+            if [[ -z "${!var_name:-}" ]]; then
+              missing+=("$var_name")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required release secrets:" >&2
+            printf '  %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/developer-id-application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/wireddisplay-release.keychain-db"
+
+          printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 -D > "$CERT_PATH"
+
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/xcrun
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Configure notarytool profile
+        shell: bash
+        env:
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+        run: |
+          NOTARY_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          printf '%s' "$APPLE_NOTARY_KEY_P8" > "$NOTARY_KEY_PATH"
+
+          xcrun notarytool store-credentials "$WDISPLAY_NOTARY_PROFILE" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID"
+
+      - name: Prepare Sparkle private key
+        shell: bash
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          SPARKLE_KEY_PATH="$RUNNER_TEMP/sparkle-private-key.txt"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$SPARKLE_KEY_PATH"
+          chmod 600 "$SPARKLE_KEY_PATH"
+          echo "SPARKLE_PRIVATE_KEY_FILE=$SPARKLE_KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Prepare SSH deployment credentials
+        shell: bash
+        env:
+          WDISPLAY_SSH_KEY: ${{ secrets.WDISPLAY_SSH_KEY }}
+          WDISPLAY_SSH_KNOWN_HOSTS: ${{ secrets.WDISPLAY_SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+
+          SSH_KEY_PATH="$HOME/.ssh/wdisplay_deploy_key"
+          printf '%s' "$WDISPLAY_SSH_KEY" > "$SSH_KEY_PATH"
+          chmod 600 "$SSH_KEY_PATH"
+          echo "WDISPLAY_SSH_KEY_FILE=$SSH_KEY_PATH" >> "$GITHUB_ENV"
+
+          if [[ -n "${WDISPLAY_SSH_KNOWN_HOSTS:-}" ]]; then
+            printf '%s\n' "$WDISPLAY_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          else
+            ssh-keyscan -H "$WDISPLAY_SSH_HOST" >> "$HOME/.ssh/known_hosts"
+          fi
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Release DisplaySender
+        run: ./scripts/release_displaysender.sh
+
+      - name: Release DisplayReceiver
+        run: ./scripts/release_displayreceiver.sh
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wireddisplay-release-${{ github.ref_name }}
+          path: release/**
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/**/*.zip
+            release/**/*.xml
