@@ -84,10 +84,19 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             return float4(clamp(rec709 * yuv, 0.0, 1.0), 1.0);
         }
+
+        fragment float4 bgraQuadFragment(
+            VertexOut in [[stage_in]],
+            texture2d<float> colorTexture [[texture(0)]],
+            sampler sourceSampler [[sampler(0)]]
+        ) {
+            return colorTexture.sample(sourceSampler, in.textureCoordinate);
+        }
         """
 
         private var commandQueue: MTLCommandQueue?
-        private var pipelineState: MTLRenderPipelineState?
+        private var ycbcrPipelineState: MTLRenderPipelineState?
+        private var bgraPipelineState: MTLRenderPipelineState?
         private var vertexBuffer: MTLBuffer?
         private var samplerState: MTLSamplerState?
         private var textureCache: CVMetalTextureCache?
@@ -96,6 +105,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var retainedYTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
         private var retainedCbCrTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
         private var retainedPixelBufferTextureSlot = 0
+        private var retainedBGRATextures: [MTLTexture?] = Array(repeating: nil, count: 3)
+        private var retainedBGRATextureSlot = 0
 
         // Triple-buffering semaphore: limits CPU-ahead GPU submissions to 3 frames,
         // preventing the render loop from starving WindowServer during high-motion content.
@@ -116,7 +127,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             commandQueue = device.makeCommandQueue()
             vertexBuffer = makeVertexBuffer(device: device)
             samplerState = makeSamplerState(device: device)
-            pipelineState = makePipelineState(device: device, colorPixelFormat: .bgra8Unorm)
+            ycbcrPipelineState = makePipelineState(
+                device: device,
+                colorPixelFormat: .bgra8Unorm,
+                fragmentFunctionName: "texturedQuadFragment"
+            )
+            bgraPipelineState = makePipelineState(
+                device: device,
+                colorPixelFormat: .bgra8Unorm,
+                fragmentFunctionName: "bgraQuadFragment"
+            )
 
             var newTextureCache: CVMetalTextureCache?
             let cacheStatus = CVMetalTextureCacheCreate(
@@ -144,7 +164,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             guard let device = view.device,
                   let commandQueue,
-                  let pipelineState,
+                  let ycbcrPipelineState,
+                  let bgraPipelineState,
                   let vertexBuffer,
                   let samplerState,
                   let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -158,9 +179,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             let frame = RenderFrameStore.shared.snapshot()
-            let textures = frame.flatMap { makeYCbCrTextures(from: $0) }
+            let renderInput = frame.flatMap { makeRenderInput(from: $0, device: device) }
 
-            guard let textures else {
+            guard let renderInput else {
                 // No frame available — present a cleared drawable.
                 guard let clearPass = view.currentRenderPassDescriptor else {
                     commandBuffer.commit()
@@ -176,17 +197,19 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
 
-            let inputWidth  = textures.y.width
-            let inputHeight = textures.y.height
+            let inputWidth  = renderInput.width
+            let inputHeight = renderInput.height
             let outputWidth  = Int(view.drawableSize.width)
             let outputHeight = Int(view.drawableSize.height)
 
-            let shouldUseSpatialUpscale = shouldUseSpatialUpscale(
-                inputWidth: inputWidth,
-                inputHeight: inputHeight,
-                outputWidth: outputWidth,
-                outputHeight: outputHeight
-            )
+            let shouldUseSpatialUpscale =
+                renderInput.supportsSpatialUpscale &&
+                shouldUseSpatialUpscale(
+                    inputWidth: inputWidth,
+                    inputHeight: inputHeight,
+                    outputWidth: outputWidth,
+                    outputHeight: outputHeight
+                )
 
             guard shouldUseSpatialUpscale else {
                 releaseScalerResources()
@@ -194,10 +217,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     view: view,
                     commandBuffer: commandBuffer,
                     drawable: drawable,
-                    pipelineState: pipelineState,
+                    ycbcrPipelineState: ycbcrPipelineState,
+                    bgraPipelineState: bgraPipelineState,
                     vertexBuffer: vertexBuffer,
                     samplerState: samplerState,
-                    textures: textures
+                    renderInput: renderInput
                 )
                 return
             }
@@ -223,10 +247,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     view: view,
                     commandBuffer: commandBuffer,
                     drawable: drawable,
-                    pipelineState: pipelineState,
+                    ycbcrPipelineState: ycbcrPipelineState,
+                    bgraPipelineState: bgraPipelineState,
                     vertexBuffer: vertexBuffer,
                     samplerState: samplerState,
-                    textures: textures
+                    renderInput: renderInput
                 )
                 return
             }
@@ -247,13 +272,15 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             // no aspect-fit scaling needed; fill the entire intermediate surface.
             var uniforms = RenderUniforms(scale: SIMD2<Float>(1.0, 1.0))
 
-            offscreenEncoder.setRenderPipelineState(pipelineState)
-            offscreenEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-            offscreenEncoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
-            offscreenEncoder.setFragmentTexture(textures.y, index: 0)
-            offscreenEncoder.setFragmentTexture(textures.cbcr, index: 1)
-            offscreenEncoder.setFragmentSamplerState(samplerState, index: 0)
-            offscreenEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            encodeRenderInput(
+                renderInput,
+                encoder: offscreenEncoder,
+                ycbcrPipelineState: ycbcrPipelineState,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                uniforms: &uniforms
+            )
             offscreenEncoder.endEncoding()
 
             // --- Pass 2: MetalFX Spatial Upscale → private upscaled texture ---
@@ -263,10 +290,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     view: view,
                     commandBuffer: commandBuffer,
                     drawable: drawable,
-                    pipelineState: pipelineState,
+                    ycbcrPipelineState: ycbcrPipelineState,
+                    bgraPipelineState: bgraPipelineState,
                     vertexBuffer: vertexBuffer,
                     samplerState: samplerState,
-                    textures: textures
+                    renderInput: renderInput
                 )
                 return
             }
@@ -406,10 +434,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             view: MTKView,
             commandBuffer: MTLCommandBuffer,
             drawable: CAMetalDrawable,
-            pipelineState: MTLRenderPipelineState,
+            ycbcrPipelineState: MTLRenderPipelineState,
+            bgraPipelineState: MTLRenderPipelineState,
             vertexBuffer: MTLBuffer,
             samplerState: MTLSamplerState,
-            textures: (y: MTLTexture, cbcr: MTLTexture)
+            renderInput: RenderInput
         ) {
             guard let renderPassDescriptor = view.currentRenderPassDescriptor else {
                 commandBuffer.present(drawable)
@@ -425,19 +454,21 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             var uniforms = RenderUniforms(
                 scale: makeAspectFitScale(
-                    contentWidth: textures.y.width,
-                    contentHeight: textures.y.height,
+                    contentWidth: renderInput.width,
+                    contentHeight: renderInput.height,
                     drawableSize: view.drawableSize
                 )
             )
 
-            encoder.setRenderPipelineState(pipelineState)
-            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-            encoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
-            encoder.setFragmentTexture(textures.y, index: 0)
-            encoder.setFragmentTexture(textures.cbcr, index: 1)
-            encoder.setFragmentSamplerState(samplerState, index: 0)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            encodeRenderInput(
+                renderInput,
+                encoder: encoder,
+                ycbcrPipelineState: ycbcrPipelineState,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                uniforms: &uniforms
+            )
             encoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
@@ -467,12 +498,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             return device.makeSamplerState(descriptor: descriptor)
         }
 
-        private func makePipelineState(device: MTLDevice, colorPixelFormat: MTLPixelFormat) -> MTLRenderPipelineState? {
+        private func makePipelineState(
+            device: MTLDevice,
+            colorPixelFormat: MTLPixelFormat,
+            fragmentFunctionName: String
+        ) -> MTLRenderPipelineState? {
             do {
                 let library = try device.makeLibrary(source: shaderSource, options: nil)
                 let descriptor = MTLRenderPipelineDescriptor()
                 descriptor.vertexFunction = library.makeFunction(name: "texturedQuadVertex")
-                descriptor.fragmentFunction = library.makeFunction(name: "texturedQuadFragment")
+                descriptor.fragmentFunction = library.makeFunction(name: fragmentFunctionName)
                 descriptor.vertexDescriptor = makeVertexDescriptor()
                 descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
                 return try device.makeRenderPipelineState(descriptor: descriptor)
@@ -549,6 +584,84 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             return (y: textureY, cbcr: textureCbCr)
         }
 
+        private func makeRenderInput(from frame: DecodedFrame, device: MTLDevice) -> RenderInput? {
+            if let textures = makeYCbCrTextures(from: frame) {
+                return .ycbcr(y: textures.y, cbcr: textures.cbcr)
+            }
+
+            return makeBGRATexture(from: frame, device: device).map(RenderInput.bgra)
+        }
+
+        private func makeBGRATexture(from frame: DecodedFrame, device: MTLDevice) -> MTLTexture? {
+            guard frame.pixelFormat == .bgra8,
+                  let pixelData = frame.pixelData,
+                  frame.metadata.width > 0,
+                  frame.metadata.height > 0,
+                  frame.bytesPerRow >= frame.metadata.width * 4 else {
+                return nil
+            }
+
+            let requiredBytes = frame.bytesPerRow * frame.metadata.height
+            guard requiredBytes > 0, pixelData.count >= requiredBytes else {
+                return nil
+            }
+
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: frame.metadata.width,
+                height: frame.metadata.height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .managed
+
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                print("[MetalRenderSurfaceView] Failed to create BGRA texture")
+                return nil
+            }
+
+            pixelData.withUnsafeBytes { bytes in
+                guard let baseAddress = bytes.baseAddress else { return }
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, frame.metadata.width, frame.metadata.height),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: frame.bytesPerRow
+                )
+            }
+
+            let slot = retainedBGRATextureSlot
+            retainedBGRATextureSlot = (slot + 1) % retainedBGRATextures.count
+            retainedBGRATextures[slot] = texture
+            return texture
+        }
+
+        private func encodeRenderInput(
+            _ renderInput: RenderInput,
+            encoder: MTLRenderCommandEncoder,
+            ycbcrPipelineState: MTLRenderPipelineState,
+            bgraPipelineState: MTLRenderPipelineState,
+            vertexBuffer: MTLBuffer,
+            samplerState: MTLSamplerState,
+            uniforms: inout RenderUniforms
+        ) {
+            switch renderInput {
+            case .ycbcr(let y, let cbcr):
+                encoder.setRenderPipelineState(ycbcrPipelineState)
+                encoder.setFragmentTexture(y, index: 0)
+                encoder.setFragmentTexture(cbcr, index: 1)
+            case .bgra(let texture):
+                encoder.setRenderPipelineState(bgraPipelineState)
+                encoder.setFragmentTexture(texture, index: 0)
+                encoder.setFragmentTexture(nil, index: 1)
+            }
+
+            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
+            encoder.setFragmentSamplerState(samplerState, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+
         private func makeAspectFitScale(contentWidth: Int, contentHeight: Int, drawableSize: CGSize) -> SIMD2<Float> {
             guard contentWidth > 0,
                   contentHeight > 0,
@@ -576,4 +689,36 @@ private struct RenderVertex {
 
 private struct RenderUniforms {
     var scale: SIMD2<Float>
+}
+
+private enum RenderInput {
+    case ycbcr(y: MTLTexture, cbcr: MTLTexture)
+    case bgra(MTLTexture)
+
+    var width: Int {
+        switch self {
+        case .ycbcr(let y, _):
+            return y.width
+        case .bgra(let texture):
+            return texture.width
+        }
+    }
+
+    var height: Int {
+        switch self {
+        case .ycbcr(let y, _):
+            return y.height
+        case .bgra(let texture):
+            return texture.height
+        }
+    }
+
+    var supportsSpatialUpscale: Bool {
+        switch self {
+        case .ycbcr:
+            return true
+        case .bgra:
+            return false
+        }
+    }
 }

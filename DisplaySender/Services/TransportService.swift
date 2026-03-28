@@ -13,7 +13,14 @@ final class TransportService {
 
     private struct OutboundFrame {
         let data: Data
+        let kind: OutboundFrameKind
         let isKeyFrame: Bool
+    }
+
+    private enum OutboundFrameKind {
+        case control
+        case audio
+        case video
     }
 
     private var pendingOutboundFrames: [OutboundFrame] = []
@@ -99,7 +106,11 @@ final class TransportService {
                 )
             }
 
-            let outbound = OutboundFrame(data: framedData, isKeyFrame: encodedFrame.isKeyFrame)
+            let outbound = OutboundFrame(
+                data: framedData,
+                kind: .video,
+                isKeyFrame: encodedFrame.isKeyFrame
+            )
             self.enqueueOutboundFrame(outbound)
             self.flushPendingIfPossible()
         }
@@ -120,7 +131,11 @@ final class TransportService {
                 return
             }
 
-            let outbound = OutboundFrame(data: framedData, isKeyFrame: true)
+            let outbound = OutboundFrame(
+                data: framedData,
+                kind: .audio,
+                isKeyFrame: false
+            )
             self.enqueueOutboundFrame(outbound)
             self.flushPendingIfPossible()
         }
@@ -210,34 +225,95 @@ final class TransportService {
         }
 
         let framedData = wrapLengthPrefix(encoded)
-        enqueueOutboundFrame(OutboundFrame(data: framedData, isKeyFrame: isKeyFrame))
+        enqueueOutboundFrame(
+            OutboundFrame(
+                data: framedData,
+                kind: .control,
+                isKeyFrame: isKeyFrame
+            )
+        )
         flushPendingIfPossible()
     }
 
     private func enqueueOutboundFrame(_ frame: OutboundFrame) {
-        if awaitingKeyFrameAfterDrop && !frame.isKeyFrame {
-            droppedOutboundFrameCount += 1
-            return
-        }
-
-        if frame.isKeyFrame {
-            awaitingKeyFrameAfterDrop = false
-        }
-
-        // When the queue is full, shed the oldest non-keyframes instead of dropping everything.
-        // This preserves recent frames and avoids the costly "drop-all → await keyframe" cascade.
-        while pendingOutboundFrames.count >= NetworkProtocol.maxPendingOutboundFrames {
-            if let dropIndex = pendingOutboundFrames.firstIndex(where: { !$0.isKeyFrame }) {
-                pendingOutboundFrames.remove(at: dropIndex)
+        if frame.kind == .video {
+            if awaitingKeyFrameAfterDrop && !frame.isKeyFrame {
                 droppedOutboundFrameCount += 1
-            } else {
-                // All pending frames are keyframes — drop the oldest one.
-                pendingOutboundFrames.removeFirst()
-                droppedOutboundFrameCount += 1
+                return
+            }
+
+            if frame.isKeyFrame {
+                awaitingKeyFrameAfterDrop = false
             }
         }
 
+        guard makeQueueSpaceIfNeeded(for: frame) else {
+            if frame.kind == .video {
+                droppedOutboundFrameCount += 1
+                awaitingKeyFrameAfterDrop = true
+            }
+            return
+        }
+
         pendingOutboundFrames.append(frame)
+    }
+
+    private func makeQueueSpaceIfNeeded(for frame: OutboundFrame) -> Bool {
+        while pendingOutboundFrames.count >= NetworkProtocol.maxPendingOutboundFrames {
+            switch frame.kind {
+            case .audio:
+                // Audio should never evict video or control traffic. If we're congested,
+                // replace older queued audio packets with the newest one and otherwise drop it.
+                guard dropQueuedFrame(where: { $0.kind == .audio }, countAsVideoDrop: false) else {
+                    return false
+                }
+            case .video:
+                if dropQueuedFrame(where: { $0.kind == .audio }, countAsVideoDrop: false) {
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .video && !$0.isKeyFrame }, countAsVideoDrop: true) {
+                    awaitingKeyFrameAfterDrop = true
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .video }, countAsVideoDrop: true) {
+                    awaitingKeyFrameAfterDrop = true
+                    continue
+                }
+                return false
+            case .control:
+                if dropQueuedFrame(where: { $0.kind == .audio }, countAsVideoDrop: false) {
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .video && !$0.isKeyFrame }, countAsVideoDrop: true) {
+                    awaitingKeyFrameAfterDrop = true
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .video }, countAsVideoDrop: true) {
+                    awaitingKeyFrameAfterDrop = true
+                    continue
+                }
+                guard dropQueuedFrame(where: { $0.kind == .control }, countAsVideoDrop: false) else {
+                    return false
+                }
+            }
+        }
+
+        return true
+    }
+
+    private func dropQueuedFrame(
+        where shouldDrop: (OutboundFrame) -> Bool,
+        countAsVideoDrop: Bool
+    ) -> Bool {
+        guard let dropIndex = pendingOutboundFrames.firstIndex(where: shouldDrop) else {
+            return false
+        }
+
+        pendingOutboundFrames.remove(at: dropIndex)
+        if countAsVideoDrop {
+            droppedOutboundFrameCount += 1
+        }
+        return true
     }
 
     private func flushPendingIfPossible() {

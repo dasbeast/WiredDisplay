@@ -273,7 +273,8 @@ final class VideoDatagramListenerService {
 
     private(set) var isListening = false
     private(set) var listeningPort: UInt16 = NetworkProtocol.defaultPort
-    var canAcceptDatagrams: Bool { listener != nil }
+    /// Only advertise UDP once the listener is actually ready on the socket.
+    var canAcceptDatagrams: Bool { isListening }
 
     private var listener: NWListener?
     private var activeConnection: NWConnection?

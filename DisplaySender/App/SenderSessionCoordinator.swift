@@ -325,11 +325,10 @@ final class SenderSessionCoordinator {
 
         state = .connecting
         captureService.stopCapture()
-        if videoTransportMode == .udp {
-            videoDatagramTransportService.connect(host: receiverHost, port: port)
-        } else {
-            videoDatagramTransportService.disconnect()
-        }
+        // Wait until the receiver explicitly negotiates UDP before opening the datagram path.
+        // Pre-connecting here can fail before the handshake finishes and strand the sender
+        // in a connected-but-never-starting state.
+        videoDatagramTransportService.disconnect()
         transportService.connect(host: receiverHost, port: port)
     }
 
@@ -564,10 +563,10 @@ final class SenderSessionCoordinator {
                 let ack = try envelope.decodePayload(as: HelloAckPayload.self)
                 if ack.accepted {
                     applyReceiverDisplayMetrics(ack.displayMetrics)
-                    applyNegotiatedVideoTransport(ack.negotiatedVideoTransport ?? requestedVideoTransportMode)
                     state = .connected
                     lastInboundHeartbeatAt = Date()
                     startHeartbeatTimers()
+                    applyNegotiatedVideoTransport(ack.negotiatedVideoTransport ?? requestedVideoTransportMode)
                     // Auto-start once both the handshake and the selected video transport are ready.
                     if negotiatedVideoTransportMode == .udp && !videoDatagramTransportService.isConnected {
                         awaitingUDPReadyToStart = true

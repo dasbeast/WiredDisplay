@@ -471,7 +471,7 @@ private final class ReceiverFrameDecodePipeline {
         generationLock.lock()
         generation &+= 1
         generationLock.unlock()
-        latestEnqueuedFrameIndex.update(0)
+        latestEnqueuedFrameIndex.reset()
         queue.async { [weak self] in
             self?.pendingCompressedFrames.removeAll(keepingCapacity: false)
             self?.nextExpectedCompressedFrameIndex = nil
@@ -821,6 +821,12 @@ private final class ReceiverFrameDecodePipeline {
 private final class LatestFrameIndex: @unchecked Sendable {
     private let lock = NSLock()
     private var value: UInt64 = 0
+
+    func reset() {
+        lock.lock()
+        value = 0
+        lock.unlock()
+    }
 
     func update(_ frameIndex: UInt64) {
         lock.lock()

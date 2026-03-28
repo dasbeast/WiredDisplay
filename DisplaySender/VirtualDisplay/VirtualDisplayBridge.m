@@ -87,8 +87,9 @@ static void scheduleRetiredDisplayPurge(NSNumber *displayKey, int64_t delayNanos
 
     // Configure display modes
     CGVirtualDisplaySettings *settings = [[CGVirtualDisplaySettings alloc] init];
-    // Force Retina/HiDPI backing for sharper text and UI rendering.
-    const BOOL effectiveHiDPI = YES;
+    // Respect the caller's negotiated backing-scale preference so non-Retina receivers
+    // can request a 1x surface instead of always forcing Retina.
+    const BOOL effectiveHiDPI = hiDPI;
     settings.hiDPI = effectiveHiDPI ? 1 : 0;
 
     NSMutableArray<CGVirtualDisplayMode *> *modes = [NSMutableArray array];
