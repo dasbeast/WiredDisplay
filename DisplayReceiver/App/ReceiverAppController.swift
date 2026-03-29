@@ -21,6 +21,8 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var cursorOverlayNormalizedX: Double?
     @Published private(set) var cursorOverlayNormalizedY: Double?
     @Published private(set) var isCursorOverlayVisible = false
+    @Published private(set) var cursorOverlayImage: NSImage?
+    @Published private(set) var cursorOverlayHotSpot: CGPoint?
 
     let coordinator = ReceiverSessionCoordinator()
     let advertisementService = ReceiverAdvertisementService()
@@ -122,6 +124,8 @@ final class ReceiverAppController: ObservableObject {
         cursorOverlayNormalizedX = coordinator.cursorOverlayNormalizedX
         cursorOverlayNormalizedY = coordinator.cursorOverlayNormalizedY
         isCursorOverlayVisible = coordinator.isCursorOverlayVisible
+        cursorOverlayImage = coordinator.cursorOverlayImage
+        cursorOverlayHotSpot = coordinator.cursorOverlayHotSpot
 
         if newStreaming && !wasStreaming {
             powerManagementService.startPreventingSleep()

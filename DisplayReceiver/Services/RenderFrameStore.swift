@@ -52,6 +52,7 @@ struct ReceiverCursorState: Equatable {
     let normalizedX: Double
     let normalizedY: Double
     let isVisible: Bool
+    let appearance: CursorAppearancePayload?
 }
 
 /// Thread-safe cursor state store shared between receiver control handling and presentation.
@@ -71,7 +72,19 @@ final class ReceiverCursorStore {
 
     func update(state: ReceiverCursorState) {
         lock.lock()
-        latestState = state
+        if state.appearance != nil {
+            latestState = state
+        } else if let previousState = latestState {
+            latestState = ReceiverCursorState(
+                timestampNanoseconds: state.timestampNanoseconds,
+                normalizedX: state.normalizedX,
+                normalizedY: state.normalizedY,
+                isVisible: state.isVisible,
+                appearance: previousState.appearance
+            )
+        } else {
+            latestState = state
+        }
         lock.unlock()
     }
 

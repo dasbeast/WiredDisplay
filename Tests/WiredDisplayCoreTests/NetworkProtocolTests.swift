@@ -171,6 +171,30 @@ final class NetworkProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.renderedFrameIndex, payload.renderedFrameIndex)
     }
 
+    func testNetworkEnvelopeRoundTripsCursorStatePayloadWithAppearance() throws {
+        let payload = CursorStatePayload(
+            timestampNanoseconds: 456,
+            normalizedX: 0.25,
+            normalizedY: 0.75,
+            isVisible: true,
+            appearance: CursorAppearancePayload(
+                signature: 0xDEADBEEF,
+                pngData: Data([0x89, 0x50, 0x4E, 0x47]),
+                hotSpotX: 12,
+                hotSpotY: 11
+            )
+        )
+
+        let envelope = try NetworkEnvelope.make(
+            type: .cursorState,
+            sequenceNumber: 8,
+            payload: payload
+        )
+
+        let decoded = try envelope.decodePayload(as: CursorStatePayload.self)
+        XCTAssertEqual(decoded, payload)
+    }
+
     func testNetworkEnvelopeRejectsPayloadWhenVersionDoesNotMatch() throws {
         let envelope = NetworkEnvelope(
             version: NetworkProtocol.protocolVersion + 1,

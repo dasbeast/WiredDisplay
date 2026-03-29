@@ -18,6 +18,7 @@ enum NetworkProtocol {
     static let keyFrameIntervalSeconds: Int = 1
     static let captureFramesPerSecond: Int = 60
     static let cursorOverlayFramesPerSecond: Int = 120
+    static let cursorAppearanceRefreshFramesPerSecond: Int = 30
     static let enableReceiverSideCursorOverlay: Bool = true
     static let useSwiftUIReceiverCursorOverlay: Bool = true
     static let showSenderCursorFallbackWhileTestingOverlay: Bool = false
@@ -357,12 +358,20 @@ struct HeartbeatPayload: Codable, Sendable {
     }
 }
 
+struct CursorAppearancePayload: Codable, Equatable, Sendable {
+    let signature: UInt64
+    let pngData: Data
+    let hotSpotX: Double
+    let hotSpotY: Double
+}
+
 /// Sender -> receiver cursor sidecar used to render a low-latency pointer overlay.
 struct CursorStatePayload: Codable, Equatable, Sendable {
     let timestampNanoseconds: UInt64
     let normalizedX: Double
     let normalizedY: Double
     let isVisible: Bool
+    let appearance: CursorAppearancePayload?
 }
 
 struct SenderHeartbeatEvaluation: Equatable, Sendable {

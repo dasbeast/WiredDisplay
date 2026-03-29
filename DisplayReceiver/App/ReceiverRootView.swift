@@ -17,7 +17,7 @@ struct ReceiverRootView: View {
 
                 if shouldShowCursorOverlay,
                    let overlayPosition = cursorOverlayPosition(in: geometry.size) {
-                    ReceiverCursorOverlayVisual()
+                    ReceiverCursorOverlayVisual(cursorImage: cursorOverlayImage)
                         .position(overlayPosition)
                         .allowsHitTesting(false)
                 }
@@ -100,6 +100,14 @@ struct ReceiverRootView: View {
             appController.isCursorOverlayVisible
     }
 
+    private var cursorOverlayImage: NSImage {
+        appController.cursorOverlayImage ?? ReceiverCursorOverlayVisual.defaultArrowCursorImage
+    }
+
+    private var cursorOverlayHotSpot: CGPoint {
+        appController.cursorOverlayHotSpot ?? NSCursor.arrow.hotSpot
+    }
+
     private func cursorOverlayPosition(in size: CGSize) -> CGPoint? {
         guard let normalizedX = appController.cursorOverlayNormalizedX,
               let normalizedY = appController.cursorOverlayNormalizedY else {
@@ -110,7 +118,10 @@ struct ReceiverRootView: View {
             x: CGFloat(normalizedX) * size.width,
             y: CGFloat(normalizedY) * size.height
         )
-        let centerOffset = ReceiverCursorOverlayVisual.centerOffset
+        let centerOffset = ReceiverCursorOverlayVisual.centerOffset(
+            for: cursorOverlayImage.size,
+            hotSpot: cursorOverlayHotSpot
+        )
         return CGPoint(
             x: anchorPoint.x + centerOffset.x,
             y: anchorPoint.y + centerOffset.y
@@ -119,18 +130,18 @@ struct ReceiverRootView: View {
 }
 
 private struct ReceiverCursorOverlayVisual: View {
-    private static let arrowCursorImage = NSCursor.arrow.image
-    private static let arrowImageSize = arrowCursorImage.size
-    private static let arrowHotSpotFromTop = NSCursor.arrow.hotSpot
+    static let defaultArrowCursorImage = NSCursor.arrow.image
 
-    static var centerOffset: CGPoint {
+    let cursorImage: NSImage
+
+    static func centerOffset(for imageSize: CGSize, hotSpot: CGPoint) -> CGPoint {
         if NetworkProtocol.useDebugCursorOverlayMarker {
             return .zero
         }
 
         return CGPoint(
-            x: (arrowImageSize.width / 2.0) - arrowHotSpotFromTop.x,
-            y: (arrowImageSize.height / 2.0) - arrowHotSpotFromTop.y
+            x: (imageSize.width / 2.0) - hotSpot.x,
+            y: (imageSize.height / 2.0) - hotSpot.y
         )
     }
 
@@ -139,10 +150,10 @@ private struct ReceiverCursorOverlayVisual: View {
             if NetworkProtocol.useDebugCursorOverlayMarker {
                 ReceiverDebugCursorMarker()
             } else {
-                Image(nsImage: Self.arrowCursorImage)
+                Image(nsImage: cursorImage)
                     .resizable()
                     .interpolation(.high)
-                    .frame(width: Self.arrowImageSize.width, height: Self.arrowImageSize.height)
+                    .frame(width: cursorImage.size.width, height: cursorImage.size.height)
             }
         }
         .shadow(color: .black.opacity(NetworkProtocol.useDebugCursorOverlayMarker ? 0.45 : 0.15), radius: 6, x: 0, y: 2)

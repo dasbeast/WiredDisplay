@@ -36,6 +36,8 @@ final class ReceiverSessionCoordinator {
     private(set) var cursorOverlayNormalizedX: Double? { didSet { onChange?() } }
     private(set) var cursorOverlayNormalizedY: Double? { didSet { onChange?() } }
     private(set) var isCursorOverlayVisible = false { didSet { onChange?() } }
+    private(set) var cursorOverlayImage: NSImage? { didSet { onChange?() } }
+    private(set) var cursorOverlayHotSpot: CGPoint? { didSet { onChange?() } }
 
     private(set) var configuredEndpointSummary: String = "-" { didSet { onChange?() } }
     private(set) var wiredPathAvailable = false { didSet { onChange?() } }
@@ -123,10 +125,7 @@ final class ReceiverSessionCoordinator {
                 self.frameDecodePipeline.reset()
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
-                self.cursorOverlaySummary = "-"
-                self.cursorOverlayNormalizedX = nil
-                self.cursorOverlayNormalizedY = nil
-                self.isCursorOverlayVisible = false
+                self.resetCursorOverlayState()
                 if case .running = self.state {
                     self.state = .listening
                 }
@@ -215,10 +214,7 @@ final class ReceiverSessionCoordinator {
         receivedMegabitsPerSecond = nil
         renderSourceDescription = "-"
         replacedBeforeRenderCount = 0
-        cursorOverlaySummary = "-"
-        cursorOverlayNormalizedX = nil
-        cursorOverlayNormalizedY = nil
-        isCursorOverlayVisible = false
+        resetCursorOverlayState()
         lastRenderedFrameTelemetry = nil
         lastFrameArrivalNanoseconds = nil
         smoothedIntervalMilliseconds = nil
@@ -243,10 +239,7 @@ final class ReceiverSessionCoordinator {
         frameDecodePipeline.reset()
         audioPlaybackService.stop()
         ReceiverCursorStore.shared.reset()
-        cursorOverlaySummary = "-"
-        cursorOverlayNormalizedX = nil
-        cursorOverlayNormalizedY = nil
-        isCursorOverlayVisible = false
+        resetCursorOverlayState()
         listenerService.stopListening()
         videoDatagramListenerService.stopListening()
         state = .idle
@@ -259,10 +252,7 @@ final class ReceiverSessionCoordinator {
                 frameDecodePipeline.reset()
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
-                cursorOverlaySummary = "-"
-                cursorOverlayNormalizedX = nil
-                cursorOverlayNormalizedY = nil
-                isCursorOverlayVisible = false
+                resetCursorOverlayState()
                 let hello = try envelope.decodePayload(as: HelloPayload.self)
                 peerName = hello.senderName
                 if hello.requestedProtocolVersion == NetworkProtocol.protocolVersion {
@@ -305,9 +295,13 @@ final class ReceiverSessionCoordinator {
                         timestampNanoseconds: cursorState.timestampNanoseconds,
                         normalizedX: cursorState.normalizedX,
                         normalizedY: cursorState.normalizedY,
-                        isVisible: cursorState.isVisible
+                        isVisible: cursorState.isVisible,
+                        appearance: cursorState.appearance
                     )
                 )
+                if let appearance = cursorState.appearance {
+                    updateCursorOverlayAppearance(from: appearance)
+                }
                 if cursorState.isVisible {
                     cursorOverlaySummary = String(
                         format: "visible (%.3f, %.3f)",
@@ -347,6 +341,21 @@ final class ReceiverSessionCoordinator {
             receiverRenderTimestampNanoseconds: update.renderTimestampNanoseconds
         )
         receivedFrameCount += 1
+    }
+
+    private func resetCursorOverlayState() {
+        cursorOverlaySummary = "-"
+        cursorOverlayNormalizedX = nil
+        cursorOverlayNormalizedY = nil
+        isCursorOverlayVisible = false
+        cursorOverlayImage = nil
+        cursorOverlayHotSpot = nil
+    }
+
+    private func updateCursorOverlayAppearance(from appearance: CursorAppearancePayload) {
+        guard let image = NSImage(data: appearance.pngData) else { return }
+        cursorOverlayImage = image
+        cursorOverlayHotSpot = CGPoint(x: appearance.hotSpotX, y: appearance.hotSpotY)
     }
 
     private func requestRecoveryKeyFrame(failedFrameIndex: UInt64?, reason: String) {

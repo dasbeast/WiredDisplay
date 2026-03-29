@@ -103,6 +103,9 @@ final class SenderSessionCoordinator {
     private let frameDispatchGate = SenderFrameDispatchGate()
     private var cursorTrackingTimer: Timer?
     private var lastSentCursorState: CursorStatePayload?
+    private var lastSentCursorAppearanceSignature: UInt64?
+    private var cachedCursorAppearance: CursorAppearancePayload?
+    private var nextCursorAppearanceRefreshNanoseconds: UInt64 = 0
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -925,6 +928,9 @@ final class SenderSessionCoordinator {
         guard displayID != 0 else { return }
 
         lastSentCursorState = nil
+        lastSentCursorAppearanceSignature = nil
+        cachedCursorAppearance = nil
+        nextCursorAppearanceRefreshNanoseconds = 0
         let interval = 1.0 / Double(max(1, NetworkProtocol.cursorOverlayFramesPerSecond))
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -947,12 +953,16 @@ final class SenderSessionCoordinator {
                     timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
                     normalizedX: 0,
                     normalizedY: 0,
-                    isVisible: false
+                    isVisible: false,
+                    appearance: nil
                 )
             )
         }
 
         lastSentCursorState = nil
+        lastSentCursorAppearanceSignature = nil
+        cachedCursorAppearance = nil
+        nextCursorAppearanceRefreshNanoseconds = 0
     }
 
     private func pollCursorState(for displayID: CGDirectDisplayID) {
@@ -963,6 +973,9 @@ final class SenderSessionCoordinator {
         let nextState = currentCursorState(for: displayID)
         guard shouldSendCursorState(nextState) else { return }
         lastSentCursorState = nextState
+        if let appearance = nextState.appearance {
+            lastSentCursorAppearanceSignature = appearance.signature
+        }
         transportService.sendCursorState(nextState)
     }
 
@@ -971,7 +984,8 @@ final class SenderSessionCoordinator {
             timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
             normalizedX: 0,
             normalizedY: 0,
-            isVisible: false
+            isVisible: false,
+            appearance: nil
         )
 
         guard let screen = NSScreen.screens.first(where: { screen in
@@ -991,16 +1005,29 @@ final class SenderSessionCoordinator {
 
         let normalizedX = max(0, min(1, (mouseLocation.x - frame.minX) / frame.width))
         let normalizedY = max(0, min(1, (frame.maxY - mouseLocation.y) / frame.height))
+        let appearance = currentCursorAppearance(forceRefresh: lastSentCursorState == nil)
+        let appearanceToSend: CursorAppearancePayload?
+        if let appearance,
+           lastSentCursorState == nil || appearance.signature != lastSentCursorAppearanceSignature {
+            appearanceToSend = appearance
+        } else {
+            appearanceToSend = nil
+        }
 
         return CursorStatePayload(
             timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
             normalizedX: normalizedX,
             normalizedY: normalizedY,
-            isVisible: true
+            isVisible: true,
+            appearance: appearanceToSend
         )
     }
 
     private func shouldSendCursorState(_ nextState: CursorStatePayload) -> Bool {
+        if nextState.appearance != nil {
+            return true
+        }
+
         guard let lastSentCursorState else { return true }
         guard lastSentCursorState.isVisible == nextState.isVisible else { return true }
         guard nextState.isVisible else { return false }
@@ -1008,6 +1035,70 @@ final class SenderSessionCoordinator {
         let deltaX = abs(lastSentCursorState.normalizedX - nextState.normalizedX)
         let deltaY = abs(lastSentCursorState.normalizedY - nextState.normalizedY)
         return deltaX >= 0.0005 || deltaY >= 0.0005
+    }
+
+    private func currentCursorAppearance(forceRefresh: Bool) -> CursorAppearancePayload? {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if !forceRefresh,
+           nextCursorAppearanceRefreshNanoseconds > now,
+           let cachedCursorAppearance {
+            return cachedCursorAppearance
+        }
+
+        let intervalNanoseconds = UInt64(
+            1_000_000_000 / max(1, NetworkProtocol.cursorAppearanceRefreshFramesPerSecond)
+        )
+        nextCursorAppearanceRefreshNanoseconds = now + intervalNanoseconds
+
+        guard let appearance = sampleCurrentCursorAppearance() else {
+            return cachedCursorAppearance
+        }
+
+        cachedCursorAppearance = appearance
+        return appearance
+    }
+
+    private func sampleCurrentCursorAppearance() -> CursorAppearancePayload? {
+        let cursor = NSCursor.currentSystem ?? NSCursor.current
+        let image = cursor.image
+        var proposedRect = CGRect(origin: .zero, size: image.size)
+        guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
+            return nil
+        }
+
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
+            return nil
+        }
+
+        let hotSpot = cursor.hotSpot
+        return CursorAppearancePayload(
+            signature: cursorAppearanceSignature(pngData: pngData, hotSpot: hotSpot),
+            pngData: pngData,
+            hotSpotX: hotSpot.x,
+            hotSpotY: hotSpot.y
+        )
+    }
+
+    private func cursorAppearanceSignature(pngData: Data, hotSpot: CGPoint) -> UInt64 {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+
+        func mix(_ bytes: some Sequence<UInt8>) {
+            for byte in bytes {
+                hash ^= UInt64(byte)
+                hash &*= 1_099_511_628_211
+            }
+        }
+
+        mix(pngData)
+
+        var hotSpotX = Double(hotSpot.x).bitPattern.bigEndian
+        withUnsafeBytes(of: &hotSpotX) { mix($0) }
+
+        var hotSpotY = Double(hotSpot.y).bitPattern.bigEndian
+        withUnsafeBytes(of: &hotSpotY) { mix($0) }
+
+        return hash
     }
 }
 
