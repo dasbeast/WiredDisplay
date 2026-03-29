@@ -349,6 +349,7 @@ final class SenderSessionCoordinator {
 
         let captureWidth = effectiveCaptureWidth()
         let captureHeight = effectiveCaptureHeight()
+        let displayUsesHiDPI = effectiveDisplayUsesHiDPI()
 
         print("[Sender] Starting session: \(captureWidth)x\(captureHeight)")
         print(
@@ -367,7 +368,7 @@ final class SenderSessionCoordinator {
             width: captureWidth,
             height: captureHeight,
             refreshRate: Double(NetworkProtocol.captureFramesPerSecond),
-            hiDPI: targetUsesHiDPI
+            hiDPI: displayUsesHiDPI
         )
 
         print("[Sender] Virtual display created with ID: \(virtualDisplayID)")
@@ -687,6 +688,13 @@ final class SenderSessionCoordinator {
         return targetHeight
     }
 
+    private func effectiveDisplayUsesHiDPI() -> Bool {
+        if displayResolutionPreference == .fixedPreset {
+            return preferredDisplayPreset.usesHiDPI
+        }
+        return targetUsesHiDPI
+    }
+
     private func applyReceiverDisplayMetrics(_ displayMetrics: ReceiverDisplayMetrics?) {
         guard let displayMetrics else {
             print("[Sender] Receiver did not advertise display metrics; using fallback \(targetWidth)x\(targetHeight)")
@@ -742,9 +750,17 @@ final class SenderSessionCoordinator {
         case .fixedPreset:
             if let exact = modes.first(where: {
                 $0.pixelWidth == preferredDisplayPreset.pixelWidth &&
-                $0.pixelHeight == preferredDisplayPreset.pixelHeight
+                $0.pixelHeight == preferredDisplayPreset.pixelHeight &&
+                $0.isRetina == preferredDisplayPreset.usesHiDPI
             }) {
                 return exact
+            }
+
+            if let exactPixelSize = modes.first(where: {
+                $0.pixelWidth == preferredDisplayPreset.pixelWidth &&
+                $0.pixelHeight == preferredDisplayPreset.pixelHeight
+            }) {
+                return exactPixelSize
             }
 
             let targetPixelArea = preferredDisplayPreset.pixelWidth * preferredDisplayPreset.pixelHeight

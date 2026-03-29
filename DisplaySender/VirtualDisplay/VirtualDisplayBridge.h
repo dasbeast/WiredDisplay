@@ -36,12 +36,15 @@ NS_ASSUME_NONNULL_BEGIN
 /// Keys match availableModesForDisplay:.
 + (nullable NSDictionary *)activeModeForDisplay:(CGDirectDisplayID)displayID;
 
-/// Applies the first available mode whose pixel dimensions match pixelWidth × pixelHeight.
+/// Applies the first available mode whose logical and pixel dimensions match.
+/// Falls back to pixel dimensions only if an exact logical+pixel match is unavailable.
 /// Returns YES if the configuration was applied successfully.
 + (BOOL)applyModeForDisplay:(CGDirectDisplayID)displayID
+               logicalWidth:(unsigned int)logicalWidth
+              logicalHeight:(unsigned int)logicalHeight
                  pixelWidth:(unsigned int)pixelWidth
                 pixelHeight:(unsigned int)pixelHeight
-NS_SWIFT_NAME(applyMode(forDisplay:pixelWidth:pixelHeight:));
+NS_SWIFT_NAME(applyMode(forDisplay:logicalWidth:logicalHeight:pixelWidth:pixelHeight:));
 
 @end
 

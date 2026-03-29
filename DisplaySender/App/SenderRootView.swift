@@ -52,6 +52,7 @@ struct SenderRootView: View {
         NetworkProtocol.StreamingPipelinePreference(
             rawValue: UserDefaults.standard.string(forKey: SenderRootView.savedStreamingPipelinePreferenceKey) ?? ""
         ) ?? .automatic
+    @State private var isAdvancedResolutionsExpanded = false
 
     var body: some View {
         ScrollView {
@@ -69,9 +70,12 @@ struct SenderRootView: View {
         }
         .frame(minWidth: 800, minHeight: 540)
         .onAppear {
-            if let preset = VirtualDisplayPreset.commonPresets.first(where: { $0.id == selectedFixedDisplayPresetID }) {
-                coordinator.setPreferredDisplayPreset(preset)
+            let persistedPreset = VirtualDisplayPreset.preset(forID: selectedFixedDisplayPresetID) ?? .defaultFixed
+            if selectedFixedDisplayPresetID != persistedPreset.id {
+                selectedFixedDisplayPresetID = persistedPreset.id
+                UserDefaults.standard.set(persistedPreset.id, forKey: Self.savedFixedDisplayPresetKey)
             }
+            coordinator.setPreferredDisplayPreset(persistedPreset)
             coordinator.setDisplayResolutionPreference(selectedDisplayResolutionPreference)
             coordinator.setStreamingPipelinePreference(selectedStreamingPipelinePreference)
             coordinator.onChange = {
@@ -192,15 +196,77 @@ struct SenderRootView: View {
 
                 if selectedDisplayResolutionPreference == .fixedPreset {
                     Picker("Preset", selection: $selectedFixedDisplayPresetID) {
-                        ForEach(VirtualDisplayPreset.commonPresets) { preset in
+                        ForEach(VirtualDisplayPreset.standardPresets) { preset in
                             Text(preset.label).tag(preset.id)
                         }
                     }
                     .onChange(of: selectedFixedDisplayPresetID) { _, newID in
-                        guard let preset = VirtualDisplayPreset.commonPresets.first(where: { $0.id == newID }) else { return }
+                        guard let preset = VirtualDisplayPreset.preset(forID: newID) else { return }
                         UserDefaults.standard.set(newID, forKey: Self.savedFixedDisplayPresetKey)
                         coordinator.setPreferredDisplayPreset(preset)
                         refreshFromCoordinator()
+                    }
+
+                    VStack(alignment: .leading, spacing: 0) {
+                        Button {
+                            isAdvancedResolutionsExpanded.toggle()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isAdvancedResolutionsExpanded ? "chevron.down" : "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                Text("Advanced Resolutions")
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                            .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+
+                        if isAdvancedResolutionsExpanded {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("This exposes a much larger set of display modes, including non-HiDPI 4K, Retina variants, MacBook panel sizes, ultrawides, and higher-end panels like 6K and 8K-class experiments.")
+                                    .foregroundStyle(.secondary)
+                                    .font(.callout)
+
+                                Picker("All Presets", selection: $selectedFixedDisplayPresetID) {
+                                    ForEach(VirtualDisplayPreset.allPresets) { preset in
+                                        Text(preset.label).tag(preset.id)
+                                    }
+                                }
+                                .labelsHidden()
+                                .onChange(of: selectedFixedDisplayPresetID) { _, newID in
+                                    guard let preset = VirtualDisplayPreset.preset(forID: newID) else { return }
+                                    UserDefaults.standard.set(newID, forKey: Self.savedFixedDisplayPresetKey)
+                                    coordinator.setPreferredDisplayPreset(preset)
+                                    refreshFromCoordinator()
+                                }
+
+                                if !VirtualDisplayPreset.standardPresets.contains(selectedFixedDisplayPreset) {
+                                    Text("Selected advanced preset: \(selectedFixedDisplayPreset.label)")
+                                        .foregroundStyle(.secondary)
+                                        .font(.callout)
+                                }
+
+                                if isSessionActive && !coordinator.availableDisplayModes.isEmpty {
+                                    Text("Live modes macOS is currently advertising:")
+                                        .font(.callout.weight(.medium))
+                                    ScrollView {
+                                        LazyVStack(alignment: .leading, spacing: 4) {
+                                            ForEach(coordinator.availableDisplayModes) { mode in
+                                                Text(mode.label)
+                                                    .font(.system(.caption, design: .monospaced))
+                                                    .foregroundStyle(mode == coordinator.activeDisplayMode ? Color.accentColor : .secondary)
+                                            }
+                                        }
+                                    }
+                                    .frame(maxHeight: 140)
+                                }
+                            }
+                            .padding(.top, 6)
+                            .padding(.leading, 19)
+                        }
                     }
                 }
 
@@ -361,7 +427,7 @@ struct SenderRootView: View {
     }
 
     private var selectedFixedDisplayPreset: VirtualDisplayPreset {
-        VirtualDisplayPreset.commonPresets.first(where: { $0.id == selectedFixedDisplayPresetID }) ?? .defaultFixed
+        VirtualDisplayPreset.preset(forID: selectedFixedDisplayPresetID) ?? .defaultFixed
     }
 
     private var displayResolutionSummaryText: String {
