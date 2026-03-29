@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -14,14 +15,10 @@ struct ReceiverRootView: View {
                 MetalRenderSurfaceView()
                     .ignoresSafeArea()
 
-                if shouldShowDebugCursorMarker,
-                   let x = appController.cursorOverlayNormalizedX,
-                   let y = appController.cursorOverlayNormalizedY {
-                    ReceiverDebugCursorMarker()
-                        .position(
-                            x: max(0, min(geometry.size.width, CGFloat(x) * geometry.size.width)),
-                            y: max(0, min(geometry.size.height, CGFloat(y) * geometry.size.height))
-                        )
+                if shouldShowCursorOverlay,
+                   let overlayPosition = cursorOverlayPosition(in: geometry.size) {
+                    ReceiverCursorOverlayVisual()
+                        .position(overlayPosition)
                         .allowsHitTesting(false)
                 }
 
@@ -96,10 +93,63 @@ struct ReceiverRootView: View {
         }
     }
 
-    private var shouldShowDebugCursorMarker: Bool {
-        NetworkProtocol.useDebugCursorOverlayMarker &&
+    private var shouldShowCursorOverlay: Bool {
+        NetworkProtocol.enableReceiverSideCursorOverlay &&
+            NetworkProtocol.useSwiftUIReceiverCursorOverlay &&
             appController.isStreaming &&
             appController.isCursorOverlayVisible
+    }
+
+    private func cursorOverlayPosition(in size: CGSize) -> CGPoint? {
+        guard let normalizedX = appController.cursorOverlayNormalizedX,
+              let normalizedY = appController.cursorOverlayNormalizedY else {
+            return nil
+        }
+
+        let anchorPoint = CGPoint(
+            x: CGFloat(normalizedX) * size.width,
+            y: CGFloat(normalizedY) * size.height
+        )
+        let centerOffset = ReceiverCursorOverlayVisual.centerOffset
+        return CGPoint(
+            x: anchorPoint.x + centerOffset.x,
+            y: anchorPoint.y + centerOffset.y
+        )
+    }
+}
+
+private struct ReceiverCursorOverlayVisual: View {
+    private static let arrowCursorImage = NSCursor.arrow.image
+    private static let arrowImageSize = arrowCursorImage.size
+    private static let arrowHotSpotFromTop = CGPoint(
+        x: NSCursor.arrow.hotSpot.x,
+        y: max(0, arrowImageSize.height - NSCursor.arrow.hotSpot.y)
+    )
+
+    static var centerOffset: CGPoint {
+        if NetworkProtocol.useDebugCursorOverlayMarker {
+            return .zero
+        }
+
+        return CGPoint(
+            x: (arrowImageSize.width / 2.0) - arrowHotSpotFromTop.x,
+            y: (arrowImageSize.height / 2.0) - arrowHotSpotFromTop.y
+        )
+    }
+
+    var body: some View {
+        Group {
+            if NetworkProtocol.useDebugCursorOverlayMarker {
+                ReceiverDebugCursorMarker()
+            } else {
+                Image(nsImage: Self.arrowCursorImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: Self.arrowImageSize.width, height: Self.arrowImageSize.height)
+            }
+        }
+        .shadow(color: .black.opacity(NetworkProtocol.useDebugCursorOverlayMarker ? 0.45 : 0.15), radius: 6, x: 0, y: 2)
+        .accessibilityHidden(true)
     }
 }
 
@@ -122,6 +172,5 @@ private struct ReceiverDebugCursorMarker: View {
                 .fill(Color.white.opacity(0.95))
                 .frame(width: 3, height: 18)
         }
-        .shadow(color: .black.opacity(0.45), radius: 6, x: 0, y: 2)
     }
 }

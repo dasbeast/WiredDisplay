@@ -643,6 +643,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         private func makeCursorTexture(device: MTLDevice) -> (texture: MTLTexture, hotSpotFromTop: CGPoint)? {
+            guard !NetworkProtocol.useSwiftUIReceiverCursorOverlay else {
+                return nil
+            }
+
             if NetworkProtocol.useDebugCursorOverlayMarker {
                 return makeDebugCursorTexture(device: device)
             }
