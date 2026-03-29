@@ -113,6 +113,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var smoothedVelocityY: Double = 0
         /// Exponential-smoothing factor applied to new velocity samples.
         private let velocitySmoothingAlpha: Double = 0.35
+        /// Keep the hidden local cursor slightly inset so Universal Control does not
+        /// steal it when the visible mirrored cursor reaches a physical screen edge.
+        private let hiddenCursorEdgeInsetNormalized: CGFloat = 0.004
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -368,10 +371,30 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 x: cursorState.normalizedX,
                 y: cursorState.normalizedY
             )
+            let usingEdgeOverlayFallback = shouldUseEdgeOverlayFallback(for: normalizedPosition)
+            let usingSystemCursorMirror = usesSystemCursorMirror && !usingEdgeOverlayFallback
             let cursorPoint = CGPoint(
                 x: normalizedPosition.x * bounds.width,
                 y: normalizedPosition.y * bounds.height
             )
+            let hiddenCursorNormalizedPosition = clampedHiddenCursorPosition(for: normalizedPosition)
+            let hiddenCursorPoint = CGPoint(
+                x: hiddenCursorNormalizedPosition.x * bounds.width,
+                y: hiddenCursorNormalizedPosition.y * bounds.height
+            )
+
+            let presentationMode: String
+            if usingSystemCursorMirror {
+                presentationMode = "system-mirror"
+            } else if usingEdgeOverlayFallback {
+                presentationMode = "overlay-edge-fallback"
+            } else {
+                presentationMode = "overlay-fallback"
+            }
+            if lastLoggedCursorPresentationMode != presentationMode {
+                lastLoggedCursorPresentationMode = presentationMode
+                logCursorDebug("presentation mode -> \(presentationMode)")
+            }
 
             if usingSystemCursorMirror {
                 if systemCursorSignature != nil {
@@ -391,9 +414,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             if managesSystemCursorAppearance {
+                installTransparentSystemCursorIfNeeded()
                 applySystemCursorPosition(
-                    cursorPoint,
-                    normalizedPosition: normalizedPosition,
+                    hiddenCursorPoint,
+                    normalizedPosition: hiddenCursorNormalizedPosition,
                     forceReassertion: true
                 )
             }
@@ -581,6 +605,31 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             guard NetworkProtocol.useReceiverSystemCursorMirror, !prefersOverlayFallback else { return }
             prefersOverlayFallback = true
             logCursorDebug("activated overlay fallback after local cursor interference")
+            installTransparentSystemCursorIfNeeded()
+        }
+
+        private func shouldUseEdgeOverlayFallback(for normalizedPosition: CGPoint) -> Bool {
+            guard NetworkProtocol.useReceiverSystemCursorMirror else { return false }
+            let inset = hiddenCursorEdgeInsetNormalized
+            return normalizedPosition.x <= inset ||
+                normalizedPosition.x >= (1.0 - inset) ||
+                normalizedPosition.y <= inset ||
+                normalizedPosition.y >= (1.0 - inset)
+        }
+
+        private func clampedHiddenCursorPosition(for normalizedPosition: CGPoint) -> CGPoint {
+            let inset = hiddenCursorEdgeInsetNormalized
+            return CGPoint(
+                x: min(max(normalizedPosition.x, inset), 1.0 - inset),
+                y: min(max(normalizedPosition.y, inset), 1.0 - inset)
+            )
+        }
+
+        private func installTransparentSystemCursorIfNeeded() {
+            guard managesSystemCursorAppearance else { return }
+            if systemCursorSignature != nil {
+                logCursorDebug("installing transparent cursor")
+            }
             systemCursor = NSCursor(image: Self.transparentCursorImage, hotSpot: .zero)
             systemCursorSignature = nil
             window?.invalidateCursorRects(for: self)
@@ -623,11 +672,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             lastWarpedScreenPoint = nil
-            if systemCursorSignature != nil {
-                systemCursor = NSCursor(image: Self.transparentCursorImage, hotSpot: .zero)
-                systemCursorSignature = nil
-                window?.invalidateCursorRects(for: self)
-            }
+            installTransparentSystemCursorIfNeeded()
         }
 
         private func defaultArrowAppearance() -> CursorAppearancePayload {
