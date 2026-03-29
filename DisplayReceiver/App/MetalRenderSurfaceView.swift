@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import MetalKit
 import MetalFX
@@ -43,6 +44,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         struct Uniforms {
             float2 scale;
+            float2 offset;
         };
 
         struct VertexOut {
@@ -55,7 +57,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             constant Uniforms &uniforms [[buffer(1)]]
         ) {
             VertexOut out;
-            out.position = float4(in.position * uniforms.scale, 0.0, 1.0);
+            out.position = float4((in.position * uniforms.scale) + uniforms.offset, 0.0, 1.0);
             out.textureCoordinate = in.textureCoordinate;
             return out;
         }
@@ -100,6 +102,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var vertexBuffer: MTLBuffer?
         private var samplerState: MTLSamplerState?
         private var textureCache: CVMetalTextureCache?
+        private var cursorTexture: MTLTexture?
+        private var cursorHotSpotFromTop = CGPoint.zero
+        private let cursorOverlayMaxAgeNanoseconds: UInt64 = 250_000_000
 
         // Retain both planes per slot to prevent premature CVMetalTexture deallocation.
         private var retainedYTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
@@ -137,6 +142,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 colorPixelFormat: .bgra8Unorm,
                 fragmentFunctionName: "bgraQuadFragment"
             )
+            if let cursorAsset = makeCursorTexture(device: device) {
+                cursorTexture = cursorAsset.texture
+                cursorHotSpotFromTop = cursorAsset.hotSpotFromTop
+            }
 
             var newTextureCache: CVMetalTextureCache?
             let cacheStatus = CVMetalTextureCacheCreate(
@@ -270,7 +279,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             // For Pass 1, the intermediate texture matches the input resolution exactly —
             // no aspect-fit scaling needed; fill the entire intermediate surface.
-            var uniforms = RenderUniforms(scale: SIMD2<Float>(1.0, 1.0))
+            var uniforms = RenderUniforms(scale: SIMD2<Float>(1.0, 1.0), offset: SIMD2<Float>(0, 0))
 
             encodeRenderInput(
                 renderInput,
@@ -311,6 +320,17 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
             blitEncoder.copy(from: upscaledTexture, to: drawable.texture)
             blitEncoder.endEncoding()
+
+            drawCursorOverlayIfNeeded(
+                view: view,
+                commandBuffer: commandBuffer,
+                drawable: drawable,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                contentWidth: inputWidth,
+                contentHeight: inputHeight
+            )
 
             commandBuffer.present(drawable)
             commandBuffer.commit()
@@ -457,7 +477,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     contentWidth: renderInput.width,
                     contentHeight: renderInput.height,
                     drawableSize: view.drawableSize
-                )
+                ),
+                offset: SIMD2<Float>(0, 0)
             )
 
             encodeRenderInput(
@@ -469,9 +490,132 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 samplerState: samplerState,
                 uniforms: &uniforms
             )
+            encodeCursorOverlayIfNeeded(
+                view: view,
+                encoder: encoder,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                contentWidth: renderInput.width,
+                contentHeight: renderInput.height
+            )
             encoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
+        }
+
+        private func drawCursorOverlayIfNeeded(
+            view: MTKView,
+            commandBuffer: MTLCommandBuffer,
+            drawable: CAMetalDrawable,
+            bgraPipelineState: MTLRenderPipelineState,
+            vertexBuffer: MTLBuffer,
+            samplerState: MTLSamplerState,
+            contentWidth: Int,
+            contentHeight: Int
+        ) {
+            guard let renderPassDescriptor = view.currentRenderPassDescriptor else { return }
+            renderPassDescriptor.colorAttachments[0].loadAction = .load
+            renderPassDescriptor.colorAttachments[0].storeAction = .store
+            renderPassDescriptor.colorAttachments[0].texture = drawable.texture
+
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+                return
+            }
+
+            encodeCursorOverlayIfNeeded(
+                view: view,
+                encoder: encoder,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                contentWidth: contentWidth,
+                contentHeight: contentHeight
+            )
+            encoder.endEncoding()
+        }
+
+        private func encodeCursorOverlayIfNeeded(
+            view: MTKView,
+            encoder: MTLRenderCommandEncoder,
+            bgraPipelineState: MTLRenderPipelineState,
+            vertexBuffer: MTLBuffer,
+            samplerState: MTLSamplerState,
+            contentWidth: Int,
+            contentHeight: Int
+        ) {
+            guard let cursorTexture else { return }
+            guard let cursorState = ReceiverCursorStore.shared.snapshot(maxAgeNanoseconds: cursorOverlayMaxAgeNanoseconds),
+                  cursorState.isVisible else {
+                return
+            }
+
+            guard var uniforms = makeCursorUniforms(
+                cursorState: cursorState,
+                cursorTexture: cursorTexture,
+                drawableSize: view.drawableSize,
+                contentWidth: contentWidth,
+                contentHeight: contentHeight
+            ) else {
+                return
+            }
+
+            encoder.setRenderPipelineState(bgraPipelineState)
+            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
+            encoder.setFragmentTexture(cursorTexture, index: 0)
+            encoder.setFragmentTexture(nil, index: 1)
+            encoder.setFragmentSamplerState(samplerState, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+
+        private func makeCursorUniforms(
+            cursorState: ReceiverCursorState,
+            cursorTexture: MTLTexture,
+            drawableSize: CGSize,
+            contentWidth: Int,
+            contentHeight: Int
+        ) -> RenderUniforms? {
+            guard drawableSize.width > 0,
+                  drawableSize.height > 0,
+                  contentWidth > 0,
+                  contentHeight > 0 else {
+                return nil
+            }
+
+            let contentScale = makeAspectFitScale(
+                contentWidth: contentWidth,
+                contentHeight: contentHeight,
+                drawableSize: drawableSize
+            )
+
+            let contentMinX = -contentScale.x
+            let contentMaxY = contentScale.y
+            let hotspotClipX = contentMinX + Float(cursorState.normalizedX) * (contentScale.x * 2.0)
+            let hotspotClipY = contentMaxY - Float(cursorState.normalizedY) * (contentScale.y * 2.0)
+
+            let drawableWidth = Float(drawableSize.width)
+            let drawableHeight = Float(drawableSize.height)
+            let cursorWidth = Float(cursorTexture.width)
+            let cursorHeight = Float(cursorTexture.height)
+            guard cursorWidth > 0, cursorHeight > 0 else { return nil }
+
+            let hotSpotX = Float(max(0, min(CGFloat(cursorTexture.width), cursorHotSpotFromTop.x)))
+            let hotSpotYFromTop = Float(max(0, min(CGFloat(cursorTexture.height), cursorHotSpotFromTop.y)))
+
+            let offsetX = ((cursorWidth * 0.5) - hotSpotX) * 2.0 / drawableWidth
+            let offsetY = -(((cursorHeight * 0.5) - hotSpotYFromTop) * 2.0 / drawableHeight)
+
+            return RenderUniforms(
+                scale: SIMD2<Float>(
+                    cursorWidth / drawableWidth,
+                    cursorHeight / drawableHeight
+                ),
+                offset: SIMD2<Float>(
+                    hotspotClipX + offsetX,
+                    hotspotClipY + offsetY
+                )
+            )
         }
 
         private func makeVertexBuffer(device: MTLDevice) -> MTLBuffer? {
@@ -498,6 +642,77 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             return device.makeSamplerState(descriptor: descriptor)
         }
 
+        private func makeCursorTexture(device: MTLDevice) -> (texture: MTLTexture, hotSpotFromTop: CGPoint)? {
+            let image = NSCursor.arrow.image
+            var proposedRect = CGRect(origin: .zero, size: image.size)
+            guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
+                return nil
+            }
+
+            let width = cgImage.width
+            let height = cgImage.height
+            guard width > 0, height > 0 else { return nil }
+
+            let bytesPerRow = width * 4
+            var pixelData = Data(count: bytesPerRow * height)
+            let bitmapInfo = CGBitmapInfo.byteOrder32Little.union(.init(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue))
+
+            let didDraw = pixelData.withUnsafeMutableBytes { bytes -> Bool in
+                guard let baseAddress = bytes.baseAddress else { return false }
+                guard let context = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: bitmapInfo.rawValue
+                ) else {
+                    return false
+                }
+
+                context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+                context.translateBy(x: 0, y: CGFloat(height))
+                context.scaleBy(x: 1, y: -1)
+                context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+                return true
+            }
+
+            guard didDraw else { return nil }
+
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .managed
+
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                return nil
+            }
+
+            pixelData.withUnsafeBytes { bytes in
+                guard let baseAddress = bytes.baseAddress else { return }
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, width, height),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: bytesPerRow
+                )
+            }
+
+            let pixelScale = image.size.width > 0 ? CGFloat(width) / image.size.width : 1.0
+            let hotSpot = NSCursor.arrow.hotSpot
+            let hotSpotFromTop = CGPoint(
+                x: hotSpot.x * pixelScale,
+                y: max(0, CGFloat(height) - (hotSpot.y * pixelScale))
+            )
+
+            return (texture, hotSpotFromTop)
+        }
+
         private func makePipelineState(
             device: MTLDevice,
             colorPixelFormat: MTLPixelFormat,
@@ -510,6 +725,13 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 descriptor.fragmentFunction = library.makeFunction(name: fragmentFunctionName)
                 descriptor.vertexDescriptor = makeVertexDescriptor()
                 descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+                descriptor.colorAttachments[0].isBlendingEnabled = true
+                descriptor.colorAttachments[0].rgbBlendOperation = .add
+                descriptor.colorAttachments[0].alphaBlendOperation = .add
+                descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+                descriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+                descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+                descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
                 return try device.makeRenderPipelineState(descriptor: descriptor)
             } catch {
                 print("[MetalRenderSurfaceView] Failed to build render pipeline: \(error)")
@@ -689,6 +911,7 @@ private struct RenderVertex {
 
 private struct RenderUniforms {
     var scale: SIMD2<Float>
+    var offset: SIMD2<Float>
 }
 
 private enum RenderInput {

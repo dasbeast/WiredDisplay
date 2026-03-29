@@ -182,6 +182,8 @@ final class TransportService {
                 receiveTimestampNanoseconds: nil,
                 renderedFrameIndex: nil,
                 renderedFrameSenderTimestampNanoseconds: nil,
+                renderedFrameSenderEncodeTimestampNanoseconds: nil,
+                renderedFrameReceiverArrivalTimestampNanoseconds: nil,
                 renderedFrameReceiverTimestampNanoseconds: nil
             )
 
@@ -193,6 +195,24 @@ final class TransportService {
                 )
                 self.nextSequenceNumber += 1
                 try self.queueEnvelopeForSend(envelope, isKeyFrame: true)
+            } catch {
+                self.onError?(error)
+            }
+        }
+    }
+
+    func sendCursorState(_ cursorState: CursorStatePayload) {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            do {
+                let envelope = try NetworkEnvelope.make(
+                    type: .cursorState,
+                    sequenceNumber: self.nextSequenceNumber,
+                    payload: cursorState
+                )
+                self.nextSequenceNumber += 1
+                try self.queueEnvelopeForSend(envelope, isKeyFrame: false)
             } catch {
                 self.onError?(error)
             }

@@ -100,6 +100,8 @@ final class ListenerService {
         receiveTimestampNanoseconds: UInt64,
         renderedFrameIndex: UInt64?,
         renderedFrameSenderTimestampNanoseconds: UInt64?,
+        renderedFrameSenderEncodeTimestampNanoseconds: UInt64?,
+        renderedFrameReceiverArrivalTimestampNanoseconds: UInt64?,
         renderedFrameReceiverTimestampNanoseconds: UInt64?
     ) {
         let payload = HeartbeatPayload(
@@ -108,6 +110,8 @@ final class ListenerService {
             receiveTimestampNanoseconds: receiveTimestampNanoseconds,
             renderedFrameIndex: renderedFrameIndex,
             renderedFrameSenderTimestampNanoseconds: renderedFrameSenderTimestampNanoseconds,
+            renderedFrameSenderEncodeTimestampNanoseconds: renderedFrameSenderEncodeTimestampNanoseconds,
+            renderedFrameReceiverArrivalTimestampNanoseconds: renderedFrameReceiverArrivalTimestampNanoseconds,
             renderedFrameReceiverTimestampNanoseconds: renderedFrameReceiverTimestampNanoseconds
         )
 

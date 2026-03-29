@@ -40,6 +40,9 @@ struct SenderRootView: View {
     @State private var sentMegabitsPerSecondText = "-"
     @State private var heartbeatRoundTripText = "-"
     @State private var estimatedDisplayLatencyText = "-"
+    @State private var captureToEncodeLatencyText = "-"
+    @State private var encodeToReceiveLatencyText = "-"
+    @State private var receiveToRenderLatencyText = "-"
 
     @State private var endpointSummary = "-"
     @State private var negotiatedResolutionText = "-"
@@ -368,6 +371,9 @@ struct SenderRootView: View {
                         Text("Send Throughput: \(sentMegabitsPerSecondText)")
                         Text("Heartbeat RTT: \(heartbeatRoundTripText)")
                         Text("Est. Display Latency: \(estimatedDisplayLatencyText)")
+                        Text("Capture -> Encode: \(captureToEncodeLatencyText)")
+                        Text("Encode -> Receive: \(encodeToReceiveLatencyText)")
+                        Text("Receive -> Render: \(receiveToRenderLatencyText)")
                     }
                 }
 
@@ -508,6 +514,9 @@ struct SenderRootView: View {
         sentMegabitsPerSecondText = formatRate(coordinator.sentMegabitsPerSecond, unit: "Mbps")
         heartbeatRoundTripText = formatRate(coordinator.heartbeatRoundTripMilliseconds, unit: "ms")
         estimatedDisplayLatencyText = formatRate(coordinator.estimatedDisplayLatencyMilliseconds, unit: "ms")
+        captureToEncodeLatencyText = formatRate(coordinator.captureToEncodeLatencyMilliseconds, unit: "ms")
+        encodeToReceiveLatencyText = formatRate(coordinator.encodeToReceiveLatencyMilliseconds, unit: "ms")
+        receiveToRenderLatencyText = formatRate(coordinator.receiveToRenderLatencyMilliseconds, unit: "ms")
 
         endpointSummary = coordinator.configuredEndpointSummary
         videoTransportText = coordinator.negotiatedVideoTransportMode.rawValue.uppercased()

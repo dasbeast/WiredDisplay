@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Coordinates sender-side capture, encoding, and transport lifecycle.
@@ -51,6 +52,9 @@ final class SenderSessionCoordinator {
     private(set) var sentMegabitsPerSecond: Double? { didSet { onChange?() } }
     private(set) var heartbeatRoundTripMilliseconds: Double? { didSet { onChange?() } }
     private(set) var estimatedDisplayLatencyMilliseconds: Double? { didSet { onChange?() } }
+    private(set) var captureToEncodeLatencyMilliseconds: Double? { didSet { onChange?() } }
+    private(set) var encodeToReceiveLatencyMilliseconds: Double? { didSet { onChange?() } }
+    private(set) var receiveToRenderLatencyMilliseconds: Double? { didSet { onChange?() } }
     private(set) var requestedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp { didSet { onChange?() } }
     private(set) var negotiatedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp { didSet { onChange?() } }
     private(set) var streamingPipelinePreference: NetworkProtocol.StreamingPipelinePreference = .automatic { didSet { onChange?() } }
@@ -97,6 +101,8 @@ final class SenderSessionCoordinator {
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
     private let frameDispatchGate = SenderFrameDispatchGate()
+    private var cursorTrackingTimer: Timer?
+    private var lastSentCursorState: CursorStatePayload?
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -312,6 +318,9 @@ final class SenderSessionCoordinator {
         sentMegabitsPerSecond = nil
         heartbeatRoundTripMilliseconds = nil
         estimatedDisplayLatencyMilliseconds = nil
+        captureToEncodeLatencyMilliseconds = nil
+        encodeToReceiveLatencyMilliseconds = nil
+        receiveToRenderLatencyMilliseconds = nil
         estimatedReceiverClockOffsetNanoseconds = nil
         lastRecoveryKeyFrameRequestAt = nil
         outboundWindowStartNanoseconds = nil
@@ -324,6 +333,7 @@ final class SenderSessionCoordinator {
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
         state = .connecting
+        stopCursorTracking(sendHiddenState: false)
         captureService.stopCapture()
         // Wait until the receiver explicitly negotiates UDP before opening the datagram path.
         // Pre-connecting here can fail before the handshake finishes and strand the sender
@@ -375,6 +385,9 @@ final class SenderSessionCoordinator {
 
         // Point capture at the virtual display (or fall back to main display).
         captureService.targetDisplayID = virtualDisplayID
+        if NetworkProtocol.enableReceiverSideCursorOverlay {
+            startCursorTracking(for: virtualDisplayID)
+        }
 
         // Stage 1 (0.25s): CGDisplayCopyAllDisplayModes needs a moment after virtual display
         // creation before it returns the advertised modes. Query modes here and apply the
@@ -420,7 +433,8 @@ final class SenderSessionCoordinator {
                     width: liveMode?.pixelWidth ?? captureWidth,
                     height: liveMode?.pixelHeight ?? captureHeight,
                     framesPerSecond: NetworkProtocol.captureFramesPerSecond,
-                    streamingPipelineMode: self.resolvedStreamingPipelineMode
+                    streamingPipelineMode: self.resolvedStreamingPipelineMode,
+                    showsCursor: !NetworkProtocol.enableReceiverSideCursorOverlay
                 )
             }
         }
@@ -447,7 +461,8 @@ final class SenderSessionCoordinator {
                 width: live.pixelWidth,
                 height: live.pixelHeight,
                 framesPerSecond: NetworkProtocol.captureFramesPerSecond,
-                streamingPipelineMode: self.resolvedStreamingPipelineMode
+                streamingPipelineMode: self.resolvedStreamingPipelineMode,
+                showsCursor: !NetworkProtocol.enableReceiverSideCursorOverlay
             )
         }
     }
@@ -456,6 +471,7 @@ final class SenderSessionCoordinator {
     func stopSession() {
         shouldMaintainConnection = false
         stopHeartbeatTimers()
+        stopCursorTracking(sendHiddenState: true)
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
         videoDatagramTransportService.disconnect()
@@ -465,6 +481,9 @@ final class SenderSessionCoordinator {
         sentMegabitsPerSecond = nil
         heartbeatRoundTripMilliseconds = nil
         estimatedDisplayLatencyMilliseconds = nil
+        captureToEncodeLatencyMilliseconds = nil
+        encodeToReceiveLatencyMilliseconds = nil
+        receiveToRenderLatencyMilliseconds = nil
         estimatedReceiverClockOffsetNanoseconds = nil
         lastRecoveryKeyFrameRequestAt = nil
         awaitingUDPReadyToStart = false
@@ -591,6 +610,8 @@ final class SenderSessionCoordinator {
             case .requestKeyFrame:
                 _ = try envelope.decodePayload(as: KeyFrameRequestPayload.self)
                 requestRecoveryKeyFrameIfNeeded(minimumIntervalSeconds: 0)
+            case .cursorState:
+                break
             default:
                 break
             }
@@ -640,6 +661,9 @@ final class SenderSessionCoordinator {
         state = .connecting
         heartbeatRoundTripMilliseconds = nil
         estimatedDisplayLatencyMilliseconds = nil
+        captureToEncodeLatencyMilliseconds = nil
+        encodeToReceiveLatencyMilliseconds = nil
+        receiveToRenderLatencyMilliseconds = nil
         estimatedReceiverClockOffsetNanoseconds = nil
         lastRecoveryKeyFrameRequestAt = nil
         awaitingUDPReadyToStart = false
@@ -648,6 +672,7 @@ final class SenderSessionCoordinator {
         availableDisplayModes = []
         activeDisplayMode = nil
         stopHeartbeatTimers()
+        stopCursorTracking(sendHiddenState: false)
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
         videoDatagramTransportService.disconnect()
@@ -856,21 +881,133 @@ final class SenderSessionCoordinator {
             )
         }
 
-        guard let displayLatencyMilliseconds = evaluation.displayLatencyMilliseconds else {
-            return
+        if let displayLatencyMilliseconds = evaluation.displayLatencyMilliseconds {
+            estimatedDisplayLatencyMilliseconds = smoothMetric(
+                current: estimatedDisplayLatencyMilliseconds,
+                sample: displayLatencyMilliseconds,
+                alpha: 0.15
+            )
         }
 
-        estimatedDisplayLatencyMilliseconds = smoothMetric(
-            current: estimatedDisplayLatencyMilliseconds,
-            sample: displayLatencyMilliseconds,
-            alpha: 0.15
-        )
+        if let captureToEncodeMilliseconds = evaluation.captureToEncodeMilliseconds {
+            self.captureToEncodeLatencyMilliseconds = smoothMetric(
+                current: self.captureToEncodeLatencyMilliseconds,
+                sample: captureToEncodeMilliseconds,
+                alpha: 0.18
+            )
+        }
+
+        if let encodeToReceiveMilliseconds = evaluation.encodeToReceiveMilliseconds {
+            self.encodeToReceiveLatencyMilliseconds = smoothMetric(
+                current: self.encodeToReceiveLatencyMilliseconds,
+                sample: encodeToReceiveMilliseconds,
+                alpha: 0.18
+            )
+        }
+
+        if let receiveToRenderMilliseconds = evaluation.receiveToRenderMilliseconds {
+            self.receiveToRenderLatencyMilliseconds = smoothMetric(
+                current: self.receiveToRenderLatencyMilliseconds,
+                sample: receiveToRenderMilliseconds,
+                alpha: 0.18
+            )
+        }
     }
 
     private func smoothMetric(current: Double?, sample: Double, alpha: Double) -> Double {
         guard sample.isFinite else { return current ?? 0 }
         guard let current else { return sample }
         return (alpha * sample) + ((1.0 - alpha) * current)
+    }
+
+    private func startCursorTracking(for displayID: CGDirectDisplayID) {
+        stopCursorTracking(sendHiddenState: false)
+        guard displayID != 0 else { return }
+
+        lastSentCursorState = nil
+        let interval = 1.0 / Double(max(1, NetworkProtocol.cursorOverlayFramesPerSecond))
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.pollCursorState(for: displayID)
+            }
+        }
+        timer.tolerance = interval * 0.20
+        cursorTrackingTimer = timer
+    }
+
+    private func stopCursorTracking(sendHiddenState: Bool) {
+        cursorTrackingTimer?.invalidate()
+        cursorTrackingTimer = nil
+
+        if sendHiddenState,
+           NetworkProtocol.enableReceiverSideCursorOverlay,
+           state == .running || state == .connected {
+            transportService.sendCursorState(
+                CursorStatePayload(
+                    timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                    normalizedX: 0,
+                    normalizedY: 0,
+                    isVisible: false
+                )
+            )
+        }
+
+        lastSentCursorState = nil
+    }
+
+    private func pollCursorState(for displayID: CGDirectDisplayID) {
+        guard NetworkProtocol.enableReceiverSideCursorOverlay else { return }
+        guard state == .running else { return }
+        guard virtualDisplayService.displayID == displayID else { return }
+
+        let nextState = currentCursorState(for: displayID)
+        guard shouldSendCursorState(nextState) else { return }
+        lastSentCursorState = nextState
+        transportService.sendCursorState(nextState)
+    }
+
+    private func currentCursorState(for displayID: CGDirectDisplayID) -> CursorStatePayload {
+        let hiddenState = CursorStatePayload(
+            timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            normalizedX: 0,
+            normalizedY: 0,
+            isVisible: false
+        )
+
+        guard let screen = NSScreen.screens.first(where: { screen in
+            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
+            return CGDirectDisplayID(screenNumber.uint32Value) == displayID
+        }) else {
+            return hiddenState
+        }
+
+        let frame = screen.frame
+        guard frame.width > 0, frame.height > 0 else { return hiddenState }
+
+        let mouseLocation = NSEvent.mouseLocation
+        guard frame.contains(mouseLocation) else { return hiddenState }
+
+        let normalizedX = max(0, min(1, (mouseLocation.x - frame.minX) / frame.width))
+        let normalizedY = max(0, min(1, (frame.maxY - mouseLocation.y) / frame.height))
+
+        return CursorStatePayload(
+            timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            normalizedX: normalizedX,
+            normalizedY: normalizedY,
+            isVisible: true
+        )
+    }
+
+    private func shouldSendCursorState(_ nextState: CursorStatePayload) -> Bool {
+        guard let lastSentCursorState else { return true }
+        guard lastSentCursorState.isVisible == nextState.isVisible else { return true }
+        guard nextState.isVisible else { return false }
+
+        let deltaX = abs(lastSentCursorState.normalizedX - nextState.normalizedX)
+        let deltaY = abs(lastSentCursorState.normalizedY - nextState.normalizedY)
+        return deltaX >= 0.0005 || deltaY >= 0.0005
     }
 }
 

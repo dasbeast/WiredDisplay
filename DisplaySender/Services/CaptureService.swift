@@ -34,7 +34,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         width: Int,
         height: Int,
         framesPerSecond: Int = 60,
-        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode = .adaptiveUpscale
+        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode = .adaptiveUpscale,
+        showsCursor: Bool = true
     ) {
         stopCapture()
 
@@ -55,7 +56,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
                     width: width,
                     height: height,
                     framesPerSecond: framesPerSecond,
-                    streamingPipelineMode: streamingPipelineMode
+                    streamingPipelineMode: streamingPipelineMode,
+                    showsCursor: showsCursor
                 )
             } catch {
                 print("[CaptureService] SCStream failed: \(error). Falling back to synthetic capture.")
@@ -85,7 +87,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         width: Int,
         height: Int,
         framesPerSecond: Int,
-        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode
+        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode,
+        showsCursor: Bool
     ) async throws {
         let available = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
 
@@ -179,7 +182,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
             configuration.captureResolution = .best
         }
         configuration.queueDepth = 3
-        configuration.showsCursor = true
+        configuration.showsCursor = showsCursor
 
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)

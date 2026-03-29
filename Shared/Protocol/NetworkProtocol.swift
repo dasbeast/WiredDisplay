@@ -17,6 +17,8 @@ enum NetworkProtocol {
     static let targetFramesPerSecond: Int = 60
     static let keyFrameIntervalSeconds: Int = 1
     static let captureFramesPerSecond: Int = 60
+    static let cursorOverlayFramesPerSecond: Int = 120
+    static let enableReceiverSideCursorOverlay: Bool = true
     static let videoDatagramChunkPayloadBytes: Int = 1400
     static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 150_000_000
     static let videoDatagramMaxOutstandingFrames: Int = 3
@@ -189,6 +191,7 @@ enum NetworkProtocol {
         case heartbeat = 3
         case videoFrame = 4
         case requestKeyFrame = 5
+        case cursorState = 6
     }
 
     enum VideoTransportMode: String, Codable, Sendable {
@@ -323,14 +326,49 @@ struct HeartbeatPayload: Codable, Sendable {
     let renderedFrameIndex: UInt64?
     /// Sender-side capture timestamp for the most recently rendered frame.
     let renderedFrameSenderTimestampNanoseconds: UInt64?
+    /// Sender-side encode-complete timestamp for the most recently rendered frame.
+    let renderedFrameSenderEncodeTimestampNanoseconds: UInt64?
+    /// Receiver-local arrival timestamp for the most recently rendered frame.
+    let renderedFrameReceiverArrivalTimestampNanoseconds: UInt64?
     /// Receiver-local render timestamp for the most recently rendered frame.
     let renderedFrameReceiverTimestampNanoseconds: UInt64?
+
+    init(
+        transmitTimestampNanoseconds: UInt64,
+        originTimestampNanoseconds: UInt64? = nil,
+        receiveTimestampNanoseconds: UInt64? = nil,
+        renderedFrameIndex: UInt64? = nil,
+        renderedFrameSenderTimestampNanoseconds: UInt64? = nil,
+        renderedFrameSenderEncodeTimestampNanoseconds: UInt64? = nil,
+        renderedFrameReceiverArrivalTimestampNanoseconds: UInt64? = nil,
+        renderedFrameReceiverTimestampNanoseconds: UInt64? = nil
+    ) {
+        self.transmitTimestampNanoseconds = transmitTimestampNanoseconds
+        self.originTimestampNanoseconds = originTimestampNanoseconds
+        self.receiveTimestampNanoseconds = receiveTimestampNanoseconds
+        self.renderedFrameIndex = renderedFrameIndex
+        self.renderedFrameSenderTimestampNanoseconds = renderedFrameSenderTimestampNanoseconds
+        self.renderedFrameSenderEncodeTimestampNanoseconds = renderedFrameSenderEncodeTimestampNanoseconds
+        self.renderedFrameReceiverArrivalTimestampNanoseconds = renderedFrameReceiverArrivalTimestampNanoseconds
+        self.renderedFrameReceiverTimestampNanoseconds = renderedFrameReceiverTimestampNanoseconds
+    }
+}
+
+/// Sender -> receiver cursor sidecar used to render a low-latency pointer overlay.
+struct CursorStatePayload: Codable, Equatable, Sendable {
+    let timestampNanoseconds: UInt64
+    let normalizedX: Double
+    let normalizedY: Double
+    let isVisible: Bool
 }
 
 struct SenderHeartbeatEvaluation: Equatable, Sendable {
     let roundTripMilliseconds: Double
     let receiverClockOffsetNanoseconds: Int64
     let displayLatencyMilliseconds: Double?
+    let captureToEncodeMilliseconds: Double?
+    let encodeToReceiveMilliseconds: Double?
+    let receiveToRenderMilliseconds: Double?
     let shouldClearAwaitingFirstRenderedFrame: Bool
     let shouldRequestRecoveryKeyFrame: Bool
 }
@@ -374,6 +412,9 @@ extension NetworkProtocol {
             heartbeat.renderedFrameIndex == nil
 
         let displayLatencyMilliseconds: Double?
+        let captureToEncodeMilliseconds: Double?
+        let encodeToReceiveMilliseconds: Double?
+        let receiveToRenderMilliseconds: Double?
         if let renderedFrameSenderTimestampNanoseconds = heartbeat.renderedFrameSenderTimestampNanoseconds,
            let renderedFrameReceiverTimestampNanoseconds = heartbeat.renderedFrameReceiverTimestampNanoseconds {
             let senderTimestampOnReceiverClock =
@@ -389,10 +430,48 @@ extension NetworkProtocol {
             displayLatencyMilliseconds = nil
         }
 
+        if let renderedFrameSenderEncodeTimestampNanoseconds = heartbeat.renderedFrameSenderEncodeTimestampNanoseconds,
+           let renderedFrameSenderTimestampNanoseconds = heartbeat.renderedFrameSenderTimestampNanoseconds,
+           renderedFrameSenderEncodeTimestampNanoseconds >= renderedFrameSenderTimestampNanoseconds {
+            captureToEncodeMilliseconds = Double(
+                renderedFrameSenderEncodeTimestampNanoseconds - renderedFrameSenderTimestampNanoseconds
+            ) / 1_000_000.0
+        } else {
+            captureToEncodeMilliseconds = nil
+        }
+
+        if let renderedFrameSenderEncodeTimestampNanoseconds = heartbeat.renderedFrameSenderEncodeTimestampNanoseconds,
+           let renderedFrameReceiverArrivalTimestampNanoseconds = heartbeat.renderedFrameReceiverArrivalTimestampNanoseconds {
+            let encodeTimestampOnReceiverClock =
+                Int64(renderedFrameSenderEncodeTimestampNanoseconds) + receiverClockOffsetNanoseconds
+            let encodeToReceiveNanoseconds =
+                Int64(renderedFrameReceiverArrivalTimestampNanoseconds) - encodeTimestampOnReceiverClock
+            if encodeToReceiveNanoseconds >= 0 {
+                encodeToReceiveMilliseconds = Double(encodeToReceiveNanoseconds) / 1_000_000.0
+            } else {
+                encodeToReceiveMilliseconds = nil
+            }
+        } else {
+            encodeToReceiveMilliseconds = nil
+        }
+
+        if let renderedFrameReceiverArrivalTimestampNanoseconds = heartbeat.renderedFrameReceiverArrivalTimestampNanoseconds,
+           let renderedFrameReceiverTimestampNanoseconds = heartbeat.renderedFrameReceiverTimestampNanoseconds,
+           renderedFrameReceiverTimestampNanoseconds >= renderedFrameReceiverArrivalTimestampNanoseconds {
+            receiveToRenderMilliseconds = Double(
+                renderedFrameReceiverTimestampNanoseconds - renderedFrameReceiverArrivalTimestampNanoseconds
+            ) / 1_000_000.0
+        } else {
+            receiveToRenderMilliseconds = nil
+        }
+
         return SenderHeartbeatEvaluation(
             roundTripMilliseconds: Double(roundTripNanoseconds) / 1_000_000.0,
             receiverClockOffsetNanoseconds: receiverClockOffsetNanoseconds,
             displayLatencyMilliseconds: displayLatencyMilliseconds,
+            captureToEncodeMilliseconds: captureToEncodeMilliseconds,
+            encodeToReceiveMilliseconds: encodeToReceiveMilliseconds,
+            receiveToRenderMilliseconds: receiveToRenderMilliseconds,
             shouldClearAwaitingFirstRenderedFrame: shouldClearAwaitingFirstRenderedFrame,
             shouldRequestRecoveryKeyFrame: shouldRequestRecoveryKeyFrame
         )
@@ -452,6 +531,7 @@ struct KeyFrameRequestPayload: Codable, Sendable {
 struct BinaryFrameHeader: Codable, Sendable {
     let frameIndex: UInt64
     let timestampNanoseconds: UInt64
+    let encodeCompleteTimestampNanoseconds: UInt64?
     let width: Int
     let height: Int
     let isKeyFrame: Bool
@@ -487,6 +567,7 @@ enum BinaryFrameWire {
         let header = BinaryFrameHeader(
             frameIndex: encodedFrame.metadata.frameIndex,
             timestampNanoseconds: encodedFrame.metadata.timestampNanoseconds,
+            encodeCompleteTimestampNanoseconds: encodedFrame.metadata.encodeCompleteTimestampNanoseconds,
             width: encodedFrame.metadata.width,
             height: encodedFrame.metadata.height,
             isKeyFrame: encodedFrame.isKeyFrame,

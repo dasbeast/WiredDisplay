@@ -46,3 +46,45 @@ final class RenderFrameStore {
         return count
     }
 }
+
+struct ReceiverCursorState: Equatable {
+    let timestampNanoseconds: UInt64
+    let normalizedX: Double
+    let normalizedY: Double
+    let isVisible: Bool
+}
+
+/// Thread-safe cursor state store shared between receiver control handling and presentation.
+final class ReceiverCursorStore {
+    static let shared = ReceiverCursorStore()
+
+    private let lock = NSLock()
+    private var latestState: ReceiverCursorState?
+
+    private init() {}
+
+    func reset() {
+        lock.lock()
+        latestState = nil
+        lock.unlock()
+    }
+
+    func update(state: ReceiverCursorState) {
+        lock.lock()
+        latestState = state
+        lock.unlock()
+    }
+
+    func snapshot(maxAgeNanoseconds: UInt64? = nil) -> ReceiverCursorState? {
+        lock.lock()
+        let state = latestState
+        lock.unlock()
+
+        guard let state else { return nil }
+        guard let maxAgeNanoseconds else { return state }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now >= state.timestampNanoseconds else { return state }
+        return (now - state.timestampNanoseconds) <= maxAgeNanoseconds ? state : nil
+    }
+}

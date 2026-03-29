@@ -118,6 +118,7 @@ final class ReceiverSessionCoordinator {
                 self.audioPlaybackService.stop()
                 self.frameDecodePipeline.reset()
                 RenderFrameStore.shared.reset()
+                ReceiverCursorStore.shared.reset()
                 if case .running = self.state {
                     self.state = .listening
                 }
@@ -217,6 +218,7 @@ final class ReceiverSessionCoordinator {
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
         frameDecodePipeline.reset()
         RenderFrameStore.shared.reset()
+        ReceiverCursorStore.shared.reset()
 
         renderService.prepareRenderer()
         audioPlaybackService.prepare()
@@ -228,6 +230,7 @@ final class ReceiverSessionCoordinator {
     func stopListening() {
         frameDecodePipeline.reset()
         audioPlaybackService.stop()
+        ReceiverCursorStore.shared.reset()
         listenerService.stopListening()
         videoDatagramListenerService.stopListening()
         state = .idle
@@ -239,6 +242,7 @@ final class ReceiverSessionCoordinator {
             case .hello:
                 frameDecodePipeline.reset()
                 RenderFrameStore.shared.reset()
+                ReceiverCursorStore.shared.reset()
                 let hello = try envelope.decodePayload(as: HelloPayload.self)
                 peerName = hello.senderName
                 if hello.requestedProtocolVersion == NetworkProtocol.protocolVersion {
@@ -270,7 +274,19 @@ final class ReceiverSessionCoordinator {
                     receiveTimestampNanoseconds: receiveTimestampNanoseconds,
                     renderedFrameIndex: lastRenderedFrameTelemetry?.frameIndex,
                     renderedFrameSenderTimestampNanoseconds: lastRenderedFrameTelemetry?.senderTimestampNanoseconds,
+                    renderedFrameSenderEncodeTimestampNanoseconds: lastRenderedFrameTelemetry?.senderEncodeTimestampNanoseconds,
+                    renderedFrameReceiverArrivalTimestampNanoseconds: lastRenderedFrameTelemetry?.receiverArrivalTimestampNanoseconds,
                     renderedFrameReceiverTimestampNanoseconds: lastRenderedFrameTelemetry?.receiverRenderTimestampNanoseconds
+                )
+            case .cursorState:
+                let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
+                ReceiverCursorStore.shared.update(
+                    state: ReceiverCursorState(
+                        timestampNanoseconds: cursorState.timestampNanoseconds,
+                        normalizedX: cursorState.normalizedX,
+                        normalizedY: cursorState.normalizedY,
+                        isVisible: cursorState.isVisible
+                    )
                 )
             case .videoFrame:
                 break
@@ -291,6 +307,8 @@ final class ReceiverSessionCoordinator {
         lastRenderedFrameTelemetry = ReceiverRenderedFrameTelemetry(
             frameIndex: update.metadata.frameIndex,
             senderTimestampNanoseconds: update.metadata.timestampNanoseconds,
+            senderEncodeTimestampNanoseconds: update.metadata.encodeCompleteTimestampNanoseconds,
+            receiverArrivalTimestampNanoseconds: update.arrivalNanoseconds,
             receiverRenderTimestampNanoseconds: update.renderTimestampNanoseconds
         )
         receivedFrameCount += 1
@@ -401,6 +419,8 @@ private struct ReceiverRenderResult {
 private struct ReceiverRenderedFrameTelemetry {
     let frameIndex: UInt64
     let senderTimestampNanoseconds: UInt64
+    let senderEncodeTimestampNanoseconds: UInt64?
+    let receiverArrivalTimestampNanoseconds: UInt64
     let receiverRenderTimestampNanoseconds: UInt64
 }
 
@@ -681,6 +701,7 @@ private final class ReceiverFrameDecodePipeline {
         let metadata = FrameMetadata(
             frameIndex: header.frameIndex,
             timestampNanoseconds: header.timestampNanoseconds,
+            encodeCompleteTimestampNanoseconds: header.encodeCompleteTimestampNanoseconds,
             width: header.width,
             height: header.height,
             isKeyFrame: header.isKeyFrame
