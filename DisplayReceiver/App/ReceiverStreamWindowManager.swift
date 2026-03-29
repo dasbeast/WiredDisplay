@@ -106,7 +106,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
 
         NSApplication.shared.presentationOptions = [
             .autoHideDock,
-            .hideMenuBar,
+            .autoHideMenuBar,
             .disableMenuBarTransparency
         ]
     }
