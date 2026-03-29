@@ -103,7 +103,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var lastWarpedScreenPoint: CGPoint?
         private var cursorHiddenSinceNanoseconds: UInt64?
         private var needsCursorReassertion = false
+        private var prefersOverlayFallback = false
         private var trackingArea: NSTrackingArea?
+        private var lastLoggedCursorPresentationMode: String?
+        private var lastLoggedCursorVisibility: Bool?
 
         /// Smoothed velocity (normalised units / nanosecond) used for cursor prediction.
         private var smoothedVelocityX: Double = 0
@@ -142,7 +145,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         override func resetCursorRects() {
             super.resetCursorRects()
-            guard NetworkProtocol.useReceiverSystemCursorMirror else { return }
+            guard managesSystemCursorAppearance else { return }
             addCursorRect(bounds, cursor: systemCursor)
         }
 
@@ -172,8 +175,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             if isHidden {
                 cursorImageView.isHidden = true
             }
-            if NetworkProtocol.useReceiverSystemCursorMirror {
+            if usesSystemCursorMirror {
                 cursorImageView.isHidden = true
+            }
+            if managesSystemCursorAppearance {
                 window?.invalidateCursorRects(for: self)
             }
             syncPresentationDriverState()
@@ -321,14 +326,17 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             let now = DispatchTime.now().uptimeNanoseconds
+            let usingSystemCursorMirror = usesSystemCursorMirror
             guard let cursorState = ReceiverCursorStore.shared.snapshot(),
                   cursorState.isVisible else {
-                if NetworkProtocol.useReceiverSystemCursorMirror {
+                logCursorVisibilityIfNeeded(false, detail: "no visible cursor snapshot")
+                if managesSystemCursorAppearance {
                     if cursorHiddenSinceNanoseconds == nil {
                         cursorHiddenSinceNanoseconds = now
                     }
                     let hiddenDuration = now - (cursorHiddenSinceNanoseconds ?? now)
                     if hiddenDuration >= 120_000_000 {
+                        logCursorDebug("installing transparent cursor after hidden grace period")
                         ensureSystemCursorHidden()
                     }
                 }
@@ -336,11 +344,17 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
             cursorHiddenSinceNanoseconds = nil
+            logCursorVisibilityIfNeeded(true, detail: usingSystemCursorMirror ? "system-mirror" : "overlay-fallback")
+            let presentationMode = usingSystemCursorMirror ? "system-mirror" : "overlay-fallback"
+            if lastLoggedCursorPresentationMode != presentationMode {
+                lastLoggedCursorPresentationMode = presentationMode
+                logCursorDebug("presentation mode -> \(presentationMode)")
+            }
 
             // Bug 1 recovery: if the cursor was previously hidden (systemCursorSignature
             // was cleared by ensureSystemCursorHidden) but the cursor is now visible again,
             // force the appearance update to re-establish the non-transparent cursor rect.
-            if NetworkProtocol.useReceiverSystemCursorMirror, systemCursorSignature == nil {
+            if usingSystemCursorMirror, systemCursorSignature == nil {
                 displayedAppearanceSignature = nil
                 needsCursorReassertion = true
             }
@@ -359,7 +373,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 y: normalizedPosition.y * bounds.height
             )
 
-            if NetworkProtocol.useReceiverSystemCursorMirror {
+            if usingSystemCursorMirror {
                 if systemCursorSignature != nil {
                     if needsCursorReassertion {
                         window?.invalidateCursorRects(for: self)
@@ -374,6 +388,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 )
                 cursorImageView.isHidden = true
                 return
+            }
+
+            if managesSystemCursorAppearance {
+                applySystemCursorPosition(
+                    cursorPoint,
+                    normalizedPosition: normalizedPosition,
+                    forceReassertion: true
+                )
             }
 
             let cursorOrigin = CGPoint(
@@ -448,13 +470,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         // MARK: - Cursor appearance
 
         private func updateCursorAppearanceIfNeeded(from appearance: CursorAppearancePayload?) -> Bool {
+            let usingSystemCursorMirror = usesSystemCursorMirror
             if NetworkProtocol.useDebugCursorOverlayMarker {
                 if displayedAppearanceSignature != UInt64.max {
                     cursorImageView.image = makeDebugCursorImage()
                     displayedAppearanceSignature = UInt64.max
                     displayedCursorSize = CGSize(width: 28, height: 28)
                     displayedHotSpot = CGPoint(x: 14, y: 14)
-                    if NetworkProtocol.useReceiverSystemCursorMirror {
+                    if usingSystemCursorMirror {
                         systemCursor = NSCursor(image: makeDebugCursorImage(), hotSpot: displayedHotSpot)
                         systemCursorSignature = UInt64.max
                         window?.invalidateCursorRects(for: self)
@@ -465,7 +488,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             let resolvedAppearance = appearance ?? defaultArrowAppearance()
             if displayedAppearanceSignature == resolvedAppearance.signature,
-               (!NetworkProtocol.useReceiverSystemCursorMirror || systemCursorSignature == resolvedAppearance.signature) {
+               (!usingSystemCursorMirror || systemCursorSignature == resolvedAppearance.signature) {
                 return true
             }
             guard let image = NSImage(data: resolvedAppearance.pngData) else { return false }
@@ -481,7 +504,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 x: resolvedAppearance.hotSpotX,
                 y: resolvedAppearance.hotSpotY
             )
-            if NetworkProtocol.useReceiverSystemCursorMirror {
+            if usingSystemCursorMirror {
                 systemCursor = NSCursor(image: image, hotSpot: displayedHotSpot)
                 systemCursorSignature = resolvedAppearance.signature
                 window?.invalidateCursorRects(for: self)
@@ -516,6 +539,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                let currentSystemCursorPoint,
                abs(currentSystemCursorPoint.x - lastWarpedScreenPoint.x) > 2.0 ||
                abs(currentSystemCursorPoint.y - lastWarpedScreenPoint.y) > 2.0 {
+                logCursorDebug(
+                    String(
+                        format: "local cursor drift detected current=(%.1f, %.1f) lastWarped=(%.1f, %.1f)",
+                        currentSystemCursorPoint.x,
+                        currentSystemCursorPoint.y,
+                        lastWarpedScreenPoint.x,
+                        lastWarpedScreenPoint.y
+                    )
+                )
+                activateOverlayCursorFallback()
                 self.lastWarpedScreenPoint = currentSystemCursorPoint
                 needsCursorReassertion = true
             }
@@ -536,6 +569,35 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             needsCursorReassertion = false
         }
 
+        private var usesSystemCursorMirror: Bool {
+            NetworkProtocol.useReceiverSystemCursorMirror && !prefersOverlayFallback
+        }
+
+        private var managesSystemCursorAppearance: Bool {
+            NetworkProtocol.useReceiverSystemCursorMirror
+        }
+
+        private func activateOverlayCursorFallback() {
+            guard NetworkProtocol.useReceiverSystemCursorMirror, !prefersOverlayFallback else { return }
+            prefersOverlayFallback = true
+            logCursorDebug("activated overlay fallback after local cursor interference")
+            systemCursor = NSCursor(image: Self.transparentCursorImage, hotSpot: .zero)
+            systemCursorSignature = nil
+            window?.invalidateCursorRects(for: self)
+        }
+
+        private func logCursorDebug(_ message: String) {
+            guard NetworkProtocol.enableCursorDebugLogging else { return }
+            print("[Receiver][CursorHost] \(message)")
+        }
+
+        private func logCursorVisibilityIfNeeded(_ isVisible: Bool, detail: String) {
+            guard NetworkProtocol.enableCursorDebugLogging else { return }
+            guard lastLoggedCursorVisibility != isVisible || lastLoggedCursorPresentationMode == nil else { return }
+            lastLoggedCursorVisibility = isVisible
+            print("[Receiver][CursorHost] visibility -> \(isVisible ? "visible" : "hidden") (\(detail))")
+        }
+
         /// Returns the window's frame in CG screen coordinates (origin at top-left
         /// of the main display), or nil if unavailable.
         private func windowScreenRect() -> CGRect? {
@@ -550,7 +612,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         private func ensureSystemCursorHidden() {
-            guard NetworkProtocol.useReceiverSystemCursorMirror else { return }
+            guard managesSystemCursorAppearance else { return }
 
             // If there is already a visible cursor state waiting, don't install
             // the transparent cursor — it will just be immediately replaced on the

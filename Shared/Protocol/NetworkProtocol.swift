@@ -25,6 +25,7 @@ enum NetworkProtocol {
     static let useSwiftUIReceiverCursorOverlay: Bool = false
     static let showSenderCursorFallbackWhileTestingOverlay: Bool = false
     static let useDebugCursorOverlayMarker: Bool = false
+    static let enableCursorDebugLogging: Bool = true
     static let videoDatagramChunkPayloadBytes: Int = 1400
     static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 150_000_000
     static let videoDatagramMaxOutstandingFrames: Int = 3

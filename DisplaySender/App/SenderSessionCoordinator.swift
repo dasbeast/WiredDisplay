@@ -108,6 +108,7 @@ final class SenderSessionCoordinator {
     private var lastSentCursorAppearanceSignature: UInt64?
     private var cachedCursorAppearance: CursorAppearancePayload?
     private var nextCursorAppearanceRefreshNanoseconds: UInt64 = 0
+    private var lastCursorDebugStatus: String?
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -933,6 +934,8 @@ final class SenderSessionCoordinator {
         lastSentCursorAppearanceSignature = nil
         cachedCursorAppearance = nil
         nextCursorAppearanceRefreshNanoseconds = 0
+        lastCursorDebugStatus = nil
+        logCursorDebug("tracking started for display \(displayID)")
         installCursorEventMonitors(for: displayID)
         startCursorRefreshTimer(for: displayID)
         pollCursorState(for: displayID)
@@ -947,6 +950,7 @@ final class SenderSessionCoordinator {
         if sendHiddenState,
            NetworkProtocol.enableReceiverSideCursorOverlay,
            state == .running || state == .connected {
+            logCursorDebug("sending hidden cursor state while stopping tracking")
             transportService.sendCursorState(
                 CursorStatePayload(
                     timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
@@ -1023,6 +1027,35 @@ final class SenderSessionCoordinator {
 
         let nextState = currentCursorState(for: displayID)
         guard shouldSendCursorState(nextState) else { return }
+        if let lastSentCursorState {
+            if lastSentCursorState.isVisible != nextState.isVisible {
+                logCursorDebug(
+                    String(
+                        format: "sending %@ cursor packet for display %u at %.4f, %.4f",
+                        nextState.isVisible ? "visible" : "hidden",
+                        displayID,
+                        nextState.normalizedX,
+                        nextState.normalizedY
+                    )
+                )
+            }
+        } else {
+            logCursorDebug(
+                String(
+                    format: "sending initial %@ cursor packet for display %u at %.4f, %.4f",
+                    nextState.isVisible ? "visible" : "hidden",
+                    displayID,
+                    nextState.normalizedX,
+                    nextState.normalizedY
+                )
+            )
+        }
+        if let appearance = nextState.appearance {
+            logCursorDebug(
+                "sending cursor appearance signature \(appearance.signature) " +
+                "size=\(Int(appearance.widthPoints))x\(Int(appearance.heightPoints))"
+            )
+        }
         lastSentCursorState = nextState
         if let appearance = nextState.appearance {
             lastSentCursorAppearanceSignature = appearance.signature
@@ -1045,17 +1078,42 @@ final class SenderSessionCoordinator {
             }
             return CGDirectDisplayID(screenNumber.uint32Value) == displayID
         }) else {
+            updateCursorDebugStatus("display \(displayID) screen unavailable")
             return hiddenState
         }
 
         let frame = screen.frame
-        guard frame.width > 0, frame.height > 0 else { return hiddenState }
+        guard frame.width > 0, frame.height > 0 else {
+            updateCursorDebugStatus("display \(displayID) has invalid frame \(NSStringFromRect(frame))")
+            return hiddenState
+        }
 
         let mouseLocation = NSEvent.mouseLocation
-        guard frame.contains(mouseLocation) else { return hiddenState }
+        guard frame.contains(mouseLocation) else {
+            updateCursorDebugStatus(
+                String(
+                    format: "cursor outside display %u mouse=(%.1f, %.1f) frame=%@",
+                    displayID,
+                    mouseLocation.x,
+                    mouseLocation.y,
+                    NSStringFromRect(frame)
+                )
+            )
+            return hiddenState
+        }
 
         let normalizedX = max(0, min(1, (mouseLocation.x - frame.minX) / frame.width))
         let normalizedY = max(0, min(1, (frame.maxY - mouseLocation.y) / frame.height))
+        updateCursorDebugStatus(
+            String(
+                format: "cursor visible on display %u mouse=(%.1f, %.1f) normalized=(%.4f, %.4f)",
+                displayID,
+                mouseLocation.x,
+                mouseLocation.y,
+                normalizedX,
+                normalizedY
+            )
+        )
         let appearance = currentCursorAppearance(forceRefresh: lastSentCursorState == nil)
         let appearanceToSend: CursorAppearancePayload?
         if let appearance,
@@ -1158,6 +1216,18 @@ final class SenderSessionCoordinator {
         withUnsafeBytes(of: &hotSpotY) { mix($0) }
 
         return hash
+    }
+
+    private func logCursorDebug(_ message: String) {
+        guard NetworkProtocol.enableCursorDebugLogging else { return }
+        print("[Sender][Cursor] \(message)")
+    }
+
+    private func updateCursorDebugStatus(_ message: String) {
+        guard NetworkProtocol.enableCursorDebugLogging else { return }
+        guard lastCursorDebugStatus != message else { return }
+        lastCursorDebugStatus = message
+        print("[Sender][Cursor] \(message)")
     }
 }
 

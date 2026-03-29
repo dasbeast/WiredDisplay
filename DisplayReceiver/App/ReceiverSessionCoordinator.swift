@@ -52,6 +52,7 @@ final class ReceiverSessionCoordinator {
     private var inboundWindowPayloadBytes: UInt64 = 0
     private var lastRenderedFrameTelemetry: ReceiverRenderedFrameTelemetry?
     private var lastRecoveryKeyFrameRequestAt: Date?
+    private var lastLoggedCursorPacketVisible: Bool?
 
     init(
         listenerService: ListenerService = ListenerService(),
@@ -291,6 +292,22 @@ final class ReceiverSessionCoordinator {
             case .cursorState:
                 let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
                 let receiverTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+                if lastLoggedCursorPacketVisible != cursorState.isVisible {
+                    lastLoggedCursorPacketVisible = cursorState.isVisible
+                    if NetworkProtocol.enableCursorDebugLogging {
+                        print(
+                            String(
+                                format: "[Receiver][Cursor] packet %@ at %.4f, %.4f appearance=%@",
+                                cursorState.isVisible ? "visible" : "hidden",
+                                cursorState.normalizedX,
+                                cursorState.normalizedY,
+                                cursorState.appearance != nil ? "yes" : "no"
+                            )
+                        )
+                    }
+                } else if NetworkProtocol.enableCursorDebugLogging, let appearance = cursorState.appearance {
+                    print("[Receiver][Cursor] packet appearance signature \(appearance.signature)")
+                }
                 ReceiverCursorStore.shared.update(
                     state: ReceiverCursorState(
                         senderTimestampNanoseconds: cursorState.timestampNanoseconds,
