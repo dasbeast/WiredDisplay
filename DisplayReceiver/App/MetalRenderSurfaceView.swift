@@ -402,9 +402,13 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 screenPoint = appKitScreenPoint
             }
 
+            let currentSystemCursorPoint = CGEvent(source: nil)?.location
             if let lastWarpedScreenPoint,
+               let currentSystemCursorPoint,
                abs(lastWarpedScreenPoint.x - screenPoint.x) < 0.25,
-               abs(lastWarpedScreenPoint.y - screenPoint.y) < 0.25 {
+               abs(lastWarpedScreenPoint.y - screenPoint.y) < 0.25,
+               abs(currentSystemCursorPoint.x - screenPoint.x) < 0.25,
+               abs(currentSystemCursorPoint.y - screenPoint.y) < 0.25 {
                 return
             }
 

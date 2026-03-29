@@ -8,9 +8,11 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     private weak var window: NSWindow?
     private var hostingController: NSHostingController<ReceiverRootView>?
     private var isCursorHidden = false
+    private var previousPresentationOptions: NSApplication.PresentationOptions?
 
     func present(appController: ReceiverAppController, enterFullScreen: Bool) {
         let window = ensureWindow(appController: appController)
+        applyStreamingPresentation()
         NSApplication.shared.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
@@ -30,6 +32,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     func hide() {
         guard let window else { return }
         setCursorHidden(false)
+        restorePresentation()
 
         if window.styleMask.contains(.fullScreen) {
             window.toggleFullScreen(nil)
@@ -66,10 +69,13 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
-        window.collectionBehavior = [.fullScreenPrimary, .managed]
+        window.collectionBehavior = [.fullScreenPrimary, .fullScreenDisallowsTiling, .managed]
         window.contentViewController = hostingController
         window.delegate = self
         window.center()
+        [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].forEach { buttonType in
+            window.standardWindowButton(buttonType)?.isHidden = true
+        }
 
         self.window = window
         self.hostingController = hostingController
@@ -87,5 +93,24 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         }
 
         isCursorHidden = effectiveHidden
+    }
+
+    private func applyStreamingPresentation() {
+        if previousPresentationOptions == nil {
+            previousPresentationOptions = NSApplication.shared.presentationOptions
+        }
+
+        NSApplication.shared.presentationOptions = [
+            .autoHideDock,
+            .autoHideMenuBar,
+            .disableMenuBarTransparency
+        ]
+    }
+
+    private func restorePresentation() {
+        if let previousPresentationOptions {
+            NSApplication.shared.presentationOptions = previousPresentationOptions
+            self.previousPresentationOptions = nil
+        }
     }
 }
