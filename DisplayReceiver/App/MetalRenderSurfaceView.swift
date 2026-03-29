@@ -411,11 +411,17 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             // between the last warp target and the current cursor position means
             // the physical mouse moved it. This avoids needing Input Monitoring
             // permission from a global NSEvent monitor.
+            //
+            // Crucially, when drift is detected we also advance lastWarpedScreenPoint
+            // to the current position. Without this, the stale warp target keeps
+            // re-triggering the cooldown every frame after it expires, permanently
+            // locking out all future warps and making the cursor vanish.
             if let lastWarpedScreenPoint,
                let currentSystemCursorPoint,
                abs(currentSystemCursorPoint.x - lastWarpedScreenPoint.x) > 2.0 ||
                abs(currentSystemCursorPoint.y - lastWarpedScreenPoint.y) > 2.0 {
                 localMouseLastMovedNanoseconds = now
+                self.lastWarpedScreenPoint = currentSystemCursorPoint
             }
 
             // Suppress warp for 250 ms after detecting local movement.
