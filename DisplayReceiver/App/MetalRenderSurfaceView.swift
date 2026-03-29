@@ -390,7 +390,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         private func applySystemCursorPosition(_ localPoint: CGPoint) {
             guard let window else { return }
-            let windowPoint = convert(localPoint, to: nil)
+            let windowPoint = CGPoint(
+                x: localPoint.x,
+                y: bounds.height - localPoint.y
+            )
             let screenPoint = window.convertPoint(toScreen: windowPoint)
 
             if let lastWarpedScreenPoint,
