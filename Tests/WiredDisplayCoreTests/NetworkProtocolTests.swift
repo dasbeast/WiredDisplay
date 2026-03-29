@@ -180,6 +180,8 @@ final class NetworkProtocolTests: XCTestCase {
             appearance: CursorAppearancePayload(
                 signature: 0xDEADBEEF,
                 pngData: Data([0x89, 0x50, 0x4E, 0x47]),
+                widthPoints: 23,
+                heightPoints: 22,
                 hotSpotX: 12,
                 hotSpotY: 11
             )

@@ -1073,14 +1073,16 @@ final class SenderSessionCoordinator {
 
         let hotSpot = cursor.hotSpot
         return CursorAppearancePayload(
-            signature: cursorAppearanceSignature(pngData: pngData, hotSpot: hotSpot),
+            signature: cursorAppearanceSignature(pngData: pngData, size: image.size, hotSpot: hotSpot),
             pngData: pngData,
+            widthPoints: image.size.width,
+            heightPoints: image.size.height,
             hotSpotX: hotSpot.x,
             hotSpotY: hotSpot.y
         )
     }
 
-    private func cursorAppearanceSignature(pngData: Data, hotSpot: CGPoint) -> UInt64 {
+    private func cursorAppearanceSignature(pngData: Data, size: CGSize, hotSpot: CGPoint) -> UInt64 {
         var hash: UInt64 = 14_695_981_039_346_656_037
 
         func mix(_ bytes: some Sequence<UInt8>) {
@@ -1091,6 +1093,12 @@ final class SenderSessionCoordinator {
         }
 
         mix(pngData)
+
+        var widthPoints = Double(size.width).bitPattern.bigEndian
+        withUnsafeBytes(of: &widthPoints) { mix($0) }
+
+        var heightPoints = Double(size.height).bitPattern.bigEndian
+        withUnsafeBytes(of: &heightPoints) { mix($0) }
 
         var hotSpotX = Double(hotSpot.x).bitPattern.bigEndian
         withUnsafeBytes(of: &hotSpotX) { mix($0) }

@@ -361,6 +361,8 @@ struct HeartbeatPayload: Codable, Sendable {
 struct CursorAppearancePayload: Codable, Equatable, Sendable {
     let signature: UInt64
     let pngData: Data
+    let widthPoints: Double
+    let heightPoints: Double
     let hotSpotX: Double
     let hotSpotY: Double
 }

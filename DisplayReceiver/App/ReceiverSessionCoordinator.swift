@@ -354,6 +354,7 @@ final class ReceiverSessionCoordinator {
 
     private func updateCursorOverlayAppearance(from appearance: CursorAppearancePayload) {
         guard let image = NSImage(data: appearance.pngData) else { return }
+        image.size = CGSize(width: appearance.widthPoints, height: appearance.heightPoints)
         cursorOverlayImage = image
         cursorOverlayHotSpot = CGPoint(x: appearance.hotSpotX, y: appearance.hotSpotY)
     }
