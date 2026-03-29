@@ -33,6 +33,9 @@ final class ReceiverSessionCoordinator {
     private(set) var renderSourceDescription: String = "-" { didSet { onChange?() } }
     private(set) var replacedBeforeRenderCount: UInt64 = 0 { didSet { onChange?() } }
     private(set) var cursorOverlaySummary: String = "-" { didSet { onChange?() } }
+    private(set) var cursorOverlayNormalizedX: Double? { didSet { onChange?() } }
+    private(set) var cursorOverlayNormalizedY: Double? { didSet { onChange?() } }
+    private(set) var isCursorOverlayVisible = false { didSet { onChange?() } }
 
     private(set) var configuredEndpointSummary: String = "-" { didSet { onChange?() } }
     private(set) var wiredPathAvailable = false { didSet { onChange?() } }
@@ -121,6 +124,9 @@ final class ReceiverSessionCoordinator {
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
                 self.cursorOverlaySummary = "-"
+                self.cursorOverlayNormalizedX = nil
+                self.cursorOverlayNormalizedY = nil
+                self.isCursorOverlayVisible = false
                 if case .running = self.state {
                     self.state = .listening
                 }
@@ -210,6 +216,9 @@ final class ReceiverSessionCoordinator {
         renderSourceDescription = "-"
         replacedBeforeRenderCount = 0
         cursorOverlaySummary = "-"
+        cursorOverlayNormalizedX = nil
+        cursorOverlayNormalizedY = nil
+        isCursorOverlayVisible = false
         lastRenderedFrameTelemetry = nil
         lastFrameArrivalNanoseconds = nil
         smoothedIntervalMilliseconds = nil
@@ -235,6 +244,9 @@ final class ReceiverSessionCoordinator {
         audioPlaybackService.stop()
         ReceiverCursorStore.shared.reset()
         cursorOverlaySummary = "-"
+        cursorOverlayNormalizedX = nil
+        cursorOverlayNormalizedY = nil
+        isCursorOverlayVisible = false
         listenerService.stopListening()
         videoDatagramListenerService.stopListening()
         state = .idle
@@ -248,6 +260,9 @@ final class ReceiverSessionCoordinator {
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
                 cursorOverlaySummary = "-"
+                cursorOverlayNormalizedX = nil
+                cursorOverlayNormalizedY = nil
+                isCursorOverlayVisible = false
                 let hello = try envelope.decodePayload(as: HelloPayload.self)
                 peerName = hello.senderName
                 if hello.requestedProtocolVersion == NetworkProtocol.protocolVersion {
@@ -299,8 +314,14 @@ final class ReceiverSessionCoordinator {
                         cursorState.normalizedX,
                         cursorState.normalizedY
                     )
+                    cursorOverlayNormalizedX = cursorState.normalizedX
+                    cursorOverlayNormalizedY = cursorState.normalizedY
+                    isCursorOverlayVisible = true
                 } else {
                     cursorOverlaySummary = "hidden"
+                    cursorOverlayNormalizedX = nil
+                    cursorOverlayNormalizedY = nil
+                    isCursorOverlayVisible = false
                 }
             case .videoFrame:
                 break

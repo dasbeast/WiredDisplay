@@ -18,6 +18,9 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var isReceiverWindowVisible = false
     @Published private(set) var powerManagementErrorText: String?
     @Published private(set) var cursorOverlayText = "-"
+    @Published private(set) var cursorOverlayNormalizedX: Double?
+    @Published private(set) var cursorOverlayNormalizedY: Double?
+    @Published private(set) var isCursorOverlayVisible = false
 
     let coordinator = ReceiverSessionCoordinator()
     let advertisementService = ReceiverAdvertisementService()
@@ -116,6 +119,9 @@ final class ReceiverAppController: ObservableObject {
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         interfaceLines = coordinator.localInterfaceDescriptions
         cursorOverlayText = coordinator.cursorOverlaySummary
+        cursorOverlayNormalizedX = coordinator.cursorOverlayNormalizedX
+        cursorOverlayNormalizedY = coordinator.cursorOverlayNormalizedY
+        isCursorOverlayVisible = coordinator.isCursorOverlayVisible
 
         if newStreaming && !wasStreaming {
             powerManagementService.startPreventingSleep()
