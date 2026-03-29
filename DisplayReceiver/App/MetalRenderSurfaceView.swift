@@ -715,7 +715,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             let hotSpot = NSCursor.arrow.hotSpot
             let hotSpotFromTop = CGPoint(
                 x: hotSpot.x * pixelScale,
-                y: max(0, CGFloat(height) - (hotSpot.y * pixelScale))
+                y: hotSpot.y * pixelScale
             )
 
             return (texture, hotSpotFromTop)

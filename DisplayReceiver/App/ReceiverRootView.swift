@@ -121,13 +121,7 @@ struct ReceiverRootView: View {
 private struct ReceiverCursorOverlayVisual: View {
     private static let arrowCursorImage = NSCursor.arrow.image
     private static let arrowImageSize = arrowCursorImage.size
-    private static let arrowHotSpotFromTop = CGPoint(
-        x: NSCursor.arrow.hotSpot.x,
-        y: max(0, arrowImageSize.height - NSCursor.arrow.hotSpot.y)
-    )
-    // The system cursor image includes a little visual padding, so nudge the
-    // overlay down slightly to keep the visible arrow tip on the actual click point.
-    private static let tipAlignmentCalibration = CGPoint(x: 0, y: 2)
+    private static let arrowHotSpotFromTop = NSCursor.arrow.hotSpot
 
     static var centerOffset: CGPoint {
         if NetworkProtocol.useDebugCursorOverlayMarker {
@@ -135,8 +129,8 @@ private struct ReceiverCursorOverlayVisual: View {
         }
 
         return CGPoint(
-            x: ((arrowImageSize.width / 2.0) - arrowHotSpotFromTop.x) + tipAlignmentCalibration.x,
-            y: ((arrowImageSize.height / 2.0) - arrowHotSpotFromTop.y) + tipAlignmentCalibration.y
+            x: (arrowImageSize.width / 2.0) - arrowHotSpotFromTop.x,
+            y: (arrowImageSize.height / 2.0) - arrowHotSpotFromTop.y
         )
     }
 
