@@ -101,6 +101,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var systemCursor: NSCursor = NSCursor.arrow
         private var systemCursorSignature: UInt64?
         private var lastWarpedScreenPoint: CGPoint?
+        private var localMouseLastMovedNanoseconds: UInt64 = 0
+        private var mouseEventMonitor: Any?
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -121,6 +123,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         deinit {
+            if let monitor = mouseEventMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
             stopDisplayLink()
             stopRefreshTimer()
         }
@@ -137,6 +142,20 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            if window != nil {
+                if mouseEventMonitor == nil {
+                    mouseEventMonitor = NSEvent.addGlobalMonitorForEvents(
+                        matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+                    ) { [weak self] _ in
+                        self?.localMouseLastMovedNanoseconds = DispatchTime.now().uptimeNanoseconds
+                    }
+                }
+            } else {
+                if let monitor = mouseEventMonitor {
+                    NSEvent.removeMonitor(monitor)
+                    mouseEventMonitor = nil
+                }
+            }
             syncPresentationDriverState()
         }
 
@@ -400,6 +419,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 )
             } else {
                 screenPoint = appKitScreenPoint
+            }
+
+            let now = DispatchTime.now().uptimeNanoseconds
+            let nanosecondsSinceLocalMove = localMouseLastMovedNanoseconds > 0 && now >= localMouseLastMovedNanoseconds
+                ? now - localMouseLastMovedNanoseconds
+                : UInt64.max
+            if nanosecondsSinceLocalMove < 250_000_000 {
+                return
             }
 
             let currentSystemCursorPoint = CGEvent(source: nil)?.location

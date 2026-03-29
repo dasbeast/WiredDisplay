@@ -51,6 +51,10 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         onVisibilityChange?(false)
     }
 
+    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
+        [.fullScreen, .hideMenuBar, .hideDock, .disableMenuBarTransparency]
+    }
+
     private func ensureWindow(appController: ReceiverAppController) -> NSWindow {
         if let window, let hostingController {
             hostingController.rootView = ReceiverRootView(appController: appController)
@@ -102,7 +106,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
 
         NSApplication.shared.presentationOptions = [
             .autoHideDock,
-            .autoHideMenuBar,
+            .hideMenuBar,
             .disableMenuBarTransparency
         ]
     }
