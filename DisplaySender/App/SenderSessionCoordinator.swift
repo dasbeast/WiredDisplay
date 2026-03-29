@@ -109,6 +109,8 @@ final class SenderSessionCoordinator {
     private var cachedCursorAppearance: CursorAppearancePayload?
     private var nextCursorAppearanceRefreshNanoseconds: UInt64 = 0
     private var lastCursorDebugStatus: String?
+    private var lastVisibleCursorNormalizedPosition: CGPoint?
+    private var lastVisibleCursorTimestampNanoseconds: UInt64?
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -935,6 +937,8 @@ final class SenderSessionCoordinator {
         cachedCursorAppearance = nil
         nextCursorAppearanceRefreshNanoseconds = 0
         lastCursorDebugStatus = nil
+        lastVisibleCursorNormalizedPosition = nil
+        lastVisibleCursorTimestampNanoseconds = nil
         logCursorDebug("tracking started for display \(displayID)")
         installCursorEventMonitors(for: displayID)
         startCursorRefreshTimer(for: displayID)
@@ -957,6 +961,7 @@ final class SenderSessionCoordinator {
                     normalizedX: 0,
                     normalizedY: 0,
                     isVisible: false,
+                    ownershipIntent: .hidden,
                     appearance: nil
                 )
             )
@@ -966,6 +971,8 @@ final class SenderSessionCoordinator {
         lastSentCursorAppearanceSignature = nil
         cachedCursorAppearance = nil
         nextCursorAppearanceRefreshNanoseconds = 0
+        lastVisibleCursorNormalizedPosition = nil
+        lastVisibleCursorTimestampNanoseconds = nil
     }
 
     private func installCursorEventMonitors(for displayID: CGDirectDisplayID) {
@@ -1028,11 +1035,12 @@ final class SenderSessionCoordinator {
         let nextState = currentCursorState(for: displayID)
         guard shouldSendCursorState(nextState) else { return }
         if let lastSentCursorState {
-            if lastSentCursorState.isVisible != nextState.isVisible {
+            if lastSentCursorState.ownershipIntent != nextState.ownershipIntent ||
+                lastSentCursorState.isVisible != nextState.isVisible {
                 logCursorDebug(
                     String(
                         format: "sending %@ cursor packet for display %u at %.4f, %.4f",
-                        nextState.isVisible ? "visible" : "hidden",
+                        nextState.ownershipIntent.rawValue,
                         displayID,
                         nextState.normalizedX,
                         nextState.normalizedY
@@ -1043,7 +1051,7 @@ final class SenderSessionCoordinator {
             logCursorDebug(
                 String(
                     format: "sending initial %@ cursor packet for display %u at %.4f, %.4f",
-                    nextState.isVisible ? "visible" : "hidden",
+                    nextState.ownershipIntent.rawValue,
                     displayID,
                     nextState.normalizedX,
                     nextState.normalizedY
@@ -1064,11 +1072,13 @@ final class SenderSessionCoordinator {
     }
 
     private func currentCursorState(for displayID: CGDirectDisplayID) -> CursorStatePayload {
+        let now = DispatchTime.now().uptimeNanoseconds
         let hiddenState = CursorStatePayload(
-            timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            timestampNanoseconds: now,
             normalizedX: 0,
             normalizedY: 0,
             isVisible: false,
+            ownershipIntent: .hidden,
             appearance: nil
         )
 
@@ -1090,20 +1100,32 @@ final class SenderSessionCoordinator {
 
         let mouseLocation = NSEvent.mouseLocation
         guard frame.contains(mouseLocation) else {
+            let ownershipIntent = hiddenCursorOwnershipIntent(at: now)
+            let lastVisibleCursorNormalizedPosition = self.lastVisibleCursorNormalizedPosition
             updateCursorDebugStatus(
                 String(
-                    format: "cursor outside display %u mouse=(%.1f, %.1f) frame=%@",
+                    format: "cursor outside display %u mouse=(%.1f, %.1f) frame=%@ ownership=%@",
                     displayID,
                     mouseLocation.x,
                     mouseLocation.y,
-                    NSStringFromRect(frame)
+                    NSStringFromRect(frame),
+                    ownershipIntent.rawValue
                 )
             )
-            return hiddenState
+            return CursorStatePayload(
+                timestampNanoseconds: now,
+                normalizedX: Double(lastVisibleCursorNormalizedPosition?.x ?? CGFloat(hiddenState.normalizedX)),
+                normalizedY: Double(lastVisibleCursorNormalizedPosition?.y ?? CGFloat(hiddenState.normalizedY)),
+                isVisible: false,
+                ownershipIntent: ownershipIntent,
+                appearance: nil
+            )
         }
 
         let normalizedX = max(0, min(1, (mouseLocation.x - frame.minX) / frame.width))
         let normalizedY = max(0, min(1, (frame.maxY - mouseLocation.y) / frame.height))
+        lastVisibleCursorNormalizedPosition = CGPoint(x: normalizedX, y: normalizedY)
+        lastVisibleCursorTimestampNanoseconds = now
         updateCursorDebugStatus(
             String(
                 format: "cursor visible on display %u mouse=(%.1f, %.1f) normalized=(%.4f, %.4f)",
@@ -1124,10 +1146,11 @@ final class SenderSessionCoordinator {
         }
 
         return CursorStatePayload(
-            timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            timestampNanoseconds: now,
             normalizedX: normalizedX,
             normalizedY: normalizedY,
             isVisible: true,
+            ownershipIntent: .remote,
             appearance: appearanceToSend
         )
     }
@@ -1138,12 +1161,37 @@ final class SenderSessionCoordinator {
         }
 
         guard let lastSentCursorState else { return true }
+        guard lastSentCursorState.ownershipIntent == nextState.ownershipIntent else { return true }
         guard lastSentCursorState.isVisible == nextState.isVisible else { return true }
         guard nextState.isVisible else { return false }
 
         let deltaX = abs(lastSentCursorState.normalizedX - nextState.normalizedX)
         let deltaY = abs(lastSentCursorState.normalizedY - nextState.normalizedY)
         return deltaX >= 0.00002 || deltaY >= 0.00002
+    }
+
+    private func hiddenCursorOwnershipIntent(at nowNanoseconds: UInt64) -> CursorOwnershipIntent {
+        if lastSentCursorState?.ownershipIntent == .localHandoff {
+            return .localHandoff
+        }
+
+        guard let lastVisibleCursorNormalizedPosition,
+              let lastVisibleCursorTimestampNanoseconds,
+              nowNanoseconds >= lastVisibleCursorTimestampNanoseconds,
+              (nowNanoseconds - lastVisibleCursorTimestampNanoseconds) <= NetworkProtocol.cursorHandoffDetectionWindowNanoseconds,
+              isNearCursorHandoffEdge(lastVisibleCursorNormalizedPosition) else {
+            return .hidden
+        }
+
+        return .localHandoff
+    }
+
+    private func isNearCursorHandoffEdge(_ normalizedPosition: CGPoint) -> Bool {
+        let threshold = NetworkProtocol.cursorHandoffEdgeThresholdNormalized
+        return normalizedPosition.x <= threshold ||
+            normalizedPosition.x >= (1.0 - threshold) ||
+            normalizedPosition.y <= threshold ||
+            normalizedPosition.y >= (1.0 - threshold)
     }
 
     private func currentCursorAppearance(forceRefresh: Bool) -> CursorAppearancePayload? {

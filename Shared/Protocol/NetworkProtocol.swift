@@ -2,7 +2,7 @@ import Foundation
 
 /// Defines wire-level messages and protocol validation shared by sender and receiver.
 enum NetworkProtocol {
-    static let protocolVersion: UInt16 = 1
+    static let protocolVersion: UInt16 = 2
     static let defaultPort: UInt16 = 50999
     static let discoveryServiceType = "_wireddisplay._tcp."
     static let discoveryServiceDomain = "local."
@@ -20,6 +20,8 @@ enum NetworkProtocol {
     static let cursorOverlayFramesPerSecond: Int = 120
     static let cursorAppearanceRefreshFramesPerSecond: Int = 30
     static let cursorPredictionLeadNanoseconds: UInt64 = 16_000_000
+    static let cursorHandoffEdgeThresholdNormalized: Double = 0.01
+    static let cursorHandoffDetectionWindowNanoseconds: UInt64 = 300_000_000
     static let enableReceiverSideCursorOverlay: Bool = true
     static let useReceiverSystemCursorMirror: Bool = true
     static let useSwiftUIReceiverCursorOverlay: Bool = false
@@ -370,12 +372,23 @@ struct CursorAppearancePayload: Codable, Equatable, Sendable {
     let hotSpotY: Double
 }
 
+/// Describes who should currently own and present the cursor.
+enum CursorOwnershipIntent: String, Codable, Equatable, Sendable {
+    /// Sender still owns the cursor and the receiver should mirror it.
+    case remote
+    /// Sender cursor exited through a display edge and the receiver should let the local OS own it.
+    case localHandoff
+    /// Cursor should be treated as absent/hidden, not handed off.
+    case hidden
+}
+
 /// Sender -> receiver cursor sidecar used to render a low-latency pointer overlay.
 struct CursorStatePayload: Codable, Equatable, Sendable {
     let timestampNanoseconds: UInt64
     let normalizedX: Double
     let normalizedY: Double
     let isVisible: Bool
+    let ownershipIntent: CursorOwnershipIntent
     let appearance: CursorAppearancePayload?
 }
 

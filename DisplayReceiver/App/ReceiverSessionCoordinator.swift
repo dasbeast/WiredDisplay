@@ -52,7 +52,7 @@ final class ReceiverSessionCoordinator {
     private var inboundWindowPayloadBytes: UInt64 = 0
     private var lastRenderedFrameTelemetry: ReceiverRenderedFrameTelemetry?
     private var lastRecoveryKeyFrameRequestAt: Date?
-    private var lastLoggedCursorPacketVisible: Bool?
+    private var lastLoggedCursorOwnershipIntent: CursorOwnershipIntent?
 
     init(
         listenerService: ListenerService = ListenerService(),
@@ -292,13 +292,13 @@ final class ReceiverSessionCoordinator {
             case .cursorState:
                 let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
                 let receiverTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
-                if lastLoggedCursorPacketVisible != cursorState.isVisible {
-                    lastLoggedCursorPacketVisible = cursorState.isVisible
+                if lastLoggedCursorOwnershipIntent != cursorState.ownershipIntent {
+                    lastLoggedCursorOwnershipIntent = cursorState.ownershipIntent
                     if NetworkProtocol.enableCursorDebugLogging {
                         print(
                             String(
                                 format: "[Receiver][Cursor] packet %@ at %.4f, %.4f appearance=%@",
-                                cursorState.isVisible ? "visible" : "hidden",
+                                cursorState.ownershipIntent.rawValue,
                                 cursorState.normalizedX,
                                 cursorState.normalizedY,
                                 cursorState.appearance != nil ? "yes" : "no"
@@ -315,6 +315,7 @@ final class ReceiverSessionCoordinator {
                         normalizedX: cursorState.normalizedX,
                         normalizedY: cursorState.normalizedY,
                         isVisible: cursorState.isVisible,
+                        ownershipIntent: cursorState.ownershipIntent,
                         appearance: cursorState.appearance
                     )
                 )
@@ -324,7 +325,7 @@ final class ReceiverSessionCoordinator {
                 }
 
                 if NetworkProtocol.useSwiftUIReceiverCursorOverlay {
-                    if cursorState.isVisible {
+                    if cursorState.ownershipIntent == .remote && cursorState.isVisible {
                         cursorOverlaySummary = String(
                             format: "visible (%.3f, %.3f)",
                             cursorState.normalizedX,
@@ -333,18 +334,36 @@ final class ReceiverSessionCoordinator {
                         cursorOverlayNormalizedX = cursorState.normalizedX
                         cursorOverlayNormalizedY = cursorState.normalizedY
                         isCursorOverlayVisible = true
+                    } else if cursorState.ownershipIntent == .localHandoff {
+                        cursorOverlaySummary = "local handoff"
+                        cursorOverlayNormalizedX = nil
+                        cursorOverlayNormalizedY = nil
+                        isCursorOverlayVisible = false
                     } else {
                         cursorOverlaySummary = "hidden"
                         cursorOverlayNormalizedX = nil
                         cursorOverlayNormalizedY = nil
                         isCursorOverlayVisible = false
                     }
-                } else if cursorState.isVisible {
+                } else if cursorState.ownershipIntent == .remote && cursorState.isVisible {
                     if cursorOverlaySummary != "visible" {
                         cursorOverlaySummary = "visible"
                     }
                     if !isCursorOverlayVisible {
                         isCursorOverlayVisible = true
+                    }
+                } else if cursorState.ownershipIntent == .localHandoff {
+                    if cursorOverlaySummary != "local handoff" {
+                        cursorOverlaySummary = "local handoff"
+                    }
+                    if isCursorOverlayVisible {
+                        isCursorOverlayVisible = false
+                    }
+                    if cursorOverlayNormalizedX != nil {
+                        cursorOverlayNormalizedX = nil
+                    }
+                    if cursorOverlayNormalizedY != nil {
+                        cursorOverlayNormalizedY = nil
                     }
                 } else {
                     if cursorOverlaySummary != "hidden" {
@@ -393,6 +412,7 @@ final class ReceiverSessionCoordinator {
         isCursorOverlayVisible = false
         cursorOverlayImage = nil
         cursorOverlayHotSpot = nil
+        lastLoggedCursorOwnershipIntent = nil
     }
 
     private func updateCursorOverlayAppearance(from appearance: CursorAppearancePayload) {

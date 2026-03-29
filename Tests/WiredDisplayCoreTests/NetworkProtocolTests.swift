@@ -177,6 +177,7 @@ final class NetworkProtocolTests: XCTestCase {
             normalizedX: 0.25,
             normalizedY: 0.75,
             isVisible: true,
+            ownershipIntent: .remote,
             appearance: CursorAppearancePayload(
                 signature: 0xDEADBEEF,
                 pngData: Data([0x89, 0x50, 0x4E, 0x47]),

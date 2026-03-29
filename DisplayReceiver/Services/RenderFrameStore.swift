@@ -53,6 +53,7 @@ struct ReceiverCursorState: Equatable {
     let normalizedX: Double
     let normalizedY: Double
     let isVisible: Bool
+    let ownershipIntent: CursorOwnershipIntent
     let appearance: CursorAppearancePayload?
 }
 
@@ -90,6 +91,7 @@ final class ReceiverCursorStore {
                 normalizedX: state.normalizedX,
                 normalizedY: state.normalizedY,
                 isVisible: state.isVisible,
+                ownershipIntent: state.ownershipIntent,
                 appearance: latestState.appearance
             )
         } else {
