@@ -71,6 +71,15 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
     }
 
     final class ReceiverCursorOverlayHostView: NSView {
+        private static let transparentCursorImage: NSImage = {
+            let image = NSImage(size: NSSize(width: 16, height: 16))
+            image.lockFocus()
+            NSColor.clear.setFill()
+            NSBezierPath(rect: NSRect(origin: .zero, size: image.size)).fill()
+            image.unlockFocus()
+            return image
+        }()
+
         private static let displayLinkCallback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userData in
             guard let userData else { return kCVReturnError }
             let view = Unmanaged<ReceiverCursorOverlayHostView>.fromOpaque(userData).takeUnretainedValue()
@@ -89,6 +98,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var displayedAppearanceSignature: UInt64?
         private var displayedCursorSize: CGSize = .zero
         private var displayedHotSpot: CGPoint = .zero
+        private var systemCursor: NSCursor = NSCursor.arrow
+        private var systemCursorSignature: UInt64?
+        private var lastWarpedScreenPoint: CGPoint?
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -117,6 +129,12 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             nil
         }
 
+        override func resetCursorRects() {
+            super.resetCursorRects()
+            guard NetworkProtocol.useReceiverSystemCursorMirror else { return }
+            addCursorRect(bounds, cursor: systemCursor)
+        }
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             syncPresentationDriverState()
@@ -126,6 +144,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             isHidden = !(NetworkProtocol.enableReceiverSideCursorOverlay && !NetworkProtocol.useSwiftUIReceiverCursorOverlay)
             if isHidden {
                 cursorImageView.isHidden = true
+            }
+            if NetworkProtocol.useReceiverSystemCursorMirror {
+                cursorImageView.isHidden = true
+                window?.invalidateCursorRects(for: self)
             }
             syncPresentationDriverState()
             refreshPresentationIfNeeded()
@@ -254,6 +276,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             let now = DispatchTime.now().uptimeNanoseconds
             guard let cursorState = ReceiverCursorStore.shared.snapshot(),
                   cursorState.isVisible else {
+                if NetworkProtocol.useReceiverSystemCursorMirror {
+                    ensureSystemCursorHidden()
+                }
                 cursorImageView.isHidden = true
                 return
             }
@@ -271,6 +296,13 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 x: normalizedPosition.x * bounds.width,
                 y: normalizedPosition.y * bounds.height
             )
+
+            if NetworkProtocol.useReceiverSystemCursorMirror {
+                applySystemCursorPosition(cursorPoint)
+                cursorImageView.isHidden = true
+                return
+            }
+
             let cursorOrigin = CGPoint(
                 x: cursorPoint.x - displayedHotSpot.x,
                 y: cursorPoint.y - displayedHotSpot.y
@@ -321,12 +353,20 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     displayedAppearanceSignature = UInt64.max
                     displayedCursorSize = CGSize(width: 28, height: 28)
                     displayedHotSpot = CGPoint(x: 14, y: 14)
+                    if NetworkProtocol.useReceiverSystemCursorMirror {
+                        systemCursor = NSCursor(image: makeDebugCursorImage(), hotSpot: displayedHotSpot)
+                        systemCursorSignature = UInt64.max
+                        window?.invalidateCursorRects(for: self)
+                    }
                 }
                 return true
             }
 
             let resolvedAppearance = appearance ?? defaultArrowAppearance()
-            guard displayedAppearanceSignature != resolvedAppearance.signature else { return true }
+            if displayedAppearanceSignature == resolvedAppearance.signature,
+               (!NetworkProtocol.useReceiverSystemCursorMirror || systemCursorSignature == resolvedAppearance.signature) {
+                return true
+            }
             guard let image = NSImage(data: resolvedAppearance.pngData) else { return false }
 
             image.size = CGSize(
@@ -340,7 +380,36 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 x: resolvedAppearance.hotSpotX,
                 y: resolvedAppearance.hotSpotY
             )
+            if NetworkProtocol.useReceiverSystemCursorMirror {
+                systemCursor = NSCursor(image: image, hotSpot: displayedHotSpot)
+                systemCursorSignature = resolvedAppearance.signature
+                window?.invalidateCursorRects(for: self)
+            }
             return true
+        }
+
+        private func applySystemCursorPosition(_ localPoint: CGPoint) {
+            guard let window else { return }
+            let windowPoint = convert(localPoint, to: nil)
+            let screenPoint = window.convertPoint(toScreen: windowPoint)
+
+            if let lastWarpedScreenPoint,
+               abs(lastWarpedScreenPoint.x - screenPoint.x) < 0.25,
+               abs(lastWarpedScreenPoint.y - screenPoint.y) < 0.25 {
+                return
+            }
+
+            CGWarpMouseCursorPosition(screenPoint)
+            lastWarpedScreenPoint = screenPoint
+        }
+
+        private func ensureSystemCursorHidden() {
+            guard NetworkProtocol.useReceiverSystemCursorMirror else { return }
+            if systemCursorSignature != nil {
+                systemCursor = NSCursor(image: Self.transparentCursorImage, hotSpot: .zero)
+                systemCursorSignature = nil
+                window?.invalidateCursorRects(for: self)
+            }
         }
 
         private func defaultArrowAppearance() -> CursorAppearancePayload {

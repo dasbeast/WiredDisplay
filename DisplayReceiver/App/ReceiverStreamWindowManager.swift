@@ -77,14 +77,15 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     }
 
     private func setCursorHidden(_ hidden: Bool) {
-        guard hidden != isCursorHidden else { return }
+        let effectiveHidden = hidden && !NetworkProtocol.useReceiverSystemCursorMirror
+        guard effectiveHidden != isCursorHidden else { return }
 
-        if hidden {
+        if effectiveHidden {
             NSCursor.hide()
         } else {
             NSCursor.unhide()
         }
 
-        isCursorHidden = hidden
+        isCursorHidden = effectiveHidden
     }
 }

@@ -21,6 +21,7 @@ enum NetworkProtocol {
     static let cursorAppearanceRefreshFramesPerSecond: Int = 30
     static let cursorPredictionLeadNanoseconds: UInt64 = 4_000_000
     static let enableReceiverSideCursorOverlay: Bool = true
+    static let useReceiverSystemCursorMirror: Bool = true
     static let useSwiftUIReceiverCursorOverlay: Bool = false
     static let showSenderCursorFallbackWhileTestingOverlay: Bool = false
     static let useDebugCursorOverlayMarker: Bool = false
