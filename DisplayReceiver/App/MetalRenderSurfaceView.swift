@@ -102,6 +102,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var systemCursorSignature: UInt64?
         private var lastWarpedScreenPoint: CGPoint?
         private var localMouseLastMovedNanoseconds: UInt64 = 0
+        private var cursorHiddenSinceNanoseconds: UInt64?
+        private var needsCursorReassertion = false
         /// When true, the local user has intentionally moved the cursor outside the
         /// receiver window. Warping is suspended until the cursor re-enters.
         private var cursorEscaped = false
@@ -163,6 +165,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 // Clear drift cooldown so first warp fires immediately.
                 localMouseLastMovedNanoseconds = 0
                 lastWarpedScreenPoint = nil
+                needsCursorReassertion = true
             }
         }
 
@@ -335,17 +338,25 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             guard let cursorState = ReceiverCursorStore.shared.snapshot(),
                   cursorState.isVisible else {
                 if NetworkProtocol.useReceiverSystemCursorMirror {
-                    ensureSystemCursorHidden()
+                    if cursorHiddenSinceNanoseconds == nil {
+                        cursorHiddenSinceNanoseconds = now
+                    }
+                    let hiddenDuration = now - (cursorHiddenSinceNanoseconds ?? now)
+                    if hiddenDuration >= 120_000_000 {
+                        ensureSystemCursorHidden()
+                    }
                 }
                 cursorImageView.isHidden = true
                 return
             }
+            cursorHiddenSinceNanoseconds = nil
 
             // Bug 1 recovery: if the cursor was previously hidden (systemCursorSignature
             // was cleared by ensureSystemCursorHidden) but the cursor is now visible again,
             // force the appearance update to re-establish the non-transparent cursor rect.
             if NetworkProtocol.useReceiverSystemCursorMirror, systemCursorSignature == nil {
                 displayedAppearanceSignature = nil
+                needsCursorReassertion = true
             }
 
             if !updateCursorAppearanceIfNeeded(from: cursorState.appearance) {
@@ -363,7 +374,25 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             )
 
             if NetworkProtocol.useReceiverSystemCursorMirror {
-                applySystemCursorPosition(cursorPoint, normalizedPosition: normalizedPosition)
+                if cursorEscaped, !isNearDisplayEdge(normalizedPosition) {
+                    cursorEscaped = false
+                    localMouseLastMovedNanoseconds = 0
+                    lastWarpedScreenPoint = nil
+                    needsCursorReassertion = true
+                }
+
+                if systemCursorSignature != nil {
+                    if needsCursorReassertion {
+                        window?.invalidateCursorRects(for: self)
+                    }
+                    systemCursor.set()
+                }
+
+                applySystemCursorPosition(
+                    cursorPoint,
+                    normalizedPosition: normalizedPosition,
+                    forceReassertion: needsCursorReassertion
+                )
                 cursorImageView.isHidden = true
                 return
             }
@@ -483,12 +512,12 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         // MARK: - System cursor warp
 
-        private func applySystemCursorPosition(_ localPoint: CGPoint, normalizedPosition: CGPoint? = nil) {
+        private func applySystemCursorPosition(
+            _ localPoint: CGPoint,
+            normalizedPosition: CGPoint? = nil,
+            forceReassertion: Bool = false
+        ) {
             guard let window else { return }
-
-            // --- Bug 3: escape detection ---
-            // If the cursor has already escaped, don't warp.
-            if cursorEscaped { return }
 
             let windowPoint = convert(localPoint, to: nil)
             let appKitScreenPoint = window.convertPoint(toScreen: windowPoint)
@@ -504,10 +533,28 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             let now = DispatchTime.now().uptimeNanoseconds
             let currentSystemCursorPoint = CGEvent(source: nil)?.location
+            let windowScreenFrame = windowScreenRect()
+
+            if cursorEscaped {
+                if let currentSystemCursorPoint,
+                   let windowScreenFrame {
+                    let reclaimPadding: CGFloat = 8
+                    let reclaimRect = windowScreenFrame.insetBy(dx: -reclaimPadding, dy: -reclaimPadding)
+                    if reclaimRect.contains(currentSystemCursorPoint) {
+                        cursorEscaped = false
+                        localMouseLastMovedNanoseconds = 0
+                        lastWarpedScreenPoint = nil
+                        needsCursorReassertion = true
+                    } else {
+                        return
+                    }
+                } else {
+                    return
+                }
+            }
 
             // --- Bug 3: detect when cursor has left the window bounds ---
             if let currentSystemCursorPoint {
-                let windowScreenFrame = windowScreenRect()
                 if let windowScreenFrame {
                     let escapePadding: CGFloat = 20
                     let padded = windowScreenFrame.insetBy(dx: -escapePadding, dy: -escapePadding)
@@ -535,12 +582,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                abs(currentSystemCursorPoint.y - lastWarpedScreenPoint.y) > 2.0 {
                 localMouseLastMovedNanoseconds = now
                 self.lastWarpedScreenPoint = currentSystemCursorPoint
+                needsCursorReassertion = true
             }
 
             // Suppress warp for a short cooldown after local movement.
             if localMouseLastMovedNanoseconds > 0,
                now >= localMouseLastMovedNanoseconds,
-               now - localMouseLastMovedNanoseconds < warpCooldownNanoseconds {
+               now - localMouseLastMovedNanoseconds < warpCooldownNanoseconds,
+               !forceReassertion {
                 return
             }
 
@@ -550,12 +599,22 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                abs(lastWarpedScreenPoint.x - screenPoint.x) < 0.25,
                abs(lastWarpedScreenPoint.y - screenPoint.y) < 0.25,
                abs(currentSystemCursorPoint.x - screenPoint.x) < 0.25,
-               abs(currentSystemCursorPoint.y - screenPoint.y) < 0.25 {
+               abs(currentSystemCursorPoint.y - screenPoint.y) < 0.25,
+               !forceReassertion {
                 return
             }
 
             CGWarpMouseCursorPosition(screenPoint)
             lastWarpedScreenPoint = screenPoint
+            needsCursorReassertion = false
+        }
+
+        private func isNearDisplayEdge(_ normalizedPosition: CGPoint) -> Bool {
+            let edgeThreshold = 0.02
+            return normalizedPosition.x <= edgeThreshold ||
+                normalizedPosition.x >= (1.0 - edgeThreshold) ||
+                normalizedPosition.y <= edgeThreshold ||
+                normalizedPosition.y >= (1.0 - edgeThreshold)
         }
 
         /// Returns the window's frame in CG screen coordinates (origin at top-left
