@@ -13,23 +13,255 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         Coordinator()
     }
 
-    func makeNSView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
-        view.enableSetNeedsDisplay = false
-        view.isPaused = false
-        view.preferredFramesPerSecond = 60
-        view.clearColor = MTLClearColor(red: 0.08, green: 0.10, blue: 0.14, alpha: 1.0)
-        view.colorPixelFormat = .bgra8Unorm
-        view.framebufferOnly = false
-        view.delegate = context.coordinator
-
-        context.coordinator.attach(to: view)
+    func makeNSView(context: Context) -> ReceiverRenderContainerView {
+        let view = ReceiverRenderContainerView(device: MTLCreateSystemDefaultDevice())
+        view.metalView.delegate = context.coordinator
+        context.coordinator.attach(to: view.metalView)
+        view.refreshCursorOverlayConfiguration()
         return view
     }
 
-    func updateNSView(_ nsView: MTKView, context: Context) {
+    func updateNSView(_ nsView: ReceiverRenderContainerView, context: Context) {
+        nsView.refreshCursorOverlayConfiguration()
         _ = nsView
         _ = context
+    }
+
+    final class ReceiverRenderContainerView: NSView {
+        let metalView: MTKView
+        private let cursorOverlayView = ReceiverCursorOverlayHostView()
+
+        init(device: MTLDevice?) {
+            metalView = MTKView(frame: .zero, device: device)
+            super.init(frame: .zero)
+
+            wantsLayer = true
+            layer?.backgroundColor = NSColor.black.cgColor
+
+            metalView.enableSetNeedsDisplay = false
+            metalView.isPaused = false
+            metalView.preferredFramesPerSecond = 60
+            metalView.clearColor = MTLClearColor(red: 0.08, green: 0.10, blue: 0.14, alpha: 1.0)
+            metalView.colorPixelFormat = .bgra8Unorm
+            metalView.framebufferOnly = false
+            metalView.autoresizingMask = [.width, .height]
+            metalView.frame = bounds
+            addSubview(metalView)
+
+            cursorOverlayView.autoresizingMask = [.width, .height]
+            cursorOverlayView.frame = bounds
+            addSubview(cursorOverlayView)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func layout() {
+            super.layout()
+            metalView.frame = bounds
+            cursorOverlayView.frame = bounds
+            cursorOverlayView.refreshPresentationIfNeeded()
+        }
+
+        func refreshCursorOverlayConfiguration() {
+            cursorOverlayView.refreshConfiguration()
+        }
+    }
+
+    final class ReceiverCursorOverlayHostView: NSView {
+        override var isFlipped: Bool { true }
+
+        private let cursorImageView = NSImageView(frame: .zero)
+        private var refreshTimer: DispatchSourceTimer?
+        private let cursorOverlayMaxAgeNanoseconds: UInt64 = 250_000_000
+        private var displayedAppearanceSignature: UInt64?
+        private var displayedCursorSize: CGSize = .zero
+        private var displayedHotSpot: CGPoint = .zero
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+
+            wantsLayer = true
+            layer?.masksToBounds = false
+
+            cursorImageView.imageAlignment = .alignTopLeft
+            cursorImageView.imageScaling = .scaleProportionallyUpOrDown
+            cursorImageView.isHidden = true
+            cursorImageView.autoresizingMask = []
+            addSubview(cursorImageView)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        deinit {
+            stopRefreshTimer()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            syncRefreshTimerState()
+        }
+
+        func refreshConfiguration() {
+            isHidden = !(NetworkProtocol.enableReceiverSideCursorOverlay && !NetworkProtocol.useSwiftUIReceiverCursorOverlay)
+            if isHidden {
+                cursorImageView.isHidden = true
+            }
+            syncRefreshTimerState()
+            refreshPresentationIfNeeded()
+        }
+
+        func refreshPresentationIfNeeded() {
+            guard !isHidden else { return }
+            refreshCursorPresentation()
+        }
+
+        private func syncRefreshTimerState() {
+            guard window != nil, !isHidden else {
+                stopRefreshTimer()
+                return
+            }
+
+            guard refreshTimer == nil else { return }
+            let intervalNanoseconds = Int(1_000_000_000 / max(1, NetworkProtocol.cursorOverlayFramesPerSecond))
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(
+                deadline: .now(),
+                repeating: .nanoseconds(intervalNanoseconds),
+                leeway: .microseconds(250)
+            )
+            timer.setEventHandler { [weak self] in
+                self?.refreshCursorPresentation()
+            }
+            timer.activate()
+            refreshTimer = timer
+        }
+
+        private func stopRefreshTimer() {
+            refreshTimer?.setEventHandler {}
+            refreshTimer?.cancel()
+            refreshTimer = nil
+        }
+
+        private func refreshCursorPresentation() {
+            guard bounds.width > 0, bounds.height > 0 else {
+                cursorImageView.isHidden = true
+                return
+            }
+
+            guard let cursorState = ReceiverCursorStore.shared.snapshot(maxAgeNanoseconds: cursorOverlayMaxAgeNanoseconds),
+                  cursorState.isVisible else {
+                cursorImageView.isHidden = true
+                return
+            }
+
+            if !updateCursorAppearanceIfNeeded(from: cursorState.appearance) {
+                cursorImageView.isHidden = true
+                return
+            }
+
+            let cursorPoint = CGPoint(
+                x: CGFloat(cursorState.normalizedX) * bounds.width,
+                y: CGFloat(cursorState.normalizedY) * bounds.height
+            )
+            let cursorOrigin = CGPoint(
+                x: cursorPoint.x - displayedHotSpot.x,
+                y: cursorPoint.y - displayedHotSpot.y
+            )
+
+            cursorImageView.frame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
+            cursorImageView.isHidden = false
+        }
+
+        private func updateCursorAppearanceIfNeeded(from appearance: CursorAppearancePayload?) -> Bool {
+            if NetworkProtocol.useDebugCursorOverlayMarker {
+                if displayedAppearanceSignature != UInt64.max {
+                    cursorImageView.image = makeDebugCursorImage()
+                    displayedAppearanceSignature = UInt64.max
+                    displayedCursorSize = CGSize(width: 28, height: 28)
+                    displayedHotSpot = CGPoint(x: 14, y: 14)
+                }
+                return true
+            }
+
+            let resolvedAppearance = appearance ?? defaultArrowAppearance()
+            guard displayedAppearanceSignature != resolvedAppearance.signature else { return true }
+            guard let image = NSImage(data: resolvedAppearance.pngData) else { return false }
+
+            image.size = CGSize(
+                width: resolvedAppearance.widthPoints,
+                height: resolvedAppearance.heightPoints
+            )
+            cursorImageView.image = image
+            displayedAppearanceSignature = resolvedAppearance.signature
+            displayedCursorSize = image.size
+            displayedHotSpot = CGPoint(
+                x: resolvedAppearance.hotSpotX,
+                y: resolvedAppearance.hotSpotY
+            )
+            return true
+        }
+
+        private func defaultArrowAppearance() -> CursorAppearancePayload {
+            let image = NSCursor.arrow.image
+            var proposedRect = CGRect(origin: .zero, size: image.size)
+            let pngData: Data
+            if let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) {
+                let bitmap = NSBitmapImageRep(cgImage: cgImage)
+                pngData = bitmap.representation(using: .png, properties: [:]) ?? Data()
+            } else {
+                pngData = Data()
+            }
+
+            let hotSpot = NSCursor.arrow.hotSpot
+            return CursorAppearancePayload(
+                signature: 0,
+                pngData: pngData,
+                widthPoints: image.size.width,
+                heightPoints: image.size.height,
+                hotSpotX: hotSpot.x,
+                hotSpotY: hotSpot.y
+            )
+        }
+
+        private func makeDebugCursorImage() -> NSImage {
+            let size = NSSize(width: 28, height: 28)
+            let image = NSImage(size: size)
+            image.lockFocus()
+            defer { image.unlockFocus() }
+
+            let circleRect = NSRect(x: 2, y: 2, width: 24, height: 24)
+            NSColor.systemRed.withAlphaComponent(0.90).setFill()
+            NSBezierPath(ovalIn: circleRect).fill()
+
+            NSColor.white.withAlphaComponent(0.95).setStroke()
+            let border = NSBezierPath(ovalIn: circleRect.insetBy(dx: 1, dy: 1))
+            border.lineWidth = 2
+            border.stroke()
+
+            let vertical = NSBezierPath()
+            vertical.move(to: NSPoint(x: 14, y: 6))
+            vertical.line(to: NSPoint(x: 14, y: 22))
+            vertical.lineWidth = 2
+            vertical.stroke()
+
+            let horizontal = NSBezierPath()
+            horizontal.move(to: NSPoint(x: 6, y: 14))
+            horizontal.line(to: NSPoint(x: 22, y: 14))
+            horizontal.lineWidth = 2
+            horizontal.stroke()
+
+            return image
+        }
     }
 
     final class Coordinator: NSObject, MTKViewDelegate {
@@ -643,7 +875,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         private func makeCursorTexture(device: MTLDevice) -> (texture: MTLTexture, hotSpotFromTop: CGPoint)? {
-            guard !NetworkProtocol.useSwiftUIReceiverCursorOverlay else {
+            guard !NetworkProtocol.enableReceiverSideCursorOverlay else {
                 return nil
             }
 

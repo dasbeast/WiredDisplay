@@ -101,7 +101,7 @@ final class SenderSessionCoordinator {
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
     private let frameDispatchGate = SenderFrameDispatchGate()
-    private var cursorTrackingTimer: Timer?
+    private var cursorTrackingTimer: DispatchSourceTimer?
     private var lastSentCursorState: CursorStatePayload?
     private var lastSentCursorAppearanceSignature: UInt64?
     private var cachedCursorAppearance: CursorAppearancePayload?
@@ -931,18 +931,25 @@ final class SenderSessionCoordinator {
         lastSentCursorAppearanceSignature = nil
         cachedCursorAppearance = nil
         nextCursorAppearanceRefreshNanoseconds = 0
-        let interval = 1.0 / Double(max(1, NetworkProtocol.cursorOverlayFramesPerSecond))
-        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        let intervalNanoseconds = Int(1_000_000_000 / max(1, NetworkProtocol.cursorOverlayFramesPerSecond))
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now(),
+            repeating: .nanoseconds(intervalNanoseconds),
+            leeway: .microseconds(250)
+        )
+        timer.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in
                 self?.pollCursorState(for: displayID)
             }
         }
-        timer.tolerance = interval * 0.20
+        timer.activate()
         cursorTrackingTimer = timer
     }
 
     private func stopCursorTracking(sendHiddenState: Bool) {
-        cursorTrackingTimer?.invalidate()
+        cursorTrackingTimer?.setEventHandler {}
+        cursorTrackingTimer?.cancel()
         cursorTrackingTimer = nil
 
         if sendHiddenState,
@@ -1034,7 +1041,7 @@ final class SenderSessionCoordinator {
 
         let deltaX = abs(lastSentCursorState.normalizedX - nextState.normalizedX)
         let deltaY = abs(lastSentCursorState.normalizedY - nextState.normalizedY)
-        return deltaX >= 0.0005 || deltaY >= 0.0005
+        return deltaX >= 0.00002 || deltaY >= 0.00002
     }
 
     private func currentCursorAppearance(forceRefresh: Bool) -> CursorAppearancePayload? {

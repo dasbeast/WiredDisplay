@@ -290,32 +290,57 @@ final class ReceiverSessionCoordinator {
                 )
             case .cursorState:
                 let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
+                let receiverTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
                 ReceiverCursorStore.shared.update(
                     state: ReceiverCursorState(
-                        timestampNanoseconds: cursorState.timestampNanoseconds,
+                        receiverTimestampNanoseconds: receiverTimestampNanoseconds,
                         normalizedX: cursorState.normalizedX,
                         normalizedY: cursorState.normalizedY,
                         isVisible: cursorState.isVisible,
                         appearance: cursorState.appearance
                     )
                 )
-                if let appearance = cursorState.appearance {
+                if NetworkProtocol.useSwiftUIReceiverCursorOverlay,
+                   let appearance = cursorState.appearance {
                     updateCursorOverlayAppearance(from: appearance)
                 }
-                if cursorState.isVisible {
-                    cursorOverlaySummary = String(
-                        format: "visible (%.3f, %.3f)",
-                        cursorState.normalizedX,
-                        cursorState.normalizedY
-                    )
-                    cursorOverlayNormalizedX = cursorState.normalizedX
-                    cursorOverlayNormalizedY = cursorState.normalizedY
-                    isCursorOverlayVisible = true
+
+                if NetworkProtocol.useSwiftUIReceiverCursorOverlay {
+                    if cursorState.isVisible {
+                        cursorOverlaySummary = String(
+                            format: "visible (%.3f, %.3f)",
+                            cursorState.normalizedX,
+                            cursorState.normalizedY
+                        )
+                        cursorOverlayNormalizedX = cursorState.normalizedX
+                        cursorOverlayNormalizedY = cursorState.normalizedY
+                        isCursorOverlayVisible = true
+                    } else {
+                        cursorOverlaySummary = "hidden"
+                        cursorOverlayNormalizedX = nil
+                        cursorOverlayNormalizedY = nil
+                        isCursorOverlayVisible = false
+                    }
+                } else if cursorState.isVisible {
+                    if cursorOverlaySummary != "visible" {
+                        cursorOverlaySummary = "visible"
+                    }
+                    if !isCursorOverlayVisible {
+                        isCursorOverlayVisible = true
+                    }
                 } else {
-                    cursorOverlaySummary = "hidden"
-                    cursorOverlayNormalizedX = nil
-                    cursorOverlayNormalizedY = nil
-                    isCursorOverlayVisible = false
+                    if cursorOverlaySummary != "hidden" {
+                        cursorOverlaySummary = "hidden"
+                    }
+                    if isCursorOverlayVisible {
+                        isCursorOverlayVisible = false
+                    }
+                    if cursorOverlayNormalizedX != nil {
+                        cursorOverlayNormalizedX = nil
+                    }
+                    if cursorOverlayNormalizedY != nil {
+                        cursorOverlayNormalizedY = nil
+                    }
                 }
             case .videoFrame:
                 break

@@ -48,7 +48,7 @@ final class RenderFrameStore {
 }
 
 struct ReceiverCursorState: Equatable {
-    let timestampNanoseconds: UInt64
+    let receiverTimestampNanoseconds: UInt64
     let normalizedX: Double
     let normalizedY: Double
     let isVisible: Bool
@@ -76,7 +76,7 @@ final class ReceiverCursorStore {
             latestState = state
         } else if let previousState = latestState {
             latestState = ReceiverCursorState(
-                timestampNanoseconds: state.timestampNanoseconds,
+                receiverTimestampNanoseconds: state.receiverTimestampNanoseconds,
                 normalizedX: state.normalizedX,
                 normalizedY: state.normalizedY,
                 isVisible: state.isVisible,
@@ -97,7 +97,7 @@ final class ReceiverCursorStore {
         guard let maxAgeNanoseconds else { return state }
 
         let now = DispatchTime.now().uptimeNanoseconds
-        guard now >= state.timestampNanoseconds else { return state }
-        return (now - state.timestampNanoseconds) <= maxAgeNanoseconds ? state : nil
+        guard now >= state.receiverTimestampNanoseconds else { return state }
+        return (now - state.receiverTimestampNanoseconds) <= maxAgeNanoseconds ? state : nil
     }
 }
