@@ -292,14 +292,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         private func scheduleDisplayLinkedRefresh() {
-            // Fast-path: perform the warp directly on the display-link thread.
-            // CGWarpMouseCursorPosition and CGEvent(source:nil) are thread-safe;
-            // doing this here removes the 8-16 ms DispatchQueue.main.async hop
-            // that was the primary cause of choppiness.
-            performWarpFromDisplayLink()
-
-            // Still schedule a main-thread pass for AppKit cursor-rect and
-            // appearance updates that must happen on the main thread.
             displayLinkStateLock.lock()
             if displayLinkRefreshScheduled {
                 displayLinkStateLock.unlock()
@@ -315,28 +307,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 self.displayLinkStateLock.unlock()
                 self.refreshCursorPresentation()
             }
-        }
-
-        /// Warp performed directly on the CVDisplayLink background thread.
-        /// Only touches thread-safe CoreGraphics APIs — no AppKit calls.
-        private func performWarpFromDisplayLink() {
-            guard NetworkProtocol.useReceiverSystemCursorMirror else { return }
-            guard bounds.width > 0, bounds.height > 0 else { return }
-            guard let cursorState = ReceiverCursorStore.shared.snapshot(),
-                  cursorState.isVisible else { return }
-            guard !cursorEscaped else { return }
-
-            let now = DispatchTime.now().uptimeNanoseconds
-            let normalizedPosition = predictedCursorPosition(at: now) ?? CGPoint(
-                x: cursorState.normalizedX,
-                y: cursorState.normalizedY
-            )
-            let cursorPoint = CGPoint(
-                x: normalizedPosition.x * bounds.width,
-                y: normalizedPosition.y * bounds.height
-            )
-
-            applySystemCursorPosition(cursorPoint, normalizedPosition: normalizedPosition)
         }
 
         private func stopDisplayLink() {
@@ -393,8 +363,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             )
 
             if NetworkProtocol.useReceiverSystemCursorMirror {
-                // The actual warp already happened on the display-link thread
-                // via performWarpFromDisplayLink. Nothing else to do here.
+                applySystemCursorPosition(cursorPoint, normalizedPosition: normalizedPosition)
                 cursorImageView.isHidden = true
                 return
             }
@@ -412,23 +381,40 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         private func predictedCursorPosition(at nowNanoseconds: UInt64) -> CGPoint? {
             let snapshot = ReceiverCursorStore.shared.snapshotPair()
-            guard let latest = snapshot.latest, latest.isVisible else { return nil }
+            guard let latest = snapshot.latest, latest.isVisible else {
+                smoothedVelocityX = 0
+                smoothedVelocityY = 0
+                return nil
+            }
 
             guard let previous = snapshot.previous,
                   previous.isVisible,
                   latest.senderTimestampNanoseconds > previous.senderTimestampNanoseconds,
                   latest.receiverTimestampNanoseconds >= previous.receiverTimestampNanoseconds else {
+                smoothedVelocityX = 0
+                smoothedVelocityY = 0
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
             let senderDeltaNanoseconds = latest.senderTimestampNanoseconds - previous.senderTimestampNanoseconds
             guard senderDeltaNanoseconds > 0 else {
+                smoothedVelocityX = 0
+                smoothedVelocityY = 0
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
             // Instantaneous velocity (normalised units / nanosecond).
             let instantVX = (latest.normalizedX - previous.normalizedX) / Double(senderDeltaNanoseconds)
             let instantVY = (latest.normalizedY - previous.normalizedY) / Double(senderDeltaNanoseconds)
+
+            // If the cursor is essentially stationary, zero out velocity to prevent
+            // residual smoothed momentum from causing jittery bounces.
+            let motionThreshold = 0.00001
+            if abs(instantVX) < motionThreshold && abs(instantVY) < motionThreshold {
+                smoothedVelocityX = 0
+                smoothedVelocityY = 0
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
 
             // Exponentially-smoothed velocity to reduce jitter from variable sender timing.
             smoothedVelocityX = velocitySmoothingAlpha * instantVX + (1.0 - velocitySmoothingAlpha) * smoothedVelocityX
