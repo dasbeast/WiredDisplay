@@ -329,7 +329,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             let now = DispatchTime.now().uptimeNanoseconds
-            let usingSystemCursorMirror = usesSystemCursorMirror
             guard let cursorState = ReceiverCursorStore.shared.snapshot(),
                   cursorState.isVisible else {
                 logCursorVisibilityIfNeeded(false, detail: "no visible cursor snapshot")
@@ -347,25 +346,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
             cursorHiddenSinceNanoseconds = nil
-            logCursorVisibilityIfNeeded(true, detail: usingSystemCursorMirror ? "system-mirror" : "overlay-fallback")
-            let presentationMode = usingSystemCursorMirror ? "system-mirror" : "overlay-fallback"
-            if lastLoggedCursorPresentationMode != presentationMode {
-                lastLoggedCursorPresentationMode = presentationMode
-                logCursorDebug("presentation mode -> \(presentationMode)")
-            }
-
-            // Bug 1 recovery: if the cursor was previously hidden (systemCursorSignature
-            // was cleared by ensureSystemCursorHidden) but the cursor is now visible again,
-            // force the appearance update to re-establish the non-transparent cursor rect.
-            if usingSystemCursorMirror, systemCursorSignature == nil {
-                displayedAppearanceSignature = nil
-                needsCursorReassertion = true
-            }
-
-            if !updateCursorAppearanceIfNeeded(from: cursorState.appearance) {
-                cursorImageView.isHidden = true
-                return
-            }
 
             let normalizedPosition = predictedCursorPosition(at: now) ?? CGPoint(
                 x: cursorState.normalizedX,
@@ -373,6 +353,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             )
             let usingEdgeOverlayFallback = shouldUseEdgeOverlayFallback(for: normalizedPosition)
             let usingSystemCursorMirror = usesSystemCursorMirror && !usingEdgeOverlayFallback
+            logCursorVisibilityIfNeeded(true, detail: usingSystemCursorMirror ? "system-mirror" : "overlay-fallback")
             let cursorPoint = CGPoint(
                 x: normalizedPosition.x * bounds.width,
                 y: normalizedPosition.y * bounds.height
@@ -394,6 +375,19 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             if lastLoggedCursorPresentationMode != presentationMode {
                 lastLoggedCursorPresentationMode = presentationMode
                 logCursorDebug("presentation mode -> \(presentationMode)")
+            }
+
+            // Bug 1 recovery: if the cursor was previously hidden (systemCursorSignature
+            // was cleared by ensureSystemCursorHidden) but the cursor is now visible again,
+            // force the appearance update to re-establish the non-transparent cursor rect.
+            if usingSystemCursorMirror, systemCursorSignature == nil {
+                displayedAppearanceSignature = nil
+                needsCursorReassertion = true
+            }
+
+            if !updateCursorAppearanceIfNeeded(from: cursorState.appearance) {
+                cursorImageView.isHidden = true
+                return
             }
 
             if usingSystemCursorMirror {
