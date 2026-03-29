@@ -293,6 +293,7 @@ final class ReceiverSessionCoordinator {
                 let receiverTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
                 ReceiverCursorStore.shared.update(
                     state: ReceiverCursorState(
+                        senderTimestampNanoseconds: cursorState.timestampNanoseconds,
                         receiverTimestampNanoseconds: receiverTimestampNanoseconds,
                         normalizedX: cursorState.normalizedX,
                         normalizedY: cursorState.normalizedY,

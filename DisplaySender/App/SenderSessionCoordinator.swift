@@ -101,7 +101,9 @@ final class SenderSessionCoordinator {
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
     private let frameDispatchGate = SenderFrameDispatchGate()
-    private var cursorTrackingTimer: DispatchSourceTimer?
+    private var cursorTrackingRefreshTimer: DispatchSourceTimer?
+    private var localCursorEventMonitor: Any?
+    private var globalCursorEventMonitor: Any?
     private var lastSentCursorState: CursorStatePayload?
     private var lastSentCursorAppearanceSignature: UInt64?
     private var cachedCursorAppearance: CursorAppearancePayload?
@@ -931,26 +933,16 @@ final class SenderSessionCoordinator {
         lastSentCursorAppearanceSignature = nil
         cachedCursorAppearance = nil
         nextCursorAppearanceRefreshNanoseconds = 0
-        let intervalNanoseconds = Int(1_000_000_000 / max(1, NetworkProtocol.cursorOverlayFramesPerSecond))
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(
-            deadline: .now(),
-            repeating: .nanoseconds(intervalNanoseconds),
-            leeway: .microseconds(250)
-        )
-        timer.setEventHandler { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.pollCursorState(for: displayID)
-            }
-        }
-        timer.activate()
-        cursorTrackingTimer = timer
+        installCursorEventMonitors(for: displayID)
+        startCursorRefreshTimer(for: displayID)
+        pollCursorState(for: displayID)
     }
 
     private func stopCursorTracking(sendHiddenState: Bool) {
-        cursorTrackingTimer?.setEventHandler {}
-        cursorTrackingTimer?.cancel()
-        cursorTrackingTimer = nil
+        cursorTrackingRefreshTimer?.setEventHandler {}
+        cursorTrackingRefreshTimer?.cancel()
+        cursorTrackingRefreshTimer = nil
+        removeCursorEventMonitors()
 
         if sendHiddenState,
            NetworkProtocol.enableReceiverSideCursorOverlay,
@@ -970,6 +962,58 @@ final class SenderSessionCoordinator {
         lastSentCursorAppearanceSignature = nil
         cachedCursorAppearance = nil
         nextCursorAppearanceRefreshNanoseconds = 0
+    }
+
+    private func installCursorEventMonitors(for displayID: CGDirectDisplayID) {
+        let eventMask: NSEvent.EventTypeMask = [
+            .mouseMoved,
+            .leftMouseDragged,
+            .rightMouseDragged,
+            .otherMouseDragged
+        ]
+
+        localCursorEventMonitor = NSEvent.addLocalMonitorForEvents(matching: eventMask) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.pollCursorState(for: displayID)
+            }
+            return event
+        }
+
+        globalCursorEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.pollCursorState(for: displayID)
+            }
+        }
+    }
+
+    private func removeCursorEventMonitors() {
+        if let localCursorEventMonitor {
+            NSEvent.removeMonitor(localCursorEventMonitor)
+            self.localCursorEventMonitor = nil
+        }
+
+        if let globalCursorEventMonitor {
+            NSEvent.removeMonitor(globalCursorEventMonitor)
+            self.globalCursorEventMonitor = nil
+        }
+    }
+
+    private func startCursorRefreshTimer(for displayID: CGDirectDisplayID) {
+        let refreshFramesPerSecond = max(1, NetworkProtocol.cursorAppearanceRefreshFramesPerSecond)
+        let intervalNanoseconds = Int(1_000_000_000 / refreshFramesPerSecond)
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + .nanoseconds(intervalNanoseconds),
+            repeating: .nanoseconds(intervalNanoseconds),
+            leeway: .milliseconds(1)
+        )
+        timer.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.pollCursorState(for: displayID)
+            }
+        }
+        timer.activate()
+        cursorTrackingRefreshTimer = timer
     }
 
     private func pollCursorState(for displayID: CGDirectDisplayID) {

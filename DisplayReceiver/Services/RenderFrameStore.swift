@@ -48,6 +48,7 @@ final class RenderFrameStore {
 }
 
 struct ReceiverCursorState: Equatable {
+    let senderTimestampNanoseconds: UInt64
     let receiverTimestampNanoseconds: UInt64
     let normalizedX: Double
     let normalizedY: Double
@@ -55,36 +56,48 @@ struct ReceiverCursorState: Equatable {
     let appearance: CursorAppearancePayload?
 }
 
+struct ReceiverCursorSnapshot {
+    let previous: ReceiverCursorState?
+    let latest: ReceiverCursorState?
+}
+
 /// Thread-safe cursor state store shared between receiver control handling and presentation.
 final class ReceiverCursorStore {
     static let shared = ReceiverCursorStore()
 
     private let lock = NSLock()
+    private var previousState: ReceiverCursorState?
     private var latestState: ReceiverCursorState?
 
     private init() {}
 
     func reset() {
         lock.lock()
+        previousState = nil
         latestState = nil
         lock.unlock()
     }
 
     func update(state: ReceiverCursorState) {
         lock.lock()
+        let resolvedState: ReceiverCursorState
         if state.appearance != nil {
-            latestState = state
-        } else if let previousState = latestState {
-            latestState = ReceiverCursorState(
+            resolvedState = state
+        } else if let latestState {
+            resolvedState = ReceiverCursorState(
+                senderTimestampNanoseconds: state.senderTimestampNanoseconds,
                 receiverTimestampNanoseconds: state.receiverTimestampNanoseconds,
                 normalizedX: state.normalizedX,
                 normalizedY: state.normalizedY,
                 isVisible: state.isVisible,
-                appearance: previousState.appearance
+                appearance: latestState.appearance
             )
         } else {
-            latestState = state
+            resolvedState = state
         }
+
+        previousState = latestState
+        latestState = resolvedState
         lock.unlock()
     }
 
@@ -99,5 +112,12 @@ final class ReceiverCursorStore {
         let now = DispatchTime.now().uptimeNanoseconds
         guard now >= state.receiverTimestampNanoseconds else { return state }
         return (now - state.receiverTimestampNanoseconds) <= maxAgeNanoseconds ? state : nil
+    }
+
+    func snapshotPair() -> ReceiverCursorSnapshot {
+        lock.lock()
+        let snapshot = ReceiverCursorSnapshot(previous: previousState, latest: latestState)
+        lock.unlock()
+        return snapshot
     }
 }

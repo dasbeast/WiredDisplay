@@ -71,10 +71,21 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
     }
 
     final class ReceiverCursorOverlayHostView: NSView {
+        private static let displayLinkCallback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userData in
+            guard let userData else { return kCVReturnError }
+            let view = Unmanaged<ReceiverCursorOverlayHostView>.fromOpaque(userData).takeUnretainedValue()
+            view.scheduleDisplayLinkedRefresh()
+            return kCVReturnSuccess
+        }
+
         override var isFlipped: Bool { true }
 
         private let cursorImageView = NSImageView(frame: .zero)
         private var refreshTimer: DispatchSourceTimer?
+        private var displayLink: CVDisplayLink?
+        private var displayLinkDisplayID: CGDirectDisplayID?
+        private let displayLinkStateLock = NSLock()
+        private var displayLinkRefreshScheduled = false
         private var displayedAppearanceSignature: UInt64?
         private var displayedCursorSize: CGSize = .zero
         private var displayedHotSpot: CGPoint = .zero
@@ -98,6 +109,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         deinit {
+            stopDisplayLink()
             stopRefreshTimer()
         }
 
@@ -107,7 +119,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            syncRefreshTimerState()
+            syncPresentationDriverState()
         }
 
         func refreshConfiguration() {
@@ -115,7 +127,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             if isHidden {
                 cursorImageView.isHidden = true
             }
-            syncRefreshTimerState()
+            syncPresentationDriverState()
             refreshPresentationIfNeeded()
         }
 
@@ -124,13 +136,24 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             refreshCursorPresentation()
         }
 
-        private func syncRefreshTimerState() {
+        private func syncPresentationDriverState() {
             guard window != nil, !isHidden else {
+                stopDisplayLink()
                 stopRefreshTimer()
                 return
             }
 
+            guard !startDisplayLinkIfPossible() else {
+                stopRefreshTimer()
+                return
+            }
+
+            syncRefreshTimerState()
+        }
+
+        private func syncRefreshTimerState() {
             guard refreshTimer == nil else { return }
+
             let intervalNanoseconds = Int(1_000_000_000 / max(1, NetworkProtocol.cursorOverlayFramesPerSecond))
             let timer = DispatchSource.makeTimerSource(queue: .main)
             timer.schedule(
@@ -145,6 +168,77 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             refreshTimer = timer
         }
 
+        private func startDisplayLinkIfPossible() -> Bool {
+            if displayLink == nil {
+                var createdDisplayLink: CVDisplayLink?
+                guard CVDisplayLinkCreateWithActiveCGDisplays(&createdDisplayLink) == kCVReturnSuccess,
+                      let createdDisplayLink else {
+                    return false
+                }
+
+                let callbackStatus = CVDisplayLinkSetOutputCallback(
+                    createdDisplayLink,
+                    Self.displayLinkCallback,
+                    Unmanaged.passUnretained(self).toOpaque()
+                )
+                guard callbackStatus == kCVReturnSuccess else {
+                    return false
+                }
+
+                displayLink = createdDisplayLink
+            }
+
+            guard let displayLink else { return false }
+            updateDisplayLinkDisplayIfNeeded(displayLink)
+
+            if !CVDisplayLinkIsRunning(displayLink) {
+                guard CVDisplayLinkStart(displayLink) == kCVReturnSuccess else {
+                    stopDisplayLink()
+                    return false
+                }
+            }
+
+            return true
+        }
+
+        private func updateDisplayLinkDisplayIfNeeded(_ displayLink: CVDisplayLink) {
+            guard let screenNumber = window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return
+            }
+
+            let displayID = CGDirectDisplayID(screenNumber.uint32Value)
+            guard displayLinkDisplayID != displayID else { return }
+            if CVDisplayLinkSetCurrentCGDisplay(displayLink, displayID) == kCVReturnSuccess {
+                displayLinkDisplayID = displayID
+            }
+        }
+
+        private func scheduleDisplayLinkedRefresh() {
+            displayLinkStateLock.lock()
+            if displayLinkRefreshScheduled {
+                displayLinkStateLock.unlock()
+                return
+            }
+            displayLinkRefreshScheduled = true
+            displayLinkStateLock.unlock()
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.displayLinkStateLock.lock()
+                self.displayLinkRefreshScheduled = false
+                self.displayLinkStateLock.unlock()
+                self.refreshCursorPresentation()
+            }
+        }
+
+        private func stopDisplayLink() {
+            if let displayLink, CVDisplayLinkIsRunning(displayLink) {
+                CVDisplayLinkStop(displayLink)
+            }
+            displayLink = nil
+            displayLinkDisplayID = nil
+        }
+
         private func stopRefreshTimer() {
             refreshTimer?.setEventHandler {}
             refreshTimer?.cancel()
@@ -157,6 +251,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
 
+            let now = DispatchTime.now().uptimeNanoseconds
             guard let cursorState = ReceiverCursorStore.shared.snapshot(),
                   cursorState.isVisible else {
                 cursorImageView.isHidden = true
@@ -168,9 +263,13 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
 
+            let normalizedPosition = predictedCursorPosition(at: now) ?? CGPoint(
+                x: cursorState.normalizedX,
+                y: cursorState.normalizedY
+            )
             let cursorPoint = CGPoint(
-                x: CGFloat(cursorState.normalizedX) * bounds.width,
-                y: CGFloat(cursorState.normalizedY) * bounds.height
+                x: normalizedPosition.x * bounds.width,
+                y: normalizedPosition.y * bounds.height
             )
             let cursorOrigin = CGPoint(
                 x: cursorPoint.x - displayedHotSpot.x,
@@ -179,6 +278,40 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             cursorImageView.frame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
             cursorImageView.isHidden = false
+        }
+
+        private func predictedCursorPosition(at nowNanoseconds: UInt64) -> CGPoint? {
+            let snapshot = ReceiverCursorStore.shared.snapshotPair()
+            guard let latest = snapshot.latest, latest.isVisible else { return nil }
+
+            guard let previous = snapshot.previous,
+                  previous.isVisible,
+                  latest.senderTimestampNanoseconds > previous.senderTimestampNanoseconds,
+                  latest.receiverTimestampNanoseconds >= previous.receiverTimestampNanoseconds else {
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
+
+            let senderDeltaNanoseconds = latest.senderTimestampNanoseconds - previous.senderTimestampNanoseconds
+            guard senderDeltaNanoseconds > 0 else {
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
+
+            let elapsedSinceLatestNanoseconds = nowNanoseconds >= latest.receiverTimestampNanoseconds
+                ? nowNanoseconds - latest.receiverTimestampNanoseconds
+                : 0
+            let predictionLeadNanoseconds = min(
+                elapsedSinceLatestNanoseconds,
+                min(NetworkProtocol.cursorPredictionLeadNanoseconds, senderDeltaNanoseconds)
+            )
+            let predictionFactor = min(1.0, Double(predictionLeadNanoseconds) / Double(senderDeltaNanoseconds))
+
+            let predictedX = latest.normalizedX + ((latest.normalizedX - previous.normalizedX) * predictionFactor)
+            let predictedY = latest.normalizedY + ((latest.normalizedY - previous.normalizedY) * predictionFactor)
+
+            return CGPoint(
+                x: max(0, min(1, predictedX)),
+                y: max(0, min(1, predictedY))
+            )
         }
 
         private func updateCursorAppearanceIfNeeded(from appearance: CursorAppearancePayload?) -> Bool {
