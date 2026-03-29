@@ -102,7 +102,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var systemCursorSignature: UInt64?
         private var lastWarpedScreenPoint: CGPoint?
         private var localMouseLastMovedNanoseconds: UInt64 = 0
-        private var mouseEventMonitor: Any?
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -123,9 +122,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         deinit {
-            if let monitor = mouseEventMonitor {
-                NSEvent.removeMonitor(monitor)
-            }
             stopDisplayLink()
             stopRefreshTimer()
         }
@@ -142,20 +138,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if window != nil {
-                if mouseEventMonitor == nil {
-                    mouseEventMonitor = NSEvent.addGlobalMonitorForEvents(
-                        matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
-                    ) { [weak self] _ in
-                        self?.localMouseLastMovedNanoseconds = DispatchTime.now().uptimeNanoseconds
-                    }
-                }
-            } else {
-                if let monitor = mouseEventMonitor {
-                    NSEvent.removeMonitor(monitor)
-                    mouseEventMonitor = nil
-                }
-            }
             syncPresentationDriverState()
         }
 
@@ -422,14 +404,30 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             let now = DispatchTime.now().uptimeNanoseconds
-            let nanosecondsSinceLocalMove = localMouseLastMovedNanoseconds > 0 && now >= localMouseLastMovedNanoseconds
-                ? now - localMouseLastMovedNanoseconds
-                : UInt64.max
-            if nanosecondsSinceLocalMove < 250_000_000 {
+            let currentSystemCursorPoint = CGEvent(source: nil)?.location
+
+            // Detect local hardware mouse movement via position drift.
+            // CGWarpMouseCursorPosition does not generate NSEvents, so any drift
+            // between the last warp target and the current cursor position means
+            // the physical mouse moved it. This avoids needing Input Monitoring
+            // permission from a global NSEvent monitor.
+            if let lastWarpedScreenPoint,
+               let currentSystemCursorPoint,
+               abs(currentSystemCursorPoint.x - lastWarpedScreenPoint.x) > 2.0 ||
+               abs(currentSystemCursorPoint.y - lastWarpedScreenPoint.y) > 2.0 {
+                localMouseLastMovedNanoseconds = now
+            }
+
+            // Suppress warp for 250 ms after detecting local movement.
+            // Without this, rapid-fire warp calls at 60 fps fighting hardware
+            // input trigger macOS cursor-suppression and the cursor vanishes.
+            if localMouseLastMovedNanoseconds > 0,
+               now >= localMouseLastMovedNanoseconds,
+               now - localMouseLastMovedNanoseconds < 250_000_000 {
                 return
             }
 
-            let currentSystemCursorPoint = CGEvent(source: nil)?.location
+            // Skip warp if cursor is already at the target position.
             if let lastWarpedScreenPoint,
                let currentSystemCursorPoint,
                abs(lastWarpedScreenPoint.x - screenPoint.x) < 0.25,
