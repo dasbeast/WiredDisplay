@@ -102,6 +102,19 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var systemCursorSignature: UInt64?
         private var lastWarpedScreenPoint: CGPoint?
         private var localMouseLastMovedNanoseconds: UInt64 = 0
+        /// When true, the local user has intentionally moved the cursor outside the
+        /// receiver window. Warping is suspended until the cursor re-enters.
+        private var cursorEscaped = false
+        private var trackingArea: NSTrackingArea?
+
+        /// Smoothed velocity (normalised units / nanosecond) used for cursor prediction.
+        private var smoothedVelocityX: Double = 0
+        private var smoothedVelocityY: Double = 0
+        /// Exponential-smoothing factor applied to new velocity samples.
+        private let velocitySmoothingAlpha: Double = 0.35
+
+        /// The warp cooldown applied after detecting local hardware mouse drift (nanoseconds).
+        private let warpCooldownNanoseconds: UInt64 = 80_000_000 // 80 ms
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -114,6 +127,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             cursorImageView.isHidden = true
             cursorImageView.autoresizingMask = []
             addSubview(cursorImageView)
+
+            installTrackingArea()
         }
 
         @available(*, unavailable)
@@ -136,8 +151,30 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             addCursorRect(bounds, cursor: systemCursor)
         }
 
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            installTrackingArea()
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            super.mouseEntered(with: event)
+            if cursorEscaped {
+                cursorEscaped = false
+                // Clear drift cooldown so first warp fires immediately.
+                localMouseLastMovedNanoseconds = 0
+                lastWarpedScreenPoint = nil
+            }
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            super.mouseExited(with: event)
+            // Don't immediately set cursorEscaped — let applySystemCursorPosition
+            // confirm the cursor is truly outside the window bounds.
+        }
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            installTrackingArea()
             syncPresentationDriverState()
         }
 
@@ -158,6 +195,24 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             guard !isHidden else { return }
             refreshCursorPresentation()
         }
+
+        // MARK: - Tracking area
+
+        private func installTrackingArea() {
+            if let old = trackingArea {
+                removeTrackingArea(old)
+            }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(area)
+            trackingArea = area
+        }
+
+        // MARK: - Presentation drivers
 
         private func syncPresentationDriverState() {
             guard window != nil, !isHidden else {
@@ -237,6 +292,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         private func scheduleDisplayLinkedRefresh() {
+            // Fast-path: perform the warp directly on the display-link thread.
+            // CGWarpMouseCursorPosition and CGEvent(source:nil) are thread-safe;
+            // doing this here removes the 8-16 ms DispatchQueue.main.async hop
+            // that was the primary cause of choppiness.
+            performWarpFromDisplayLink()
+
+            // Still schedule a main-thread pass for AppKit cursor-rect and
+            // appearance updates that must happen on the main thread.
             displayLinkStateLock.lock()
             if displayLinkRefreshScheduled {
                 displayLinkStateLock.unlock()
@@ -254,6 +317,28 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
         }
 
+        /// Warp performed directly on the CVDisplayLink background thread.
+        /// Only touches thread-safe CoreGraphics APIs — no AppKit calls.
+        private func performWarpFromDisplayLink() {
+            guard NetworkProtocol.useReceiverSystemCursorMirror else { return }
+            guard bounds.width > 0, bounds.height > 0 else { return }
+            guard let cursorState = ReceiverCursorStore.shared.snapshot(),
+                  cursorState.isVisible else { return }
+            guard !cursorEscaped else { return }
+
+            let now = DispatchTime.now().uptimeNanoseconds
+            let normalizedPosition = predictedCursorPosition(at: now) ?? CGPoint(
+                x: cursorState.normalizedX,
+                y: cursorState.normalizedY
+            )
+            let cursorPoint = CGPoint(
+                x: normalizedPosition.x * bounds.width,
+                y: normalizedPosition.y * bounds.height
+            )
+
+            applySystemCursorPosition(cursorPoint, normalizedPosition: normalizedPosition)
+        }
+
         private func stopDisplayLink() {
             if let displayLink, CVDisplayLinkIsRunning(displayLink) {
                 CVDisplayLinkStop(displayLink)
@@ -267,6 +352,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             refreshTimer?.cancel()
             refreshTimer = nil
         }
+
+        // MARK: - Cursor presentation (main thread)
 
         private func refreshCursorPresentation() {
             guard bounds.width > 0, bounds.height > 0 else {
@@ -284,6 +371,13 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
 
+            // Bug 1 recovery: if the cursor was previously hidden (systemCursorSignature
+            // was cleared by ensureSystemCursorHidden) but the cursor is now visible again,
+            // force the appearance update to re-establish the non-transparent cursor rect.
+            if NetworkProtocol.useReceiverSystemCursorMirror, systemCursorSignature == nil {
+                displayedAppearanceSignature = nil
+            }
+
             if !updateCursorAppearanceIfNeeded(from: cursorState.appearance) {
                 cursorImageView.isHidden = true
                 return
@@ -299,7 +393,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             )
 
             if NetworkProtocol.useReceiverSystemCursorMirror {
-                applySystemCursorPosition(cursorPoint)
+                // The actual warp already happened on the display-link thread
+                // via performWarpFromDisplayLink. Nothing else to do here.
                 cursorImageView.isHidden = true
                 return
             }
@@ -312,6 +407,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             cursorImageView.frame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
             cursorImageView.isHidden = false
         }
+
+        // MARK: - Cursor prediction
 
         private func predictedCursorPosition(at nowNanoseconds: UInt64) -> CGPoint? {
             let snapshot = ReceiverCursorStore.shared.snapshotPair()
@@ -329,6 +426,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
+            // Instantaneous velocity (normalised units / nanosecond).
+            let instantVX = (latest.normalizedX - previous.normalizedX) / Double(senderDeltaNanoseconds)
+            let instantVY = (latest.normalizedY - previous.normalizedY) / Double(senderDeltaNanoseconds)
+
+            // Exponentially-smoothed velocity to reduce jitter from variable sender timing.
+            smoothedVelocityX = velocitySmoothingAlpha * instantVX + (1.0 - velocitySmoothingAlpha) * smoothedVelocityX
+            smoothedVelocityY = velocitySmoothingAlpha * instantVY + (1.0 - velocitySmoothingAlpha) * smoothedVelocityY
+
             let elapsedSinceLatestNanoseconds = nowNanoseconds >= latest.receiverTimestampNanoseconds
                 ? nowNanoseconds - latest.receiverTimestampNanoseconds
                 : 0
@@ -336,16 +441,17 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 elapsedSinceLatestNanoseconds,
                 min(NetworkProtocol.cursorPredictionLeadNanoseconds, senderDeltaNanoseconds)
             )
-            let predictionFactor = min(1.0, Double(predictionLeadNanoseconds) / Double(senderDeltaNanoseconds))
 
-            let predictedX = latest.normalizedX + ((latest.normalizedX - previous.normalizedX) * predictionFactor)
-            let predictedY = latest.normalizedY + ((latest.normalizedY - previous.normalizedY) * predictionFactor)
+            let predictedX = latest.normalizedX + smoothedVelocityX * Double(predictionLeadNanoseconds)
+            let predictedY = latest.normalizedY + smoothedVelocityY * Double(predictionLeadNanoseconds)
 
             return CGPoint(
                 x: max(0, min(1, predictedX)),
                 y: max(0, min(1, predictedY))
             )
         }
+
+        // MARK: - Cursor appearance
 
         private func updateCursorAppearanceIfNeeded(from appearance: CursorAppearancePayload?) -> Bool {
             if NetworkProtocol.useDebugCursorOverlayMarker {
@@ -389,8 +495,15 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             return true
         }
 
-        private func applySystemCursorPosition(_ localPoint: CGPoint) {
+        // MARK: - System cursor warp
+
+        private func applySystemCursorPosition(_ localPoint: CGPoint, normalizedPosition: CGPoint? = nil) {
             guard let window else { return }
+
+            // --- Bug 3: escape detection ---
+            // If the cursor has already escaped, don't warp.
+            if cursorEscaped { return }
+
             let windowPoint = convert(localPoint, to: nil)
             let appKitScreenPoint = window.convertPoint(toScreen: windowPoint)
             let screenPoint: CGPoint
@@ -406,16 +519,30 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             let now = DispatchTime.now().uptimeNanoseconds
             let currentSystemCursorPoint = CGEvent(source: nil)?.location
 
-            // Detect local hardware mouse movement via position drift.
-            // CGWarpMouseCursorPosition does not generate NSEvents, so any drift
-            // between the last warp target and the current cursor position means
-            // the physical mouse moved it. This avoids needing Input Monitoring
-            // permission from a global NSEvent monitor.
-            //
-            // Crucially, when drift is detected we also advance lastWarpedScreenPoint
-            // to the current position. Without this, the stale warp target keeps
-            // re-triggering the cooldown every frame after it expires, permanently
-            // locking out all future warps and making the cursor vanish.
+            // --- Bug 3: detect when cursor has left the window bounds ---
+            if let currentSystemCursorPoint {
+                let windowScreenFrame = windowScreenRect()
+                if let windowScreenFrame {
+                    let escapePadding: CGFloat = 20
+                    let padded = windowScreenFrame.insetBy(dx: -escapePadding, dy: -escapePadding)
+                    if !padded.contains(currentSystemCursorPoint) {
+                        // Cursor is well outside the receiver window.
+                        // Check if the remote cursor is also near an edge —
+                        // the user is moving off-screen deliberately.
+                        let np = normalizedPosition ?? .zero
+                        let edgeThreshold = 0.02
+                        let nearEdge = np.x <= edgeThreshold || np.x >= (1.0 - edgeThreshold)
+                            || np.y <= edgeThreshold || np.y >= (1.0 - edgeThreshold)
+                        if nearEdge {
+                            cursorEscaped = true
+                            localMouseLastMovedNanoseconds = now
+                            return
+                        }
+                    }
+                }
+            }
+
+            // --- Bug 1: detect local hardware mouse drift ---
             if let lastWarpedScreenPoint,
                let currentSystemCursorPoint,
                abs(currentSystemCursorPoint.x - lastWarpedScreenPoint.x) > 2.0 ||
@@ -424,12 +551,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 self.lastWarpedScreenPoint = currentSystemCursorPoint
             }
 
-            // Suppress warp for 250 ms after detecting local movement.
-            // Without this, rapid-fire warp calls at 60 fps fighting hardware
-            // input trigger macOS cursor-suppression and the cursor vanishes.
+            // Suppress warp for a short cooldown after local movement.
             if localMouseLastMovedNanoseconds > 0,
                now >= localMouseLastMovedNanoseconds,
-               now - localMouseLastMovedNanoseconds < 250_000_000 {
+               now - localMouseLastMovedNanoseconds < warpCooldownNanoseconds {
                 return
             }
 
@@ -447,8 +572,30 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             lastWarpedScreenPoint = screenPoint
         }
 
+        /// Returns the window's frame in CG screen coordinates (origin at top-left
+        /// of the main display), or nil if unavailable.
+        private func windowScreenRect() -> CGRect? {
+            guard let window, let screen = window.screen else { return nil }
+            let wf = window.frame
+            return CGRect(
+                x: wf.origin.x,
+                y: screen.frame.minY + screen.frame.maxY - wf.maxY,
+                width: wf.width,
+                height: wf.height
+            )
+        }
+
         private func ensureSystemCursorHidden() {
             guard NetworkProtocol.useReceiverSystemCursorMirror else { return }
+
+            // If there is already a visible cursor state waiting, don't install
+            // the transparent cursor — it will just be immediately replaced on the
+            // next refresh cycle, and the brief transparent flash is the root cause
+            // of the "cursor disappears" bug.
+            if let pending = ReceiverCursorStore.shared.snapshot(), pending.isVisible {
+                return
+            }
+
             lastWarpedScreenPoint = nil
             if systemCursorSignature != nil {
                 systemCursor = NSCursor(image: Self.transparentCursorImage, hotSpot: .zero)
