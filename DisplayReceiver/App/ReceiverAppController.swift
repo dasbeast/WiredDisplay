@@ -17,6 +17,7 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var advertisementErrorText: String?
     @Published private(set) var isReceiverWindowVisible = false
     @Published private(set) var powerManagementErrorText: String?
+    @Published private(set) var cursorOverlayText = "-"
 
     let coordinator = ReceiverSessionCoordinator()
     let advertisementService = ReceiverAdvertisementService()
@@ -114,6 +115,7 @@ final class ReceiverAppController: ObservableObject {
         receivedMegabitsPerSecondText = formatRate(coordinator.receivedMegabitsPerSecond, unit: "Mbps")
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         interfaceLines = coordinator.localInterfaceDescriptions
+        cursorOverlayText = coordinator.cursorOverlaySummary
 
         if newStreaming && !wasStreaming {
             powerManagementService.startPreventingSleep()

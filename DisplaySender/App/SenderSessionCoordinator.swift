@@ -434,7 +434,7 @@ final class SenderSessionCoordinator {
                     height: liveMode?.pixelHeight ?? captureHeight,
                     framesPerSecond: NetworkProtocol.captureFramesPerSecond,
                     streamingPipelineMode: self.resolvedStreamingPipelineMode,
-                    showsCursor: !NetworkProtocol.enableReceiverSideCursorOverlay
+                    showsCursor: NetworkProtocol.showSenderCursorFallbackWhileTestingOverlay || !NetworkProtocol.enableReceiverSideCursorOverlay
                 )
             }
         }
@@ -462,7 +462,7 @@ final class SenderSessionCoordinator {
                 height: live.pixelHeight,
                 framesPerSecond: NetworkProtocol.captureFramesPerSecond,
                 streamingPipelineMode: self.resolvedStreamingPipelineMode,
-                showsCursor: !NetworkProtocol.enableReceiverSideCursorOverlay
+                showsCursor: NetworkProtocol.showSenderCursorFallbackWhileTestingOverlay || !NetworkProtocol.enableReceiverSideCursorOverlay
             )
         }
     }

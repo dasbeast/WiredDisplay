@@ -32,6 +32,7 @@ final class ReceiverSessionCoordinator {
     private(set) var receivedMegabitsPerSecond: Double? { didSet { onChange?() } }
     private(set) var renderSourceDescription: String = "-" { didSet { onChange?() } }
     private(set) var replacedBeforeRenderCount: UInt64 = 0 { didSet { onChange?() } }
+    private(set) var cursorOverlaySummary: String = "-" { didSet { onChange?() } }
 
     private(set) var configuredEndpointSummary: String = "-" { didSet { onChange?() } }
     private(set) var wiredPathAvailable = false { didSet { onChange?() } }
@@ -119,6 +120,7 @@ final class ReceiverSessionCoordinator {
                 self.frameDecodePipeline.reset()
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
+                self.cursorOverlaySummary = "-"
                 if case .running = self.state {
                     self.state = .listening
                 }
@@ -207,6 +209,7 @@ final class ReceiverSessionCoordinator {
         receivedMegabitsPerSecond = nil
         renderSourceDescription = "-"
         replacedBeforeRenderCount = 0
+        cursorOverlaySummary = "-"
         lastRenderedFrameTelemetry = nil
         lastFrameArrivalNanoseconds = nil
         smoothedIntervalMilliseconds = nil
@@ -231,6 +234,7 @@ final class ReceiverSessionCoordinator {
         frameDecodePipeline.reset()
         audioPlaybackService.stop()
         ReceiverCursorStore.shared.reset()
+        cursorOverlaySummary = "-"
         listenerService.stopListening()
         videoDatagramListenerService.stopListening()
         state = .idle
@@ -243,6 +247,7 @@ final class ReceiverSessionCoordinator {
                 frameDecodePipeline.reset()
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
+                cursorOverlaySummary = "-"
                 let hello = try envelope.decodePayload(as: HelloPayload.self)
                 peerName = hello.senderName
                 if hello.requestedProtocolVersion == NetworkProtocol.protocolVersion {
@@ -288,6 +293,15 @@ final class ReceiverSessionCoordinator {
                         isVisible: cursorState.isVisible
                     )
                 )
+                if cursorState.isVisible {
+                    cursorOverlaySummary = String(
+                        format: "visible (%.3f, %.3f)",
+                        cursorState.normalizedX,
+                        cursorState.normalizedY
+                    )
+                } else {
+                    cursorOverlaySummary = "hidden"
+                }
             case .videoFrame:
                 break
             case .requestKeyFrame:

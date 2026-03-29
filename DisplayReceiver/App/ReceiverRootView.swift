@@ -25,6 +25,7 @@ struct ReceiverRootView: View {
                         Text("Frames: \(appController.receivedFrameCount)")
                         Text("Rate: \(appController.receivedFramesPerSecondText)")
                         Text("Throughput: \(appController.receivedMegabitsPerSecondText)")
+                        Text("Cursor Overlay: \(appController.cursorOverlayText)")
                     } else {
                         Text("Discoverable As: \(appController.discoverableName)")
                         Text("Wired Path: \(appController.wiredPathSummary)")

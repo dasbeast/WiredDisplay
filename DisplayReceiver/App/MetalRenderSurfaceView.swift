@@ -643,6 +643,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         private func makeCursorTexture(device: MTLDevice) -> (texture: MTLTexture, hotSpotFromTop: CGPoint)? {
+            if NetworkProtocol.useDebugCursorOverlayMarker {
+                return makeDebugCursorTexture(device: device)
+            }
+
             let image = NSCursor.arrow.image
             var proposedRect = CGRect(origin: .zero, size: image.size)
             guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
@@ -711,6 +715,72 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             )
 
             return (texture, hotSpotFromTop)
+        }
+
+        private func makeDebugCursorTexture(device: MTLDevice) -> (texture: MTLTexture, hotSpotFromTop: CGPoint)? {
+            let width = 28
+            let height = 28
+            let bytesPerRow = width * 4
+            var pixelData = Data(count: bytesPerRow * height)
+            let bitmapInfo = CGBitmapInfo.byteOrder32Little.union(.init(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue))
+
+            let didDraw = pixelData.withUnsafeMutableBytes { bytes -> Bool in
+                guard let baseAddress = bytes.baseAddress else { return false }
+                guard let context = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: bitmapInfo.rawValue
+                ) else {
+                    return false
+                }
+
+                context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+
+                context.setFillColor(NSColor.systemRed.withAlphaComponent(0.90).cgColor)
+                context.fillEllipse(in: CGRect(x: 2, y: 2, width: width - 4, height: height - 4))
+
+                context.setStrokeColor(NSColor.white.withAlphaComponent(0.95).cgColor)
+                context.setLineWidth(2)
+                context.strokeEllipse(in: CGRect(x: 3, y: 3, width: width - 6, height: height - 6))
+
+                context.move(to: CGPoint(x: width / 2, y: 6))
+                context.addLine(to: CGPoint(x: width / 2, y: height - 6))
+                context.move(to: CGPoint(x: 6, y: height / 2))
+                context.addLine(to: CGPoint(x: width - 6, y: height / 2))
+                context.strokePath()
+                return true
+            }
+
+            guard didDraw else { return nil }
+
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .managed
+
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                return nil
+            }
+
+            pixelData.withUnsafeBytes { bytes in
+                guard let baseAddress = bytes.baseAddress else { return }
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, width, height),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: bytesPerRow
+                )
+            }
+
+            return (texture, CGPoint(x: CGFloat(width) / 2.0, y: CGFloat(height) / 2.0))
         }
 
         private func makePipelineState(

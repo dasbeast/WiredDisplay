@@ -19,6 +19,8 @@ enum NetworkProtocol {
     static let captureFramesPerSecond: Int = 60
     static let cursorOverlayFramesPerSecond: Int = 120
     static let enableReceiverSideCursorOverlay: Bool = true
+    static let showSenderCursorFallbackWhileTestingOverlay: Bool = true
+    static let useDebugCursorOverlayMarker: Bool = true
     static let videoDatagramChunkPayloadBytes: Int = 1400
     static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 150_000_000
     static let videoDatagramMaxOutstandingFrames: Int = 3
