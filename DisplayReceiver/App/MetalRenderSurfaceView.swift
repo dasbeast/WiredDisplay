@@ -414,6 +414,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         private func ensureSystemCursorHidden() {
             guard NetworkProtocol.useReceiverSystemCursorMirror else { return }
+            lastWarpedScreenPoint = nil
             if systemCursorSignature != nil {
                 systemCursor = NSCursor(image: Self.transparentCursorImage, hotSpot: .zero)
                 systemCursorSignature = nil
