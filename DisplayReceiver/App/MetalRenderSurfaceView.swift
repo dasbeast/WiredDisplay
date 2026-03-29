@@ -101,12 +101,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var systemCursor: NSCursor = NSCursor.arrow
         private var systemCursorSignature: UInt64?
         private var lastWarpedScreenPoint: CGPoint?
-        private var localMouseLastMovedNanoseconds: UInt64 = 0
         private var cursorHiddenSinceNanoseconds: UInt64?
         private var needsCursorReassertion = false
-        /// When true, the local user has intentionally moved the cursor outside the
-        /// receiver window. Warping is suspended until the cursor re-enters.
-        private var cursorEscaped = false
         private var trackingArea: NSTrackingArea?
 
         /// Smoothed velocity (normalised units / nanosecond) used for cursor prediction.
@@ -114,9 +110,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var smoothedVelocityY: Double = 0
         /// Exponential-smoothing factor applied to new velocity samples.
         private let velocitySmoothingAlpha: Double = 0.35
-
-        /// The warp cooldown applied after detecting local hardware mouse drift (nanoseconds).
-        private let warpCooldownNanoseconds: UInt64 = 80_000_000 // 80 ms
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -160,19 +153,12 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         override func mouseEntered(with event: NSEvent) {
             super.mouseEntered(with: event)
-            if cursorEscaped {
-                cursorEscaped = false
-                // Clear drift cooldown so first warp fires immediately.
-                localMouseLastMovedNanoseconds = 0
-                lastWarpedScreenPoint = nil
-                needsCursorReassertion = true
-            }
+            needsCursorReassertion = true
         }
 
         override func mouseExited(with event: NSEvent) {
             super.mouseExited(with: event)
-            // Don't immediately set cursorEscaped — let applySystemCursorPosition
-            // confirm the cursor is truly outside the window bounds.
+            needsCursorReassertion = true
         }
 
         override func viewDidMoveToWindow() {
@@ -374,13 +360,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             )
 
             if NetworkProtocol.useReceiverSystemCursorMirror {
-                if cursorEscaped, !isNearDisplayEdge(normalizedPosition) {
-                    cursorEscaped = false
-                    localMouseLastMovedNanoseconds = 0
-                    lastWarpedScreenPoint = nil
-                    needsCursorReassertion = true
-                }
-
                 if systemCursorSignature != nil {
                     if needsCursorReassertion {
                         window?.invalidateCursorRects(for: self)
@@ -531,66 +510,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 screenPoint = appKitScreenPoint
             }
 
-            let now = DispatchTime.now().uptimeNanoseconds
             let currentSystemCursorPoint = CGEvent(source: nil)?.location
-            let windowScreenFrame = windowScreenRect()
 
-            if cursorEscaped {
-                if let currentSystemCursorPoint,
-                   let windowScreenFrame {
-                    let reclaimPadding: CGFloat = 8
-                    let reclaimRect = windowScreenFrame.insetBy(dx: -reclaimPadding, dy: -reclaimPadding)
-                    if reclaimRect.contains(currentSystemCursorPoint) {
-                        cursorEscaped = false
-                        localMouseLastMovedNanoseconds = 0
-                        lastWarpedScreenPoint = nil
-                        needsCursorReassertion = true
-                    } else {
-                        return
-                    }
-                } else {
-                    return
-                }
-            }
-
-            // --- Bug 3: detect when cursor has left the window bounds ---
-            if let currentSystemCursorPoint {
-                if let windowScreenFrame {
-                    let escapePadding: CGFloat = 20
-                    let padded = windowScreenFrame.insetBy(dx: -escapePadding, dy: -escapePadding)
-                    if !padded.contains(currentSystemCursorPoint) {
-                        // Cursor is well outside the receiver window.
-                        // Check if the remote cursor is also near an edge —
-                        // the user is moving off-screen deliberately.
-                        let np = normalizedPosition ?? .zero
-                        let edgeThreshold = 0.02
-                        let nearEdge = np.x <= edgeThreshold || np.x >= (1.0 - edgeThreshold)
-                            || np.y <= edgeThreshold || np.y >= (1.0 - edgeThreshold)
-                        if nearEdge {
-                            cursorEscaped = true
-                            localMouseLastMovedNanoseconds = now
-                            return
-                        }
-                    }
-                }
-            }
-
-            // --- Bug 1: detect local hardware mouse drift ---
             if let lastWarpedScreenPoint,
                let currentSystemCursorPoint,
                abs(currentSystemCursorPoint.x - lastWarpedScreenPoint.x) > 2.0 ||
                abs(currentSystemCursorPoint.y - lastWarpedScreenPoint.y) > 2.0 {
-                localMouseLastMovedNanoseconds = now
                 self.lastWarpedScreenPoint = currentSystemCursorPoint
                 needsCursorReassertion = true
-            }
-
-            // Suppress warp for a short cooldown after local movement.
-            if localMouseLastMovedNanoseconds > 0,
-               now >= localMouseLastMovedNanoseconds,
-               now - localMouseLastMovedNanoseconds < warpCooldownNanoseconds,
-               !forceReassertion {
-                return
             }
 
             // Skip warp if cursor is already at the target position.
@@ -607,14 +534,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             CGWarpMouseCursorPosition(screenPoint)
             lastWarpedScreenPoint = screenPoint
             needsCursorReassertion = false
-        }
-
-        private func isNearDisplayEdge(_ normalizedPosition: CGPoint) -> Bool {
-            let edgeThreshold = 0.02
-            return normalizedPosition.x <= edgeThreshold ||
-                normalizedPosition.x >= (1.0 - edgeThreshold) ||
-                normalizedPosition.y <= edgeThreshold ||
-                normalizedPosition.y >= (1.0 - edgeThreshold)
         }
 
         /// Returns the window's frame in CG screen coordinates (origin at top-left
