@@ -75,7 +75,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         private let cursorImageView = NSImageView(frame: .zero)
         private var refreshTimer: DispatchSourceTimer?
-        private let cursorOverlayMaxAgeNanoseconds: UInt64 = 250_000_000
         private var displayedAppearanceSignature: UInt64?
         private var displayedCursorSize: CGSize = .zero
         private var displayedHotSpot: CGPoint = .zero
@@ -158,7 +157,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
 
-            guard let cursorState = ReceiverCursorStore.shared.snapshot(maxAgeNanoseconds: cursorOverlayMaxAgeNanoseconds),
+            guard let cursorState = ReceiverCursorStore.shared.snapshot(),
                   cursorState.isVisible else {
                 cursorImageView.isHidden = true
                 return
