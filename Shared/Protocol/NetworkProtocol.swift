@@ -21,7 +21,7 @@ enum NetworkProtocol {
     static let cursorAppearanceRefreshFramesPerSecond: Int = 30
     static let cursorPredictionLeadNanoseconds: UInt64 = 16_000_000
     static let cursorHandoffEdgeThresholdNormalized: Double = 0.05
-    static let cursorHandoffReacquireThresholdNormalized: Double = 0.08
+    static let cursorHandoffReacquireThresholdNormalized: Double = 0.02
     static let cursorHandoffDetectionWindowNanoseconds: UInt64 = 500_000_000
     static let enableReceiverSideCursorOverlay: Bool = true
     static let useReceiverSystemCursorMirror: Bool = false

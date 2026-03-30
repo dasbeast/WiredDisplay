@@ -4,6 +4,13 @@ import Foundation
 /// Coordinates sender-side capture, encoding, and transport lifecycle.
 @MainActor
 final class SenderSessionCoordinator {
+    private enum CursorHandoffEdge: String {
+        case left
+        case right
+        case top
+        case bottom
+    }
+
     enum SessionState: Equatable {
         case idle
         case connecting
@@ -111,6 +118,7 @@ final class SenderSessionCoordinator {
     private var lastCursorDebugStatus: String?
     private var lastVisibleCursorNormalizedPosition: CGPoint?
     private var lastVisibleCursorTimestampNanoseconds: UInt64?
+    private var lastCursorHandoffEdge: CursorHandoffEdge?
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -939,6 +947,7 @@ final class SenderSessionCoordinator {
         lastCursorDebugStatus = nil
         lastVisibleCursorNormalizedPosition = nil
         lastVisibleCursorTimestampNanoseconds = nil
+        lastCursorHandoffEdge = nil
         logCursorDebug("tracking started for display \(displayID)")
         installCursorEventMonitors(for: displayID)
         startCursorRefreshTimer(for: displayID)
@@ -973,6 +982,7 @@ final class SenderSessionCoordinator {
         nextCursorAppearanceRefreshNanoseconds = 0
         lastVisibleCursorNormalizedPosition = nil
         lastVisibleCursorTimestampNanoseconds = nil
+        lastCursorHandoffEdge = nil
     }
 
     private func installCursorEventMonitors(for displayID: CGDirectDisplayID) {
@@ -1135,6 +1145,9 @@ final class SenderSessionCoordinator {
             at: normalizedPosition,
             nowNanoseconds: now
         )
+        if ownershipIntent == .remote {
+            lastCursorHandoffEdge = nil
+        }
         updateCursorDebugStatus(
             String(
                 format: "cursor visible on display %u mouse=(%.1f, %.1f) normalized=(%.4f, %.4f) ownership=%@",
@@ -1195,14 +1208,20 @@ final class SenderSessionCoordinator {
         mouseLocation: CGPoint,
         in frame: CGRect
     ) -> CursorOwnershipIntent {
-        if lastSentCursorState?.ownershipIntent == .localHandoff {
+        let recentEdgeHandoffCandidate = wasRecentEdgeHandoffCandidate(at: nowNanoseconds)
+
+        if recentEdgeHandoffCandidate,
+           let handoffEdge = cursorHandoffEdgeJustOutside(mouseLocation, in: frame) {
+            lastCursorHandoffEdge = handoffEdge
             return .localHandoff
         }
 
-        if isJustOutsideCursorHandoffEdge(mouseLocation, in: frame) || wasRecentEdgeHandoffCandidate(at: nowNanoseconds) {
+        if recentEdgeHandoffCandidate {
+            lastCursorHandoffEdge = lastCursorHandoffEdge ?? recentCursorHandoffEdge()
             return .localHandoff
         }
 
+        lastCursorHandoffEdge = nil
         return .hidden
     }
 
@@ -1210,13 +1229,17 @@ final class SenderSessionCoordinator {
         at normalizedPosition: CGPoint,
         nowNanoseconds: UInt64
     ) -> CursorOwnershipIntent {
-        if lastSentCursorState?.ownershipIntent == .localHandoff {
-            return canReacquireRemoteCursor(at: normalizedPosition) ? .remote : .localHandoff
+        let recentEdgeHandoffCandidate = wasRecentEdgeHandoffCandidate(at: nowNanoseconds)
+        let handoffEdge = lastCursorHandoffEdge ?? recentCursorHandoffEdge()
+
+        if recentEdgeHandoffCandidate,
+           lastSentCursorState?.ownershipIntent == .localHandoff {
+            return canReacquireRemoteCursor(at: normalizedPosition, through: handoffEdge) ? .remote : .localHandoff
         }
 
         if lastSentCursorState?.ownershipIntent == .hidden,
-           wasRecentEdgeHandoffCandidate(at: nowNanoseconds),
-           !canReacquireRemoteCursor(at: normalizedPosition) {
+           recentEdgeHandoffCandidate,
+           !canReacquireRemoteCursor(at: normalizedPosition, through: handoffEdge) {
             return .localHandoff
         }
 
@@ -1243,16 +1266,30 @@ final class SenderSessionCoordinator {
             normalizedPosition.y >= (1.0 - threshold)
     }
 
-    private func canReacquireRemoteCursor(at normalizedPosition: CGPoint) -> Bool {
+    private func canReacquireRemoteCursor(
+        at normalizedPosition: CGPoint,
+        through handoffEdge: CursorHandoffEdge?
+    ) -> Bool {
         let threshold = NetworkProtocol.cursorHandoffReacquireThresholdNormalized
-        return normalizedPosition.x > threshold &&
-            normalizedPosition.x < (1.0 - threshold) &&
-            normalizedPosition.y > threshold &&
-            normalizedPosition.y < (1.0 - threshold)
+        switch handoffEdge {
+        case .left:
+            return normalizedPosition.x > threshold
+        case .right:
+            return normalizedPosition.x < (1.0 - threshold)
+        case .top:
+            return normalizedPosition.y > threshold
+        case .bottom:
+            return normalizedPosition.y < (1.0 - threshold)
+        case .none:
+            return true
+        }
     }
 
-    private func isJustOutsideCursorHandoffEdge(_ mouseLocation: CGPoint, in frame: CGRect) -> Bool {
-        guard frame.width > 0, frame.height > 0 else { return false }
+    private func cursorHandoffEdgeJustOutside(
+        _ mouseLocation: CGPoint,
+        in frame: CGRect
+    ) -> CursorHandoffEdge? {
+        guard frame.width > 0, frame.height > 0 else { return nil }
 
         let horizontalTolerance = frame.width * NetworkProtocol.cursorHandoffEdgeThresholdNormalized
         let verticalTolerance = frame.height * NetworkProtocol.cursorHandoffEdgeThresholdNormalized
@@ -1281,7 +1318,36 @@ final class SenderSessionCoordinator {
             mouseLocation.y >= frame.maxY &&
             mouseLocation.y <= (frame.maxY + verticalTolerance)
 
-        return nearLeftEdge || nearRightEdge || nearBottomEdge || nearTopEdge
+        if nearLeftEdge { return .left }
+        if nearRightEdge { return .right }
+        if nearTopEdge { return .top }
+        if nearBottomEdge { return .bottom }
+        return nil
+    }
+
+    private func recentCursorHandoffEdge() -> CursorHandoffEdge? {
+        guard let lastVisibleCursorNormalizedPosition else { return nil }
+        return cursorHandoffEdge(near: lastVisibleCursorNormalizedPosition)
+    }
+
+    private func cursorHandoffEdge(near normalizedPosition: CGPoint) -> CursorHandoffEdge? {
+        let threshold = NetworkProtocol.cursorHandoffEdgeThresholdNormalized
+        var candidates: [(edge: CursorHandoffEdge, distance: CGFloat)] = []
+
+        if normalizedPosition.x <= threshold {
+            candidates.append((.left, normalizedPosition.x))
+        }
+        if normalizedPosition.x >= (1.0 - threshold) {
+            candidates.append((.right, 1.0 - normalizedPosition.x))
+        }
+        if normalizedPosition.y <= threshold {
+            candidates.append((.top, normalizedPosition.y))
+        }
+        if normalizedPosition.y >= (1.0 - threshold) {
+            candidates.append((.bottom, 1.0 - normalizedPosition.y))
+        }
+
+        return candidates.min(by: { $0.distance < $1.distance })?.edge
     }
 
     private func currentCursorAppearance(forceRefresh: Bool) -> CursorAppearancePayload? {
