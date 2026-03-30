@@ -988,8 +988,14 @@ final class SenderSessionCoordinator {
     private func installCursorEventMonitors(for displayID: CGDirectDisplayID) {
         let eventMask: NSEvent.EventTypeMask = [
             .mouseMoved,
+            .leftMouseDown,
+            .leftMouseUp,
             .leftMouseDragged,
+            .rightMouseDown,
+            .rightMouseUp,
             .rightMouseDragged,
+            .otherMouseDown,
+            .otherMouseUp,
             .otherMouseDragged
         ]
 
@@ -1109,6 +1115,31 @@ final class SenderSessionCoordinator {
         }
 
         let mouseLocation = NSEvent.mouseLocation
+        let buttonsPressed = isMouseButtonPressed()
+        let recentEdgeHandoffCandidate = wasRecentEdgeHandoffCandidate(at: now)
+        if buttonsPressed,
+           recentEdgeHandoffCandidate,
+           cursorHandoffEdgeJustOutside(mouseLocation, in: frame) != nil {
+            let normalizedPosition = clampedNormalizedCursorPosition(for: mouseLocation, in: frame)
+            lastVisibleCursorNormalizedPosition = normalizedPosition
+            lastVisibleCursorTimestampNanoseconds = now
+            lastCursorHandoffEdge = nil
+            updateCursorDebugStatus(
+                String(
+                    format: "cursor drag-clamped on display %u mouse=(%.1f, %.1f) normalized=(%.4f, %.4f)",
+                    displayID,
+                    mouseLocation.x,
+                    mouseLocation.y,
+                    normalizedPosition.x,
+                    normalizedPosition.y
+                )
+            )
+            return remoteCursorState(
+                at: now,
+                normalizedPosition: normalizedPosition
+            )
+        }
+
         guard frame.contains(mouseLocation) else {
             let ownershipIntent = hiddenCursorOwnershipIntent(
                 at: now,
@@ -1170,22 +1201,9 @@ final class SenderSessionCoordinator {
                 appearance: nil
             )
         }
-        let appearance = currentCursorAppearance(forceRefresh: lastSentCursorState == nil)
-        let appearanceToSend: CursorAppearancePayload?
-        if let appearance,
-           lastSentCursorState == nil || appearance.signature != lastSentCursorAppearanceSignature {
-            appearanceToSend = appearance
-        } else {
-            appearanceToSend = nil
-        }
-
-        return CursorStatePayload(
-            timestampNanoseconds: now,
-            normalizedX: normalizedX,
-            normalizedY: normalizedY,
-            isVisible: true,
-            ownershipIntent: .remote,
-            appearance: appearanceToSend
+        return remoteCursorState(
+            at: now,
+            normalizedPosition: normalizedPosition
         )
     }
 
@@ -1231,6 +1249,10 @@ final class SenderSessionCoordinator {
         in frame: CGRect,
         nowNanoseconds: UInt64
     ) -> CursorOwnershipIntent {
+        if isMouseButtonPressed() {
+            return .remote
+        }
+
         let recentEdgeHandoffCandidate = wasRecentEdgeHandoffCandidate(at: nowNanoseconds)
         let handoffEdge = lastCursorHandoffEdge ?? recentCursorHandoffEdge()
 
@@ -1254,6 +1276,29 @@ final class SenderSessionCoordinator {
         }
 
         return .remote
+    }
+
+    private func remoteCursorState(
+        at nowNanoseconds: UInt64,
+        normalizedPosition: CGPoint
+    ) -> CursorStatePayload {
+        let appearance = currentCursorAppearance(forceRefresh: lastSentCursorState == nil)
+        let appearanceToSend: CursorAppearancePayload?
+        if let appearance,
+           lastSentCursorState == nil || appearance.signature != lastSentCursorAppearanceSignature {
+            appearanceToSend = appearance
+        } else {
+            appearanceToSend = nil
+        }
+
+        return CursorStatePayload(
+            timestampNanoseconds: nowNanoseconds,
+            normalizedX: Double(normalizedPosition.x),
+            normalizedY: Double(normalizedPosition.y),
+            isVisible: true,
+            ownershipIntent: .remote,
+            appearance: appearanceToSend
+        )
     }
 
     private func wasRecentEdgeHandoffCandidate(at nowNanoseconds: UInt64) -> Bool {
@@ -1296,6 +1341,19 @@ final class SenderSessionCoordinator {
         case .none:
             return true
         }
+    }
+
+    private func clampedNormalizedCursorPosition(
+        for mouseLocation: CGPoint,
+        in frame: CGRect
+    ) -> CGPoint {
+        guard frame.width > 0, frame.height > 0 else { return .zero }
+
+        let clampedX = min(max(mouseLocation.x, frame.minX), frame.maxX)
+        let clampedY = min(max(mouseLocation.y, frame.minY), frame.maxY)
+        let normalizedX = max(0, min(1, (clampedX - frame.minX) / frame.width))
+        let normalizedY = max(0, min(1, (frame.maxY - clampedY) / frame.height))
+        return CGPoint(x: normalizedX, y: normalizedY)
     }
 
     private func cursorHandoffEdgeJustOutside(
@@ -1361,6 +1419,10 @@ final class SenderSessionCoordinator {
         }
 
         return candidates.min(by: { $0.distance < $1.distance })?.edge
+    }
+
+    private func isMouseButtonPressed() -> Bool {
+        NSEvent.pressedMouseButtons != 0
     }
 
     private func currentCursorAppearance(forceRefresh: Bool) -> CursorAppearancePayload? {
