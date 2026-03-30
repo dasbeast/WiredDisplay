@@ -458,8 +458,24 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 lastPresentedOwnershipIntent = .localHandoff
             }
             logCursorVisibilityIfNeeded(false, detail: "local-handoff")
-            restoreVisibleSystemCursorIfNeeded()
-            cursorImageView.isHidden = true
+            guard updateCursorAppearanceIfNeeded(from: nil),
+                  let localCursorPoint = currentLocalSystemCursorPoint(),
+                  bounds.contains(localCursorPoint) else {
+                restoreVisibleSystemCursorIfNeeded()
+                cursorImageView.isHidden = true
+                return
+            }
+
+            if managesSystemCursorAppearance {
+                installTransparentSystemCursorIfNeeded()
+            }
+
+            let cursorOrigin = CGPoint(
+                x: localCursorPoint.x - displayedHotSpot.x,
+                y: localCursorPoint.y - displayedHotSpot.y
+            )
+            cursorImageView.frame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
+            cursorImageView.isHidden = false
         }
 
         // MARK: - Cursor prediction
@@ -663,6 +679,13 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             systemCursor = NSCursor.arrow
             systemCursorSignature = UInt64.max - 1
             window?.invalidateCursorRects(for: self)
+        }
+
+        private func currentLocalSystemCursorPoint() -> CGPoint? {
+            guard let window else { return nil }
+            let screenPoint = NSEvent.mouseLocation
+            let windowPoint = window.convertPoint(fromScreen: screenPoint)
+            return convert(windowPoint, from: nil)
         }
 
         private func logCursorDebug(_ message: String) {
