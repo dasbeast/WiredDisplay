@@ -973,6 +973,9 @@ final class SenderSessionCoordinator {
         cursorPacketSuppressedCount = 0
         lastCursorTelemetryLogNanoseconds = 0
         logCursorDebug("tracking started for display \(displayID)")
+        if !NetworkProtocol.enableDynamicCursorAppearanceMirroring {
+            logCursorDebug("dynamic cursor appearance mirroring disabled; receiver will use arrow fallback")
+        }
         installCursorEventMonitors(for: displayID)
         startCursorRefreshTimer(for: displayID)
         pollCursorState(for: displayID)
@@ -1522,6 +1525,8 @@ final class SenderSessionCoordinator {
     }
 
     private func currentCursorAppearance(forceRefresh: Bool) -> CursorAppearancePayload? {
+        guard NetworkProtocol.enableDynamicCursorAppearanceMirroring else { return nil }
+
         let now = DispatchTime.now().uptimeNanoseconds
 
         let mouseButtonPressed = isMouseButtonPressed()

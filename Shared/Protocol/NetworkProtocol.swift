@@ -24,6 +24,10 @@ enum NetworkProtocol {
     static let cursorHandoffReacquireInsetPoints: Double = 2.0
     static let cursorHandoffDetectionWindowNanoseconds: UInt64 = 500_000_000
     static let enableReceiverSideCursorOverlay: Bool = true
+    // Sampling live AppKit cursor images has proven unstable during cursor-shape transitions
+    // (for example I-beam, resize arrows, and pointing-hand updates), so keep the receiver
+    // on its built-in arrow fallback until a safer cursor-kind transport exists.
+    static let enableDynamicCursorAppearanceMirroring: Bool = false
     static let useReceiverSystemCursorMirror: Bool = false
     static let hideReceiverLocalCursorWhileStreaming: Bool = false
     static let useSwiftUIReceiverCursorOverlay: Bool = false
