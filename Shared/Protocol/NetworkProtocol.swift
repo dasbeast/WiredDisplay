@@ -24,7 +24,8 @@ enum NetworkProtocol {
     static let cursorHandoffReacquireThresholdNormalized: Double = 0.08
     static let cursorHandoffDetectionWindowNanoseconds: UInt64 = 500_000_000
     static let enableReceiverSideCursorOverlay: Bool = true
-    static let useReceiverSystemCursorMirror: Bool = true
+    static let useReceiverSystemCursorMirror: Bool = false
+    static let hideReceiverLocalCursorWhileStreaming: Bool = false
     static let useSwiftUIReceiverCursorOverlay: Bool = false
     static let showSenderCursorFallbackWhileTestingOverlay: Bool = false
     static let useDebugCursorOverlayMarker: Bool = false
