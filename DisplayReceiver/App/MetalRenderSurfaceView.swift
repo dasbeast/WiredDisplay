@@ -31,6 +31,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         let metalView: MTKView
         private let cursorOverlayView = ReceiverCursorOverlayHostView()
         private var renderFrameObserver: NSObjectProtocol?
+        private var isFramePresentationQueued = false
 
         init(device: MTLDevice?) {
             metalView = MTKView(frame: .zero, device: device)
@@ -86,7 +87,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             metalView.frame = bounds
             cursorOverlayView.frame = bounds
             cursorOverlayView.refreshPresentationIfNeeded()
-            requestFramePresentation()
         }
 
         func refreshCursorOverlayConfiguration() {
@@ -94,9 +94,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         private func requestFramePresentation() {
-            guard window != nil, !isHidden else { return }
-            guard metalView.device != nil else { return }
-            metalView.draw()
+            guard !isFramePresentationQueued else { return }
+            isFramePresentationQueued = true
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isFramePresentationQueued = false
+                guard self.window != nil, !self.isHidden else { return }
+                guard self.metalView.device != nil else { return }
+                self.metalView.draw()
+            }
         }
     }
 

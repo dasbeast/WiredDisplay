@@ -12,6 +12,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
 
     func present(appController: ReceiverAppController, enterFullScreen: Bool) {
         let window = ensureWindow(appController: appController)
+        configureWindowInteraction(window, isStreaming: appController.isStreaming)
         applyStreamingPresentation()
         NSApplication.shared.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -31,6 +32,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
 
     func hide() {
         guard let window else { return }
+        configureWindowInteraction(window, isStreaming: false)
         setCursorHidden(false)
         restorePresentation()
 
@@ -73,6 +75,8 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false
+        window.acceptsMouseMovedEvents = false
+        window.ignoresMouseEvents = false
         window.collectionBehavior = [.fullScreenPrimary, .fullScreenDisallowsTiling, .managed]
         window.contentViewController = hostingController
         window.delegate = self
@@ -100,6 +104,11 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         }
 
         isCursorHidden = effectiveHidden
+    }
+
+    private func configureWindowInteraction(_ window: NSWindow, isStreaming: Bool) {
+        window.acceptsMouseMovedEvents = !isStreaming
+        window.ignoresMouseEvents = isStreaming
     }
 
     private func applyStreamingPresentation() {
