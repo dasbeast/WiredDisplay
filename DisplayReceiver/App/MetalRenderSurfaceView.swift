@@ -458,24 +458,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 lastPresentedOwnershipIntent = .localHandoff
             }
             logCursorVisibilityIfNeeded(false, detail: "local-handoff")
-            guard updateCursorAppearanceIfNeeded(from: nil),
-                  let localCursorPoint = currentLocalSystemCursorPoint(),
-                  bounds.contains(localCursorPoint) else {
-                restoreVisibleSystemCursorIfNeeded()
-                cursorImageView.isHidden = true
-                return
-            }
-
-            if managesSystemCursorAppearance {
-                installTransparentSystemCursorIfNeeded()
-            }
-
-            let cursorOrigin = CGPoint(
-                x: localCursorPoint.x - displayedHotSpot.x,
-                y: localCursorPoint.y - displayedHotSpot.y
-            )
-            cursorImageView.frame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
-            cursorImageView.isHidden = false
+            restoreVisibleSystemCursorIfNeeded(forceArrow: true)
+            cursorImageView.isHidden = true
         }
 
         // MARK: - Cursor prediction
@@ -673,19 +657,12 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             window?.invalidateCursorRects(for: self)
         }
 
-        private func restoreVisibleSystemCursorIfNeeded() {
+        private func restoreVisibleSystemCursorIfNeeded(forceArrow: Bool = false) {
             guard managesSystemCursorAppearance else { return }
-            guard systemCursorSignature == nil else { return }
+            guard forceArrow || systemCursorSignature == nil else { return }
             systemCursor = NSCursor.arrow
             systemCursorSignature = UInt64.max - 1
             window?.invalidateCursorRects(for: self)
-        }
-
-        private func currentLocalSystemCursorPoint() -> CGPoint? {
-            guard let window else { return nil }
-            let screenPoint = NSEvent.mouseLocation
-            let windowPoint = window.convertPoint(fromScreen: screenPoint)
-            return convert(windowPoint, from: nil)
         }
 
         private func logCursorDebug(_ message: String) {
@@ -721,8 +698,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             // next refresh cycle, and the brief transparent flash is the root cause
             // of the "cursor disappears" bug.
             if let pending = ReceiverCursorStore.shared.snapshot(),
-               pending.ownershipIntent == .remote,
-               pending.isVisible {
+               pending.ownershipIntent != .hidden {
                 return
             }
 
