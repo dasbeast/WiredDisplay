@@ -114,11 +114,23 @@ final class SenderSessionCoordinator {
     private var lastSentCursorState: CursorStatePayload?
     private var lastSentCursorAppearanceSignature: UInt64?
     private var cachedCursorAppearance: CursorAppearancePayload?
+    private var frozenCursorAppearanceWhileButtonPressed: CursorAppearancePayload?
     private var nextCursorAppearanceRefreshNanoseconds: UInt64 = 0
+    private var wasMouseButtonPressed = false
     private var lastCursorDebugStatus: String?
+    private var lastCursorDebugLogNanoseconds: UInt64 = 0
     private var lastVisibleCursorNormalizedPosition: CGPoint?
     private var lastVisibleCursorTimestampNanoseconds: UInt64?
     private var lastCursorHandoffEdge: CursorHandoffEdge?
+    private var pendingCursorPollWorkItem: DispatchWorkItem?
+    private var pendingCursorPollDisplayID: CGDirectDisplayID?
+    private var lastCursorPollTimestampNanoseconds: UInt64 = 0
+    private var cursorPollRequestCount: UInt64 = 0
+    private var cursorPollCoalescedCount: UInt64 = 0
+    private var cursorPollExecutionCount: UInt64 = 0
+    private var cursorPacketSentCount: UInt64 = 0
+    private var cursorPacketSuppressedCount: UInt64 = 0
+    private var lastCursorTelemetryLogNanoseconds: UInt64 = 0
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -943,11 +955,23 @@ final class SenderSessionCoordinator {
         lastSentCursorState = nil
         lastSentCursorAppearanceSignature = nil
         cachedCursorAppearance = nil
+        frozenCursorAppearanceWhileButtonPressed = nil
         nextCursorAppearanceRefreshNanoseconds = 0
+        wasMouseButtonPressed = false
         lastCursorDebugStatus = nil
+        lastCursorDebugLogNanoseconds = 0
         lastVisibleCursorNormalizedPosition = nil
         lastVisibleCursorTimestampNanoseconds = nil
         lastCursorHandoffEdge = nil
+        pendingCursorPollWorkItem = nil
+        pendingCursorPollDisplayID = nil
+        lastCursorPollTimestampNanoseconds = 0
+        cursorPollRequestCount = 0
+        cursorPollCoalescedCount = 0
+        cursorPollExecutionCount = 0
+        cursorPacketSentCount = 0
+        cursorPacketSuppressedCount = 0
+        lastCursorTelemetryLogNanoseconds = 0
         logCursorDebug("tracking started for display \(displayID)")
         installCursorEventMonitors(for: displayID)
         startCursorRefreshTimer(for: displayID)
@@ -955,6 +979,9 @@ final class SenderSessionCoordinator {
     }
 
     private func stopCursorTracking(sendHiddenState: Bool) {
+        pendingCursorPollWorkItem?.cancel()
+        pendingCursorPollWorkItem = nil
+        pendingCursorPollDisplayID = nil
         cursorTrackingRefreshTimer?.setEventHandler {}
         cursorTrackingRefreshTimer?.cancel()
         cursorTrackingRefreshTimer = nil
@@ -979,10 +1006,20 @@ final class SenderSessionCoordinator {
         lastSentCursorState = nil
         lastSentCursorAppearanceSignature = nil
         cachedCursorAppearance = nil
+        frozenCursorAppearanceWhileButtonPressed = nil
         nextCursorAppearanceRefreshNanoseconds = 0
+        wasMouseButtonPressed = false
+        lastCursorDebugLogNanoseconds = 0
         lastVisibleCursorNormalizedPosition = nil
         lastVisibleCursorTimestampNanoseconds = nil
         lastCursorHandoffEdge = nil
+        lastCursorPollTimestampNanoseconds = 0
+        cursorPollRequestCount = 0
+        cursorPollCoalescedCount = 0
+        cursorPollExecutionCount = 0
+        cursorPacketSentCount = 0
+        cursorPacketSuppressedCount = 0
+        lastCursorTelemetryLogNanoseconds = 0
     }
 
     private func installCursorEventMonitors(for displayID: CGDirectDisplayID) {
@@ -1001,14 +1038,14 @@ final class SenderSessionCoordinator {
 
         localCursorEventMonitor = NSEvent.addLocalMonitorForEvents(matching: eventMask) { [weak self] event in
             Task { @MainActor [weak self] in
-                self?.pollCursorState(for: displayID)
+                self?.scheduleCursorPoll(for: displayID)
             }
             return event
         }
 
         globalCursorEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.pollCursorState(for: displayID)
+                self?.scheduleCursorPoll(for: displayID)
             }
         }
     }
@@ -1036,11 +1073,64 @@ final class SenderSessionCoordinator {
         )
         timer.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in
-                self?.pollCursorState(for: displayID)
+                self?.scheduleCursorPoll(for: displayID)
             }
         }
         timer.activate()
         cursorTrackingRefreshTimer = timer
+    }
+
+    private func scheduleCursorPoll(for displayID: CGDirectDisplayID) {
+        guard NetworkProtocol.enableReceiverSideCursorOverlay else { return }
+        cursorPollRequestCount += 1
+
+        if pendingCursorPollDisplayID == displayID {
+            cursorPollCoalescedCount += 1
+            emitCursorTelemetryIfNeeded(for: displayID)
+            return
+        }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        let minimumIntervalNanoseconds = minimumCursorPollIntervalNanoseconds()
+        let delayNanoseconds: UInt64
+        if lastCursorPollTimestampNanoseconds == 0 || now >= (lastCursorPollTimestampNanoseconds + minimumIntervalNanoseconds) {
+            delayNanoseconds = 0
+        } else {
+            delayNanoseconds = (lastCursorPollTimestampNanoseconds + minimumIntervalNanoseconds) - now
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.pendingCursorPollDisplayID = nil
+                self.pendingCursorPollWorkItem = nil
+                self.lastCursorPollTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+                self.cursorPollExecutionCount += 1
+                self.pollCursorState(for: displayID)
+                self.emitCursorTelemetryIfNeeded(for: displayID)
+            }
+        }
+
+        pendingCursorPollDisplayID = displayID
+        pendingCursorPollWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .nanoseconds(Int(delayNanoseconds)),
+            execute: workItem
+        )
+    }
+
+    private func minimumCursorPollIntervalNanoseconds() -> UInt64 {
+        let targetFramesPerSecond: Int
+        if isMouseButtonPressed() {
+            targetFramesPerSecond = min(
+                NetworkProtocol.cursorOverlayFramesPerSecond,
+                NetworkProtocol.captureFramesPerSecond
+            )
+        } else {
+            targetFramesPerSecond = NetworkProtocol.cursorOverlayFramesPerSecond
+        }
+
+        return UInt64(1_000_000_000 / max(1, targetFramesPerSecond))
     }
 
     private func pollCursorState(for displayID: CGDirectDisplayID) {
@@ -1049,7 +1139,11 @@ final class SenderSessionCoordinator {
         guard virtualDisplayService.displayID == displayID else { return }
 
         let nextState = currentCursorState(for: displayID)
-        guard shouldSendCursorState(nextState) else { return }
+        guard shouldSendCursorState(nextState) else {
+            cursorPacketSuppressedCount += 1
+            emitCursorTelemetryIfNeeded(for: displayID)
+            return
+        }
         if let lastSentCursorState {
             if lastSentCursorState.ownershipIntent != nextState.ownershipIntent ||
                 lastSentCursorState.isVisible != nextState.isVisible {
@@ -1084,7 +1178,9 @@ final class SenderSessionCoordinator {
         if let appearance = nextState.appearance {
             lastSentCursorAppearanceSignature = appearance.signature
         }
+        cursorPacketSentCount += 1
         transportService.sendCursorState(nextState)
+        emitCursorTelemetryIfNeeded(for: displayID)
     }
 
     private func currentCursorState(for displayID: CGDirectDisplayID) -> CursorStatePayload {
@@ -1427,8 +1523,37 @@ final class SenderSessionCoordinator {
 
     private func currentCursorAppearance(forceRefresh: Bool) -> CursorAppearancePayload? {
         let now = DispatchTime.now().uptimeNanoseconds
+
+        let mouseButtonPressed = isMouseButtonPressed()
+        if mouseButtonPressed {
+            if !wasMouseButtonPressed {
+                wasMouseButtonPressed = true
+                frozenCursorAppearanceWhileButtonPressed =
+                    refreshedCursorAppearance(at: now, forceRefresh: true) ?? cachedCursorAppearance
+            }
+
+            if let frozenCursorAppearanceWhileButtonPressed {
+                return frozenCursorAppearanceWhileButtonPressed
+            }
+
+            return cachedCursorAppearance ?? refreshedCursorAppearance(at: now, forceRefresh: forceRefresh)
+        }
+
+        if wasMouseButtonPressed {
+            wasMouseButtonPressed = false
+            frozenCursorAppearanceWhileButtonPressed = nil
+            nextCursorAppearanceRefreshNanoseconds = 0
+        }
+
+        return refreshedCursorAppearance(at: now, forceRefresh: forceRefresh)
+    }
+
+    private func refreshedCursorAppearance(
+        at nowNanoseconds: UInt64,
+        forceRefresh: Bool
+    ) -> CursorAppearancePayload? {
         if !forceRefresh,
-           nextCursorAppearanceRefreshNanoseconds > now,
+           nextCursorAppearanceRefreshNanoseconds > nowNanoseconds,
            let cachedCursorAppearance {
             return cachedCursorAppearance
         }
@@ -1436,7 +1561,7 @@ final class SenderSessionCoordinator {
         let intervalNanoseconds = UInt64(
             1_000_000_000 / max(1, NetworkProtocol.cursorAppearanceRefreshFramesPerSecond)
         )
-        nextCursorAppearanceRefreshNanoseconds = now + intervalNanoseconds
+        nextCursorAppearanceRefreshNanoseconds = nowNanoseconds + intervalNanoseconds
 
         guard let appearance = sampleCurrentCursorAppearance() else {
             return cachedCursorAppearance
@@ -1505,8 +1630,50 @@ final class SenderSessionCoordinator {
     private func updateCursorDebugStatus(_ message: String) {
         guard NetworkProtocol.enableCursorDebugLogging else { return }
         guard lastCursorDebugStatus != message else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        if lastCursorDebugLogNanoseconds != 0,
+           now < (lastCursorDebugLogNanoseconds + 250_000_000) {
+            lastCursorDebugStatus = message
+            return
+        }
         lastCursorDebugStatus = message
+        lastCursorDebugLogNanoseconds = now
         print("[Sender][Cursor] \(message)")
+    }
+
+    private func emitCursorTelemetryIfNeeded(for displayID: CGDirectDisplayID) {
+        guard NetworkProtocol.enableCursorDebugLogging else { return }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        if lastCursorTelemetryLogNanoseconds == 0 {
+            lastCursorTelemetryLogNanoseconds = now
+            return
+        }
+
+        guard now >= (lastCursorTelemetryLogNanoseconds + 1_000_000_000) else { return }
+
+        let snapshot = transportService.debugSnapshot()
+        print(
+            "[Sender][Cursor] telemetry display \(displayID): " +
+            "requests=\(cursorPollRequestCount) " +
+            "executed=\(cursorPollExecutionCount) " +
+            "coalesced=\(cursorPollCoalescedCount) " +
+            "sent=\(cursorPacketSentCount) " +
+            "suppressed=\(cursorPacketSuppressedCount) " +
+            "queue=\(snapshot.pendingFrames) " +
+            "(video=\(snapshot.pendingVideoFrames), control=\(snapshot.pendingControlFrames), " +
+            "cursor=\(snapshot.pendingCursorFrames), audio=\(snapshot.pendingAudioFrames)) " +
+            "inFlight=\(snapshot.networkInFlightCount) " +
+            "droppedVideo=\(snapshot.droppedVideoFrames) " +
+            "droppedCursor=\(snapshot.droppedCursorFrames)"
+        )
+
+        lastCursorTelemetryLogNanoseconds = now
+        cursorPollRequestCount = 0
+        cursorPollCoalescedCount = 0
+        cursorPollExecutionCount = 0
+        cursorPacketSentCount = 0
+        cursorPacketSuppressedCount = 0
     }
 }
 

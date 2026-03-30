@@ -14,6 +14,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     private var forceNextKeyFrame = false
     private var audioPacketIndex: UInt64 = 0
     private let captureQueue = DispatchQueue(label: "wireddisplay.sender.capture", qos: .userInteractive)
+    private var lastScreenFrameTimestampNanoseconds: UInt64?
+    private var lastScreenFrameGapWarningTimestampNanoseconds: UInt64?
     private let outputAudioFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16,
         sampleRate: NetworkProtocol.audioSampleRateHz,
@@ -44,6 +46,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         audioPacketIndex = 0
         audioConverter = nil
         audioConverterSourceSignature = nil
+        lastScreenFrameTimestampNanoseconds = nil
+        lastScreenFrameGapWarningTimestampNanoseconds = nil
 
         if NetworkProtocol.forceSyntheticCaptureForDiagnostics {
             startSyntheticCapture(width: width, height: height, framesPerSecond: framesPerSecond)
@@ -69,6 +73,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stopCapture() {
         isCapturing = false
+        lastScreenFrameTimestampNanoseconds = nil
+        lastScreenFrameGapWarningTimestampNanoseconds = nil
 
         if let stream {
             self.stream = nil
@@ -200,6 +206,31 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
         switch type {
         case .screen:
+            let frameTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+            if let lastScreenFrameTimestampNanoseconds,
+               frameTimestampNanoseconds > lastScreenFrameTimestampNanoseconds {
+                let gapNanoseconds = frameTimestampNanoseconds - lastScreenFrameTimestampNanoseconds
+                if gapNanoseconds >= 500_000_000 {
+                    let shouldLogGapWarning: Bool
+                    if let lastScreenFrameGapWarningTimestampNanoseconds {
+                        shouldLogGapWarning =
+                            frameTimestampNanoseconds >= (lastScreenFrameGapWarningTimestampNanoseconds + 1_000_000_000)
+                    } else {
+                        shouldLogGapWarning = true
+                    }
+
+                    if shouldLogGapWarning {
+                        lastScreenFrameGapWarningTimestampNanoseconds = frameTimestampNanoseconds
+                        print(
+                            "[CaptureService] Screen frame gap " +
+                            "\(String(format: "%.1f", Double(gapNanoseconds) / 1_000_000.0)) ms " +
+                            "on display \(targetDisplayID)"
+                        )
+                    }
+                }
+            }
+            lastScreenFrameTimestampNanoseconds = frameTimestampNanoseconds
+
             guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
 
             let frameWidth = CVPixelBufferGetWidth(pixelBuffer)
@@ -214,7 +245,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
             let metadata = FrameMetadata(
                 frameIndex: currentIndex,
-                timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                timestampNanoseconds: frameTimestampNanoseconds,
                 width: frameWidth,
                 height: frameHeight,
                 isKeyFrame: isFirstFrame || currentIndex % 60 == 0
@@ -241,6 +272,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         isCapturing = false
+        print("[CaptureService] Stream stopped with error: \(error)")
         onError?(error)
     }
 
