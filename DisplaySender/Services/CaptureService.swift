@@ -16,6 +16,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     private let captureQueue = DispatchQueue(label: "wireddisplay.sender.capture", qos: .userInteractive)
     private var lastScreenFrameTimestampNanoseconds: UInt64?
     private var lastScreenFrameGapWarningTimestampNanoseconds: UInt64?
+    private var lastIncompleteScreenFrameLogTimestampNanoseconds: UInt64?
     private let outputAudioFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16,
         sampleRate: NetworkProtocol.audioSampleRateHz,
@@ -48,6 +49,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         audioConverterSourceSignature = nil
         lastScreenFrameTimestampNanoseconds = nil
         lastScreenFrameGapWarningTimestampNanoseconds = nil
+        lastIncompleteScreenFrameLogTimestampNanoseconds = nil
 
         if NetworkProtocol.forceSyntheticCaptureForDiagnostics {
             startSyntheticCapture(width: width, height: height, framesPerSecond: framesPerSecond)
@@ -75,6 +77,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         isCapturing = false
         lastScreenFrameTimestampNanoseconds = nil
         lastScreenFrameGapWarningTimestampNanoseconds = nil
+        lastIncompleteScreenFrameLogTimestampNanoseconds = nil
 
         if let stream {
             self.stream = nil
@@ -207,6 +210,12 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         switch type {
         case .screen:
             let frameTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+            if let frameStatus = screenFrameStatus(from: sampleBuffer),
+               frameStatus != .complete {
+                logIncompleteScreenFrameIfNeeded(status: frameStatus, at: frameTimestampNanoseconds)
+                return
+            }
+
             if let lastScreenFrameTimestampNanoseconds,
                frameTimestampNanoseconds > lastScreenFrameTimestampNanoseconds {
                 let gapNanoseconds = frameTimestampNanoseconds - lastScreenFrameTimestampNanoseconds
@@ -274,6 +283,32 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         isCapturing = false
         print("[CaptureService] Stream stopped with error: \(error)")
         onError?(error)
+    }
+
+    private func screenFrameStatus(from sampleBuffer: CMSampleBuffer) -> SCFrameStatus? {
+        guard let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer,
+            createIfNecessary: false
+        ) as? [[SCStreamFrameInfo: Any]],
+        let attachments = attachmentsArray.first,
+        let rawStatus = attachments[.status] as? Int else {
+            return nil
+        }
+
+        return SCFrameStatus(rawValue: rawStatus)
+    }
+
+    private func logIncompleteScreenFrameIfNeeded(status: SCFrameStatus, at timestampNanoseconds: UInt64) {
+        let shouldLog: Bool
+        if let lastIncompleteScreenFrameLogTimestampNanoseconds {
+            shouldLog = timestampNanoseconds >= (lastIncompleteScreenFrameLogTimestampNanoseconds + 1_000_000_000)
+        } else {
+            shouldLog = true
+        }
+
+        guard shouldLog else { return }
+        lastIncompleteScreenFrameLogTimestampNanoseconds = timestampNanoseconds
+        print("[CaptureService] Ignoring incomplete screen frame with status \(status.rawValue)")
     }
 
     // MARK: - Synthetic Fallback
