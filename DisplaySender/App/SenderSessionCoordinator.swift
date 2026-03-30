@@ -1143,6 +1143,7 @@ final class SenderSessionCoordinator {
         lastVisibleCursorTimestampNanoseconds = now
         let ownershipIntent = visibleCursorOwnershipIntent(
             at: normalizedPosition,
+            in: frame,
             nowNanoseconds: now
         )
         if ownershipIntent == .remote {
@@ -1227,6 +1228,7 @@ final class SenderSessionCoordinator {
 
     private func visibleCursorOwnershipIntent(
         at normalizedPosition: CGPoint,
+        in frame: CGRect,
         nowNanoseconds: UInt64
     ) -> CursorOwnershipIntent {
         let recentEdgeHandoffCandidate = wasRecentEdgeHandoffCandidate(at: nowNanoseconds)
@@ -1234,12 +1236,20 @@ final class SenderSessionCoordinator {
 
         if recentEdgeHandoffCandidate,
            lastSentCursorState?.ownershipIntent == .localHandoff {
-            return canReacquireRemoteCursor(at: normalizedPosition, through: handoffEdge) ? .remote : .localHandoff
+            return canReacquireRemoteCursor(
+                at: normalizedPosition,
+                through: handoffEdge,
+                in: frame
+            ) ? .remote : .localHandoff
         }
 
         if lastSentCursorState?.ownershipIntent == .hidden,
            recentEdgeHandoffCandidate,
-           !canReacquireRemoteCursor(at: normalizedPosition, through: handoffEdge) {
+           !canReacquireRemoteCursor(
+               at: normalizedPosition,
+               through: handoffEdge,
+               in: frame
+           ) {
             return .localHandoff
         }
 
@@ -1268,18 +1278,21 @@ final class SenderSessionCoordinator {
 
     private func canReacquireRemoteCursor(
         at normalizedPosition: CGPoint,
-        through handoffEdge: CursorHandoffEdge?
+        through handoffEdge: CursorHandoffEdge?,
+        in frame: CGRect
     ) -> Bool {
-        let threshold = NetworkProtocol.cursorHandoffReacquireThresholdNormalized
+        guard frame.width > 0, frame.height > 0 else { return true }
+        let horizontalThreshold = NetworkProtocol.cursorHandoffReacquireInsetPoints / frame.width
+        let verticalThreshold = NetworkProtocol.cursorHandoffReacquireInsetPoints / frame.height
         switch handoffEdge {
         case .left:
-            return normalizedPosition.x > threshold
+            return normalizedPosition.x > horizontalThreshold
         case .right:
-            return normalizedPosition.x < (1.0 - threshold)
+            return normalizedPosition.x < (1.0 - horizontalThreshold)
         case .top:
-            return normalizedPosition.y > threshold
+            return normalizedPosition.y > verticalThreshold
         case .bottom:
-            return normalizedPosition.y < (1.0 - threshold)
+            return normalizedPosition.y < (1.0 - verticalThreshold)
         case .none:
             return true
         }
