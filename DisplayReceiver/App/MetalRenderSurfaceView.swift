@@ -456,6 +456,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 lastWarpedScreenPoint = nil
                 needsCursorReassertion = true
                 lastPresentedOwnershipIntent = .localHandoff
+                postLocalCursorWakeEvent()
             }
             logCursorVisibilityIfNeeded(false, detail: "local-handoff")
             restoreVisibleSystemCursorIfNeeded(forceArrow: true)
@@ -662,7 +663,32 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             guard forceArrow || systemCursorSignature == nil else { return }
             systemCursor = NSCursor.arrow
             systemCursorSignature = UInt64.max - 1
+            // Apply the visible cursor immediately; invalidating cursor rects alone
+            // waits for the next local event, which is exactly the "needs local mouse
+            // or keyboard input before UC wakes up" failure mode we are seeing.
+            systemCursor.set()
             window?.invalidateCursorRects(for: self)
+        }
+
+        private func postLocalCursorWakeEvent() {
+            guard let currentLocation = CGEvent(source: nil)?.location,
+                  let wakeEvent = CGEvent(
+                      mouseEventSource: nil,
+                      mouseType: .mouseMoved,
+                      mouseCursorPosition: currentLocation,
+                      mouseButton: .left
+                  ) else {
+                return
+            }
+
+            wakeEvent.post(tap: .cghidEventTap)
+            logCursorDebug(
+                String(
+                    format: "posted local cursor wake event at %.1f, %.1f",
+                    currentLocation.x,
+                    currentLocation.y
+                )
+            )
         }
 
         private func logCursorDebug(_ message: String) {
