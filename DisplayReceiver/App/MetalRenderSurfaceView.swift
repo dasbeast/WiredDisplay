@@ -30,6 +30,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
     final class ReceiverRenderContainerView: NSView {
         let metalView: MTKView
         private let cursorOverlayView = ReceiverCursorOverlayHostView()
+        private var renderFrameObserver: NSObjectProtocol?
 
         init(device: MTLDevice?) {
             metalView = MTKView(frame: .zero, device: device)
@@ -39,7 +40,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             layer?.backgroundColor = NSColor.black.cgColor
 
             metalView.enableSetNeedsDisplay = false
-            metalView.isPaused = false
+            metalView.isPaused = true
             metalView.preferredFramesPerSecond = 60
             metalView.clearColor = MTLClearColor(red: 0.08, green: 0.10, blue: 0.14, alpha: 1.0)
             metalView.colorPixelFormat = .bgra8Unorm
@@ -51,6 +52,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             cursorOverlayView.autoresizingMask = [.width, .height]
             cursorOverlayView.frame = bounds
             addSubview(cursorOverlayView)
+
+            renderFrameObserver = NotificationCenter.default.addObserver(
+                forName: .wiredDisplayRenderFrameUpdated,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.requestFramePresentation()
+            }
         }
 
         @available(*, unavailable)
@@ -58,15 +67,28 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             fatalError("init(coder:) has not been implemented")
         }
 
+        deinit {
+            if let renderFrameObserver {
+                NotificationCenter.default.removeObserver(renderFrameObserver)
+            }
+        }
+
         override func layout() {
             super.layout()
             metalView.frame = bounds
             cursorOverlayView.frame = bounds
             cursorOverlayView.refreshPresentationIfNeeded()
+            requestFramePresentation()
         }
 
         func refreshCursorOverlayConfiguration() {
             cursorOverlayView.refreshConfiguration()
+        }
+
+        private func requestFramePresentation() {
+            guard window != nil, !isHidden else { return }
+            guard metalView.device != nil else { return }
+            metalView.draw()
         }
     }
 
@@ -922,7 +944,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         func draw(in view: MTKView) {
-            _ = inFlightSemaphore.wait(timeout: .distantFuture)
+            guard inFlightSemaphore.wait(timeout: .now()) == .success else {
+                return
+            }
 
             guard let device = view.device,
                   let commandQueue,
