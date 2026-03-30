@@ -67,6 +67,7 @@ final class SenderSessionCoordinator {
     private(set) var streamingPipelinePreference: NetworkProtocol.StreamingPipelinePreference = .automatic { didSet { onChange?() } }
     private(set) var resolvedStreamingPipelineMode: NetworkProtocol.StreamingPipelineMode =
         NetworkProtocol.resolvedStreamingPipelineMode(for: .automatic) { didSet { onChange?() } }
+    private(set) var useReceiverSideCursorOverlay = false { didSet { onChange?() } }
     private(set) var displayResolutionPreference: DisplayResolutionPreference = .matchReceiver { didSet { onChange?() } }
     private(set) var preferredDisplayPreset: VirtualDisplayPreset = .defaultFixed { didSet { onChange?() } }
 
@@ -400,6 +401,7 @@ final class SenderSessionCoordinator {
             "[Sender] Display resolution: preference=\(displayResolutionPreference.rawValue), " +
             "preset=\(preferredDisplayPreset.id)"
         )
+        print("[Sender] Cursor mode: \(useReceiverSideCursorOverlay ? "side-overlay" : "native-captured")")
 
         // Create virtual display so macOS extends the desktop onto it.
         let virtualDisplayID = virtualDisplayService.createDisplay(
@@ -413,8 +415,10 @@ final class SenderSessionCoordinator {
 
         // Point capture at the virtual display (or fall back to main display).
         captureService.targetDisplayID = virtualDisplayID
-        if NetworkProtocol.enableReceiverSideCursorOverlay {
+        if useReceiverSideCursorOverlay {
             startCursorTracking(for: virtualDisplayID)
+        } else {
+            stopCursorTracking(sendHiddenState: true)
         }
 
         // Stage 1 (0.25s): CGDisplayCopyAllDisplayModes needs a moment after virtual display
@@ -462,7 +466,7 @@ final class SenderSessionCoordinator {
                     height: liveMode?.pixelHeight ?? captureHeight,
                     framesPerSecond: NetworkProtocol.captureFramesPerSecond,
                     streamingPipelineMode: self.resolvedStreamingPipelineMode,
-                    showsCursor: NetworkProtocol.showSenderCursorFallbackWhileTestingOverlay || !NetworkProtocol.enableReceiverSideCursorOverlay
+                    showsCursor: self.shouldShowSenderCursorInCapture
                 )
             }
         }
@@ -490,7 +494,7 @@ final class SenderSessionCoordinator {
                 height: live.pixelHeight,
                 framesPerSecond: NetworkProtocol.captureFramesPerSecond,
                 streamingPipelineMode: self.resolvedStreamingPipelineMode,
-                showsCursor: NetworkProtocol.showSenderCursorFallbackWhileTestingOverlay || !NetworkProtocol.enableReceiverSideCursorOverlay
+                showsCursor: self.shouldShowSenderCursorInCapture
             )
         }
     }
@@ -854,6 +858,12 @@ final class SenderSessionCoordinator {
         resolvedStreamingPipelineMode = NetworkProtocol.resolvedStreamingPipelineMode(for: preference)
     }
 
+    func setUseReceiverSideCursorOverlay(_ enabled: Bool) {
+        guard enabled != useReceiverSideCursorOverlay else { return }
+        useReceiverSideCursorOverlay = enabled
+        applyCursorOverlayModeIfRunning()
+    }
+
     func setDisplayResolutionPreference(_ preference: DisplayResolutionPreference) {
         guard preference != displayResolutionPreference else { return }
         displayResolutionPreference = preference
@@ -948,6 +958,40 @@ final class SenderSessionCoordinator {
         return (alpha * sample) + ((1.0 - alpha) * current)
     }
 
+    private var shouldShowSenderCursorInCapture: Bool {
+        NetworkProtocol.showSenderCursorFallbackWhileTestingOverlay || !useReceiverSideCursorOverlay
+    }
+
+    private func applyCursorOverlayModeIfRunning() {
+        guard state == .running else { return }
+        guard virtualDisplayService.isActive else { return }
+
+        let displayID = virtualDisplayService.displayID
+        if useReceiverSideCursorOverlay {
+            startCursorTracking(for: displayID)
+        } else {
+            stopCursorTracking(sendHiddenState: true)
+        }
+
+        captureService.stopCapture()
+
+        let liveMode = activeDisplayMode ?? virtualDisplayService.activeMode()
+        let captureWidth = liveMode?.pixelWidth ?? effectiveCaptureWidth()
+        let captureHeight = liveMode?.pixelHeight ?? effectiveCaptureHeight()
+        print("[Sender] Restarting capture for cursor mode change: \(useReceiverSideCursorOverlay ? "side-overlay" : "native-captured")")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, case .running = self.state else { return }
+            self.captureService.startCapture(
+                width: captureWidth,
+                height: captureHeight,
+                framesPerSecond: NetworkProtocol.captureFramesPerSecond,
+                streamingPipelineMode: self.resolvedStreamingPipelineMode,
+                showsCursor: self.shouldShowSenderCursorInCapture
+            )
+        }
+    }
+
     private func startCursorTracking(for displayID: CGDirectDisplayID) {
         stopCursorTracking(sendHiddenState: false)
         guard displayID != 0 else { return }
@@ -991,7 +1035,6 @@ final class SenderSessionCoordinator {
         removeCursorEventMonitors()
 
         if sendHiddenState,
-           NetworkProtocol.enableReceiverSideCursorOverlay,
            state == .running || state == .connected {
             logCursorDebug("sending hidden cursor state while stopping tracking")
             transportService.sendCursorState(
@@ -1084,7 +1127,7 @@ final class SenderSessionCoordinator {
     }
 
     private func scheduleCursorPoll(for displayID: CGDirectDisplayID) {
-        guard NetworkProtocol.enableReceiverSideCursorOverlay else { return }
+        guard useReceiverSideCursorOverlay else { return }
         cursorPollRequestCount += 1
 
         if pendingCursorPollDisplayID == displayID {
@@ -1137,7 +1180,7 @@ final class SenderSessionCoordinator {
     }
 
     private func pollCursorState(for displayID: CGDirectDisplayID) {
-        guard NetworkProtocol.enableReceiverSideCursorOverlay else { return }
+        guard useReceiverSideCursorOverlay else { return }
         guard state == .running else { return }
         guard virtualDisplayService.displayID == displayID else { return }
 

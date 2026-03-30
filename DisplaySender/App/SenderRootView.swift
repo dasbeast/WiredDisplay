@@ -18,6 +18,7 @@ struct SenderRootView: View {
     private static let savedDisplayResolutionPreferenceKey = "displayResolutionPreference"
     private static let savedFixedDisplayPresetKey = "fixedDisplayPreset"
     private static let savedStreamingPipelinePreferenceKey = "streamingPipelinePreference"
+    private static let savedUseSideCursorOverlayKey = "useSideCursorOverlay"
 
     @State private var receiverHostInput = UserDefaults.standard.string(forKey: SenderRootView.savedHostKey) ?? ""
     @State private var portInput = UserDefaults.standard.string(forKey: SenderRootView.savedPortKey) ?? String(NetworkProtocol.defaultPort)
@@ -55,6 +56,8 @@ struct SenderRootView: View {
         NetworkProtocol.StreamingPipelinePreference(
             rawValue: UserDefaults.standard.string(forKey: SenderRootView.savedStreamingPipelinePreferenceKey) ?? ""
         ) ?? .automatic
+    @State private var useSideCursorOverlay =
+        UserDefaults.standard.object(forKey: SenderRootView.savedUseSideCursorOverlayKey) as? Bool ?? false
     @State private var isAdvancedResolutionsExpanded = false
 
     var body: some View {
@@ -81,6 +84,7 @@ struct SenderRootView: View {
             coordinator.setPreferredDisplayPreset(persistedPreset)
             coordinator.setDisplayResolutionPreference(selectedDisplayResolutionPreference)
             coordinator.setStreamingPipelinePreference(selectedStreamingPipelinePreference)
+            coordinator.setUseReceiverSideCursorOverlay(useSideCursorOverlay)
             coordinator.onChange = {
                 refreshFromCoordinator()
             }
@@ -309,8 +313,23 @@ struct SenderRootView: View {
                     .foregroundStyle(.secondary)
                     .font(.system(.body, design: .monospaced))
 
+                Toggle("Use Side Cursor Overlay", isOn: $useSideCursorOverlay)
+                    .onChange(of: useSideCursorOverlay) { _, newValue in
+                        UserDefaults.standard.set(newValue, forKey: Self.savedUseSideCursorOverlayKey)
+                        coordinator.setUseReceiverSideCursorOverlay(newValue)
+                        refreshFromCoordinator()
+                    }
+
+                Text(
+                    useSideCursorOverlay
+                        ? "Uses the receiver-side cursor overlay path. Native cursor capture is disabled in the video stream."
+                        : "Captures the macOS cursor directly inside the video stream and skips the side cursor path."
+                )
+                .foregroundStyle(.secondary)
+                .font(.callout)
+
                 if isSessionActive {
-                    Text("Changes take effect the next time capture starts.")
+                    Text("Changes restart capture automatically while streaming.")
                         .foregroundStyle(.secondary)
                         .font(.callout)
                 }
@@ -384,6 +403,7 @@ struct SenderRootView: View {
                         Text("Video Transport: \(videoTransportText)")
                         Text("Display Resolution: \(displayResolutionSummaryText)")
                         Text("Streaming Pipeline: \(selectedStreamingPipelinePreference.label) -> \(resolvedStreamingPipelineText)")
+                        Text("Cursor Mode: \(cursorModeSummaryText)")
                         Text("Negotiated Display: \(negotiatedResolutionText)")
                         Text("Wired Path: \(wiredPathSummary)")
 
@@ -530,6 +550,9 @@ struct SenderRootView: View {
         if selectedStreamingPipelinePreference != coordinator.streamingPipelinePreference {
             selectedStreamingPipelinePreference = coordinator.streamingPipelinePreference
         }
+        if useSideCursorOverlay != coordinator.useReceiverSideCursorOverlay {
+            useSideCursorOverlay = coordinator.useReceiverSideCursorOverlay
+        }
         negotiatedResolutionText = "\(coordinator.targetWidth)x\(coordinator.targetHeight)"
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         wiredWarning = coordinator.wiredPathAvailable ? "" : "No wired route currently available. Verify Thunderbolt Bridge and cable link."
@@ -601,6 +624,10 @@ struct SenderRootView: View {
         case .idle:
             return wiredPathSummary == "available" ? "Ready on wired network" : "No wired path detected"
         }
+    }
+
+    private var cursorModeSummaryText: String {
+        coordinator.useReceiverSideCursorOverlay ? "Side Cursor Overlay" : "Native Cursor Capture"
     }
 }
 

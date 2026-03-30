@@ -23,9 +23,9 @@ enum NetworkProtocol {
     static let cursorHandoffEdgeThresholdNormalized: Double = 0.05
     static let cursorHandoffReacquireInsetPoints: Double = 2.0
     static let cursorHandoffDetectionWindowNanoseconds: UInt64 = 500_000_000
-    // Temporarily prefer native cursor capture inside the video stream while we debug
-    // freezes tied to cursor transitions and mouse-hold interactions.
-    static let enableReceiverSideCursorOverlay: Bool = false
+    // Keep the receiver-side cursor overlay code available; the sender UI decides at runtime
+    // whether a session should use this path or capture the native cursor directly in video.
+    static let enableReceiverSideCursorOverlay: Bool = true
     // Sampling live AppKit cursor images has proven unstable during cursor-shape transitions
     // (for example I-beam, resize arrows, and pointing-hand updates), so keep the receiver
     // on its built-in arrow fallback until a safer cursor-kind transport exists.
