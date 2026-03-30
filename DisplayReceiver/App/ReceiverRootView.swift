@@ -2,18 +2,16 @@ import Foundation
 import SwiftUI
 
 /// Receiver view that presents the Metal render surface as the primary content.
-/// A small status overlay shows connection info and fades out once streaming begins.
+/// A small status overlay shows connection info while the receiver is idle.
 struct ReceiverRootView: View {
     @ObservedObject var appController: ReceiverAppController
-
-    @State private var showOverlay = true
 
     var body: some View {
         ZStack {
             MetalRenderSurfaceView()
                 .ignoresSafeArea()
 
-            if showOverlay {
+            if !appController.isStreaming {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("DisplayReceiver")
                         .font(.title3.bold())
@@ -59,27 +57,10 @@ struct ReceiverRootView: View {
                 .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .transition(.opacity)
-                .onTapGesture {
-                    withAnimation { showOverlay = false }
-                }
             }
         }
+        .allowsHitTesting(!appController.isStreaming)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.black)
-        .onTapGesture {
-            if appController.isStreaming {
-                withAnimation { showOverlay.toggle() }
-            }
-        }
-        .onChange(of: appController.isStreaming) { isStreaming in
-            if isStreaming {
-                Task { @MainActor in
-                    try? await Task.sleep(for: .seconds(3))
-                    withAnimation { showOverlay = false }
-                }
-            } else {
-                withAnimation { showOverlay = true }
-            }
-        }
     }
 }

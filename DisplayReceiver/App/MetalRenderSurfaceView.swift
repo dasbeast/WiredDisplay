@@ -73,6 +73,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
         }
 
+        override var acceptsFirstResponder: Bool {
+            false
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+
         override func layout() {
             super.layout()
             metalView.frame = bounds

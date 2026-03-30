@@ -72,7 +72,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         window.title = "DisplayReceiver"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false
         window.collectionBehavior = [.fullScreenPrimary, .fullScreenDisallowsTiling, .managed]
         window.contentViewController = hostingController
         window.delegate = self
