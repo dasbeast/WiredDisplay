@@ -319,6 +319,7 @@ final class ReceiverSessionCoordinator {
                         appearance: cursorState.appearance
                     )
                 )
+                NotificationCenter.default.post(name: .wiredDisplayCursorStateUpdated, object: nil)
                 if NetworkProtocol.useSwiftUIReceiverCursorOverlay,
                    let appearance = cursorState.appearance {
                     updateCursorOverlayAppearance(from: appearance)

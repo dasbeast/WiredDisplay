@@ -2,6 +2,7 @@ import Foundation
 
 extension Notification.Name {
     static let wiredDisplayRenderFrameUpdated = Notification.Name("wiredDisplayRenderFrameUpdated")
+    static let wiredDisplayCursorStateUpdated = Notification.Name("wiredDisplayCursorStateUpdated")
 }
 
 /// Metal-backed renderer service placeholder for fullscreen presentation.

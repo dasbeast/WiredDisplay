@@ -31,7 +31,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         let metalView: MTKView
         private let cursorOverlayView = ReceiverCursorOverlayHostView()
         private var renderFrameObserver: NSObjectProtocol?
+        private var cursorUpdateObserver: NSObjectProtocol?
         private var isFramePresentationQueued = false
+        private var isCursorPresentationQueued = false
 
         init(device: MTLDevice?) {
             metalView = MTKView(frame: .zero, device: device)
@@ -61,6 +63,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             ) { [weak self] _ in
                 self?.requestFramePresentation()
             }
+
+            cursorUpdateObserver = NotificationCenter.default.addObserver(
+                forName: .wiredDisplayCursorStateUpdated,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.requestCursorPresentation()
+            }
         }
 
         @available(*, unavailable)
@@ -71,6 +81,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         deinit {
             if let renderFrameObserver {
                 NotificationCenter.default.removeObserver(renderFrameObserver)
+            }
+            if let cursorUpdateObserver {
+                NotificationCenter.default.removeObserver(cursorUpdateObserver)
             }
         }
 
@@ -103,6 +116,18 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 guard self.window != nil, !self.isHidden else { return }
                 guard self.metalView.device != nil else { return }
                 self.metalView.draw()
+            }
+        }
+
+        private func requestCursorPresentation() {
+            guard !isCursorPresentationQueued else { return }
+            isCursorPresentationQueued = true
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isCursorPresentationQueued = false
+                guard self.window != nil, !self.isHidden else { return }
+                self.cursorOverlayView.refreshPresentationIfNeeded()
             }
         }
     }
