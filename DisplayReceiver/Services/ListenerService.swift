@@ -11,6 +11,10 @@ final class ListenerService {
     private var listener: NWListener?
     private var activeConnection: NWConnection?
     private var receiveBuffer = Data()
+    /// Logical start of unconsumed data within receiveBuffer.
+    /// Avoids O(n) memmove on every consumed frame; the buffer is compacted
+    /// periodically once the consumed prefix exceeds a threshold.
+    private var receiveBufferReadOffset = 0
 
     var onStateChange: ((Bool) -> Void)?
     var onConnectionClosed: (() -> Void)?
@@ -64,6 +68,7 @@ final class ListenerService {
         activeConnection?.cancel()
         activeConnection = nil
         receiveBuffer.removeAll(keepingCapacity: false)
+        receiveBufferReadOffset = 0
 
         listener?.cancel()
         listener = nil
@@ -142,6 +147,7 @@ final class ListenerService {
         activeConnection?.cancel()
         activeConnection = connection
         receiveBuffer.removeAll(keepingCapacity: false)
+        receiveBufferReadOffset = 0
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -173,6 +179,7 @@ final class ListenerService {
                 connection.cancel()
                 self.activeConnection = nil
                 self.receiveBuffer.removeAll(keepingCapacity: false)
+                self.receiveBufferReadOffset = 0
                 self.onConnectionClosed?()
                 return
             }
@@ -200,20 +207,39 @@ final class ListenerService {
     }
 
     private func drainBufferedEnvelopes() {
+        // Use receiveBufferReadOffset to avoid O(n) memmove on every consumed frame.
+        // The buffer is only physically compacted once the unconsumed prefix reaches
+        // 4 MB, amortising the shift cost across thousands of frames instead of
+        // paying it on every single consume.
+        let compactThreshold = 4 * 1024 * 1024
+
         while true {
-            guard receiveBuffer.count >= 4 else { return }
-            let length = Int(readLengthPrefix(from: receiveBuffer))
+            let available = receiveBuffer.count - receiveBufferReadOffset
+            guard available >= 4 else { return }
+
+            let length = Int(
+                NetworkProtocol.readUInt32BigEndian(from: receiveBuffer, atOffset: receiveBufferReadOffset) ?? 0
+            )
             guard length <= NetworkProtocol.maximumMessageBytes else {
                 receiveBuffer.removeAll(keepingCapacity: false)
+                receiveBufferReadOffset = 0
                 onError?(ListenerServiceError.messageTooLarge)
                 return
             }
 
             let totalLength = 4 + length
-            guard receiveBuffer.count >= totalLength else { return }
+            guard available >= totalLength else { return }
 
-            let payload = receiveBuffer[4..<totalLength]
-            receiveBuffer.removeSubrange(0..<totalLength)
+            let payloadStart = receiveBufferReadOffset + 4
+            let payloadEnd   = receiveBufferReadOffset + totalLength
+            let payload = receiveBuffer[payloadStart..<payloadEnd]
+            receiveBufferReadOffset += totalLength
+
+            // Compact the backing buffer once enough prefix has been consumed.
+            if receiveBufferReadOffset >= compactThreshold {
+                receiveBuffer.removeSubrange(0..<receiveBufferReadOffset)
+                receiveBufferReadOffset = 0
+            }
 
             // Check if this is a binary video frame (starts with magic bytes)
             if payload.count >= 4 {

@@ -22,6 +22,7 @@ final class TransportService {
     private var connection: NWConnection?
     private var nextSequenceNumber: UInt64 = 1
     private var receiveBuffer = Data()
+    private var receiveBufferReadOffset = 0
 
     private struct OutboundFrame {
         let data: Data
@@ -257,6 +258,7 @@ final class TransportService {
         connection?.cancel()
         connection = nil
         receiveBuffer.removeAll(keepingCapacity: false)
+        receiveBufferReadOffset = 0
         pendingOutboundFrames.removeAll(keepingCapacity: false)
         awaitingKeyFrameAfterDrop = false
         networkInFlightCount = 0
@@ -458,6 +460,7 @@ final class TransportService {
             if isComplete {
                 connection.cancel()
                 self.receiveBuffer.removeAll(keepingCapacity: false)
+                self.receiveBufferReadOffset = 0
                 self.isConnected = false
                 self.onStateChange?(false)
                 return
@@ -468,20 +471,34 @@ final class TransportService {
     }
 
     private func drainBufferedEnvelopes() {
+        let compactThreshold = 1 * 1024 * 1024 // 1 MB — sender receives only control messages
+
         while true {
-            guard receiveBuffer.count >= 4 else { return }
-            let length = Int(readLengthPrefix(from: receiveBuffer))
+            let available = receiveBuffer.count - receiveBufferReadOffset
+            guard available >= 4 else { return }
+
+            let length = Int(
+                NetworkProtocol.readUInt32BigEndian(from: receiveBuffer, atOffset: receiveBufferReadOffset) ?? 0
+            )
             guard length <= NetworkProtocol.maximumMessageBytes else {
                 receiveBuffer.removeAll(keepingCapacity: false)
+                receiveBufferReadOffset = 0
                 onError?(TransportServiceError.messageTooLarge)
                 return
             }
 
             let totalFrameLength = 4 + length
-            guard receiveBuffer.count >= totalFrameLength else { return }
+            guard available >= totalFrameLength else { return }
 
-            let payload = receiveBuffer.subdata(in: 4..<totalFrameLength)
-            receiveBuffer.removeSubrange(0..<totalFrameLength)
+            let payloadStart = receiveBufferReadOffset + 4
+            let payloadEnd   = receiveBufferReadOffset + totalFrameLength
+            let payload = receiveBuffer.subdata(in: payloadStart..<payloadEnd)
+            receiveBufferReadOffset += totalFrameLength
+
+            if receiveBufferReadOffset >= compactThreshold {
+                receiveBuffer.removeSubrange(0..<receiveBufferReadOffset)
+                receiveBufferReadOffset = 0
+            }
 
             do {
                 let envelope = try JSONDecoder().decode(NetworkEnvelope.self, from: payload)

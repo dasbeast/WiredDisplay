@@ -31,9 +31,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         let metalView: MTKView
         private let cursorOverlayView = ReceiverCursorOverlayHostView()
         private var renderFrameObserver: NSObjectProtocol?
-        private var cursorUpdateObserver: NSObjectProtocol?
         private var isFramePresentationQueued = false
-        private var isCursorPresentationQueued = false
 
         init(device: MTLDevice?) {
             metalView = MTKView(frame: .zero, device: device)
@@ -56,20 +54,17 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             cursorOverlayView.frame = bounds
             addSubview(cursorOverlayView)
 
+            // Video frame notifications trigger immediate Metal draws for low latency.
+            // Cursor presentation is driven solely by the CVDisplayLink inside
+            // ReceiverCursorOverlayHostView — adding a second notification-driven path
+            // here would double the CGWarpMouseCursorPosition call rate with no visual
+            // benefit, since the screen cannot update faster than the display link anyway.
             renderFrameObserver = NotificationCenter.default.addObserver(
                 forName: .wiredDisplayRenderFrameUpdated,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
                 self?.requestFramePresentation()
-            }
-
-            cursorUpdateObserver = NotificationCenter.default.addObserver(
-                forName: .wiredDisplayCursorStateUpdated,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                self?.requestCursorPresentation()
             }
         }
 
@@ -81,9 +76,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         deinit {
             if let renderFrameObserver {
                 NotificationCenter.default.removeObserver(renderFrameObserver)
-            }
-            if let cursorUpdateObserver {
-                NotificationCenter.default.removeObserver(cursorUpdateObserver)
             }
         }
 
@@ -116,18 +108,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 guard self.window != nil, !self.isHidden else { return }
                 guard self.metalView.device != nil else { return }
                 self.metalView.draw()
-            }
-        }
-
-        private func requestCursorPresentation() {
-            guard !isCursorPresentationQueued else { return }
-            isCursorPresentationQueued = true
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.isCursorPresentationQueued = false
-                guard self.window != nil, !self.isHidden else { return }
-                self.cursorOverlayView.refreshPresentationIfNeeded()
             }
         }
     }
@@ -166,6 +146,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var cursorHiddenSinceNanoseconds: UInt64?
         private var needsCursorReassertion = false
         private var prefersOverlayFallback = false
+        /// How many consecutive drift checks in a row have exceeded the threshold.
+        /// Requires multiple detections before activating fallback to avoid false
+        /// positives from WindowServer event-queue lag.
+        private var consecutiveDriftCount = 0
+        /// Timestamp of the last drift check. Drift is sampled at most every
+        /// 150 ms to avoid saturating the WindowServer IPC path.
+        private var lastDriftCheckNanoseconds: UInt64 = 0
+        /// Timestamp of the most recent warp cycle that passed the drift check
+        /// cleanly. Used to recover from fallback after stable operation.
+        private var lastStableWarpNanoseconds: UInt64 = 0
         private var lastPresentedOwnershipIntent: CursorOwnershipIntent?
         private var trackingArea: NSTrackingArea?
         private var lastLoggedCursorPresentationMode: String?
@@ -758,33 +748,67 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 screenPoint = appKitScreenPoint
             }
 
-            let currentSystemCursorPoint = CGEvent(source: nil)?.location
+            // Drift detection: sample WindowServer's view of cursor position at most
+            // every 150 ms rather than every frame. CGEvent(source: nil) is a
+            // synchronous IPC call; calling it at 120–180 fps saturates the WindowServer
+            // event queue and creates the stale-read false-positives that were causing
+            // premature fallback activation.
+            //
+            // Require 3 consecutive detections above the 8 px threshold before
+            // activating fallback so that a single queue-delayed read doesn't latch us.
+            //
+            // After 2 s of clean drift checks, reset prefersOverlayFallback so normal
+            // operation recovers automatically without needing a reconnect.
+            let now = DispatchTime.now().uptimeNanoseconds
+            let driftCheckIntervalNanoseconds: UInt64 = 150_000_000   // 150 ms
+            let driftThreshold: CGFloat                = 8.0           // px — real local movement is far larger
+            let driftConsecutiveRequired               = 3
+            let fallbackRecoveryNanoseconds: UInt64    = 2_000_000_000 // 2 s
 
-            if let lastWarpedScreenPoint,
-               let currentSystemCursorPoint,
-               abs(currentSystemCursorPoint.x - lastWarpedScreenPoint.x) > 2.0 ||
-               abs(currentSystemCursorPoint.y - lastWarpedScreenPoint.y) > 2.0 {
-                logCursorDebug(
-                    String(
-                        format: "local cursor drift detected current=(%.1f, %.1f) lastWarped=(%.1f, %.1f)",
-                        currentSystemCursorPoint.x,
-                        currentSystemCursorPoint.y,
-                        lastWarpedScreenPoint.x,
-                        lastWarpedScreenPoint.y
+            let shouldCheckDrift = lastWarpedScreenPoint != nil &&
+                (lastDriftCheckNanoseconds == 0 ||
+                 now >= lastDriftCheckNanoseconds + driftCheckIntervalNanoseconds)
+
+            if shouldCheckDrift {
+                lastDriftCheckNanoseconds = now
+                if let lastWarpedScreenPoint,
+                   let currentSystemCursorPoint = CGEvent(source: nil)?.location,
+                   abs(currentSystemCursorPoint.x - lastWarpedScreenPoint.x) > driftThreshold ||
+                   abs(currentSystemCursorPoint.y - lastWarpedScreenPoint.y) > driftThreshold {
+                    consecutiveDriftCount += 1
+                    logCursorDebug(
+                        String(
+                            format: "drift sample %d/%d current=(%.1f, %.1f) lastWarped=(%.1f, %.1f)",
+                            consecutiveDriftCount, driftConsecutiveRequired,
+                            currentSystemCursorPoint.x, currentSystemCursorPoint.y,
+                            lastWarpedScreenPoint.x, lastWarpedScreenPoint.y
+                        )
                     )
-                )
-                activateOverlayCursorFallback()
-                self.lastWarpedScreenPoint = currentSystemCursorPoint
-                needsCursorReassertion = true
+                    if consecutiveDriftCount >= driftConsecutiveRequired {
+                        activateOverlayCursorFallback()
+                        consecutiveDriftCount = 0
+                        self.lastWarpedScreenPoint = currentSystemCursorPoint
+                        needsCursorReassertion = true
+                    }
+                } else {
+                    consecutiveDriftCount = 0
+                    lastStableWarpNanoseconds = now
+                    // Recover from overlay fallback once warping has been stable for 2 s.
+                    if prefersOverlayFallback,
+                       lastStableWarpNanoseconds > 0,
+                       now >= lastStableWarpNanoseconds + fallbackRecoveryNanoseconds {
+                        prefersOverlayFallback = false
+                        logCursorDebug("recovered from overlay fallback after stable warp period")
+                        needsCursorReassertion = true
+                    }
+                }
             }
 
-            // Skip warp if cursor is already at the target position.
+            // Skip warp if the cursor is already at the target — compare only against
+            // lastWarpedScreenPoint so we avoid an extra CGEvent IPC read every frame.
             if let lastWarpedScreenPoint,
-               let currentSystemCursorPoint,
-               abs(lastWarpedScreenPoint.x - screenPoint.x) < 0.25,
-               abs(lastWarpedScreenPoint.y - screenPoint.y) < 0.25,
-               abs(currentSystemCursorPoint.x - screenPoint.x) < 0.25,
-               abs(currentSystemCursorPoint.y - screenPoint.y) < 0.25,
+               abs(lastWarpedScreenPoint.x - screenPoint.x) < 0.5,
+               abs(lastWarpedScreenPoint.y - screenPoint.y) < 0.5,
                !forceReassertion {
                 return
             }
@@ -805,6 +829,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private func activateOverlayCursorFallback() {
             guard NetworkProtocol.useReceiverSystemCursorMirror, !prefersOverlayFallback else { return }
             prefersOverlayFallback = true
+            consecutiveDriftCount = 0
+            lastStableWarpNanoseconds = 0
             logCursorDebug("activated overlay fallback after local cursor interference")
             installTransparentSystemCursorIfNeeded()
         }
