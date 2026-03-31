@@ -201,6 +201,9 @@ enum NetworkProtocol {
     static let audioSampleRateHz: Double = 48_000
     static let audioChannelCount: Int = 2
     static let audioPlaybackMaxQueuedBuffers: Int = 8
+    // Disabled while debugging sender-side screen freezes so audio conversion/capture
+    // cannot compete with the screen path on the ScreenCaptureKit callback queue.
+    static let enableSenderAudioCapture: Bool = false
 
     enum MessageType: UInt8, Codable, Sendable {
         case hello = 1

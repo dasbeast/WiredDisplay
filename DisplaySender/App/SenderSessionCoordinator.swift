@@ -11,6 +11,12 @@ final class SenderSessionCoordinator {
         case bottom
     }
 
+    private enum InputTelemetry {
+        static let holdTimerIntervalMilliseconds = 250
+        static let minimumHoldDurationNanoseconds: UInt64 = 500_000_000
+        static let holdProgressLogIntervalNanoseconds: UInt64 = 1_000_000_000
+    }
+
     enum SessionState: Equatable {
         case idle
         case connecting
@@ -112,6 +118,13 @@ final class SenderSessionCoordinator {
     private var cursorTrackingRefreshTimer: DispatchSourceTimer?
     private var localCursorEventMonitor: Any?
     private var globalCursorEventMonitor: Any?
+    private var inputHoldTelemetryTimer: DispatchSourceTimer?
+    private var localInputEventMonitor: Any?
+    private var globalInputEventMonitor: Any?
+    private var inputLoggingDisplayID: CGDirectDisplayID?
+    private var activeMouseHoldStartNanoseconds: UInt64?
+    private var activeMouseHoldButtonsMask: UInt64 = 0
+    private var lastMouseHoldProgressLogNanoseconds: UInt64 = 0
     private var lastSentCursorState: CursorStatePayload?
     private var lastSentCursorAppearanceSignature: UInt64?
     private var cachedCursorAppearance: CursorAppearancePayload?
@@ -229,6 +242,7 @@ final class SenderSessionCoordinator {
                     self.sendHello()
                 } else {
                     self.captureService.stopCapture()
+                    self.stopInputEventLogging()
 
                     // Ignore the synthetic disconnect emitted by TransportService.connect()
                     // when it clears a previous connection before starting a new one.
@@ -363,6 +377,7 @@ final class SenderSessionCoordinator {
 
         state = .connecting
         stopCursorTracking(sendHiddenState: false)
+        stopInputEventLogging()
         captureService.stopCapture()
         // Wait until the receiver explicitly negotiates UDP before opening the datagram path.
         // Pre-connecting here can fail before the handshake finishes and strand the sender
@@ -415,6 +430,7 @@ final class SenderSessionCoordinator {
 
         // Point capture at the virtual display (or fall back to main display).
         captureService.targetDisplayID = virtualDisplayID
+        startInputEventLogging(for: virtualDisplayID)
         if useReceiverSideCursorOverlay {
             startCursorTracking(for: virtualDisplayID)
         } else {
@@ -504,6 +520,7 @@ final class SenderSessionCoordinator {
         shouldMaintainConnection = false
         stopHeartbeatTimers()
         stopCursorTracking(sendHiddenState: true)
+        stopInputEventLogging()
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
         videoDatagramTransportService.disconnect()
@@ -705,6 +722,7 @@ final class SenderSessionCoordinator {
         activeDisplayMode = nil
         stopHeartbeatTimers()
         stopCursorTracking(sendHiddenState: false)
+        stopInputEventLogging()
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
         videoDatagramTransportService.disconnect()
@@ -1066,6 +1084,171 @@ final class SenderSessionCoordinator {
         cursorPacketSentCount = 0
         cursorPacketSuppressedCount = 0
         lastCursorTelemetryLogNanoseconds = 0
+    }
+
+    private func startInputEventLogging(for displayID: CGDirectDisplayID) {
+        stopInputEventLogging()
+        guard displayID != 0 else { return }
+
+        inputLoggingDisplayID = displayID
+        activeMouseHoldStartNanoseconds = nil
+        activeMouseHoldButtonsMask = 0
+        lastMouseHoldProgressLogNanoseconds = 0
+
+        let eventMask: NSEvent.EventTypeMask = [
+            .leftMouseDown,
+            .leftMouseUp,
+            .leftMouseDragged,
+            .rightMouseDown,
+            .rightMouseUp,
+            .rightMouseDragged,
+            .otherMouseDown,
+            .otherMouseUp,
+            .otherMouseDragged
+        ]
+
+        localInputEventMonitor = NSEvent.addLocalMonitorForEvents(matching: eventMask) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleObservedInputEvent(event, for: displayID)
+            }
+            return event
+        }
+
+        globalInputEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleObservedInputEvent(event, for: displayID)
+            }
+        }
+
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + .milliseconds(InputTelemetry.holdTimerIntervalMilliseconds),
+            repeating: .milliseconds(InputTelemetry.holdTimerIntervalMilliseconds),
+            leeway: .milliseconds(50)
+        )
+        timer.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.emitMouseHoldProgressIfNeeded(force: false)
+            }
+        }
+        timer.activate()
+        inputHoldTelemetryTimer = timer
+
+        logInputDebug("input logging started for display \(displayID)")
+    }
+
+    private func stopInputEventLogging() {
+        emitMouseHoldProgressIfNeeded(force: true)
+
+        inputHoldTelemetryTimer?.setEventHandler {}
+        inputHoldTelemetryTimer?.cancel()
+        inputHoldTelemetryTimer = nil
+
+        if let localInputEventMonitor {
+            NSEvent.removeMonitor(localInputEventMonitor)
+            self.localInputEventMonitor = nil
+        }
+
+        if let globalInputEventMonitor {
+            NSEvent.removeMonitor(globalInputEventMonitor)
+            self.globalInputEventMonitor = nil
+        }
+
+        inputLoggingDisplayID = nil
+        activeMouseHoldStartNanoseconds = nil
+        activeMouseHoldButtonsMask = 0
+        lastMouseHoldProgressLogNanoseconds = 0
+    }
+
+    private func handleObservedInputEvent(_ event: NSEvent, for displayID: CGDirectDisplayID) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let buttonsMask = currentPressedMouseButtonsMask()
+        let mouseLocation = NSEvent.mouseLocation
+
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            activeMouseHoldStartNanoseconds = now
+            activeMouseHoldButtonsMask = buttonsMask != 0 ? buttonsMask : mouseButtonsMask(for: event.type)
+            lastMouseHoldProgressLogNanoseconds = 0
+            logInputDebug(
+                "\(inputEventName(for: event.type)) \(inputLocationContext(mouseLocation, displayID: displayID)) " +
+                "buttons=\(activeMouseHoldButtonsMask)"
+            )
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            let durationMilliseconds = activeMouseHoldDurationMilliseconds(at: now)
+            logInputDebug(
+                "\(inputEventName(for: event.type)) after \(durationMilliseconds) ms " +
+                "\(inputLocationContext(mouseLocation, displayID: displayID)) buttons=\(buttonsMask)"
+            )
+            if buttonsMask == 0 {
+                activeMouseHoldStartNanoseconds = nil
+                activeMouseHoldButtonsMask = 0
+                lastMouseHoldProgressLogNanoseconds = 0
+            } else {
+                activeMouseHoldButtonsMask = buttonsMask
+            }
+        case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            if activeMouseHoldStartNanoseconds == nil && buttonsMask != 0 {
+                activeMouseHoldStartNanoseconds = now
+                activeMouseHoldButtonsMask = buttonsMask
+                lastMouseHoldProgressLogNanoseconds = 0
+                logInputDebug(
+                    "drag-start without prior down \(inputLocationContext(mouseLocation, displayID: displayID)) " +
+                    "buttons=\(buttonsMask)"
+                )
+            }
+            emitMouseHoldProgressIfNeeded(force: false)
+        default:
+            break
+        }
+    }
+
+    private func emitMouseHoldProgressIfNeeded(force: Bool) {
+        guard let displayID = inputLoggingDisplayID else { return }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        let buttonsMask = currentPressedMouseButtonsMask()
+
+        guard buttonsMask != 0 else {
+            if force,
+               let activeMouseHoldStartNanoseconds {
+                logInputDebug(
+                    "hold logging stopped after \(millisecondsSince(activeMouseHoldStartNanoseconds, now: now)) ms " +
+                    "\(inputLocationContext(NSEvent.mouseLocation, displayID: displayID))"
+                )
+            }
+            activeMouseHoldStartNanoseconds = nil
+            activeMouseHoldButtonsMask = 0
+            lastMouseHoldProgressLogNanoseconds = 0
+            return
+        }
+
+        if activeMouseHoldStartNanoseconds == nil {
+            activeMouseHoldStartNanoseconds = now
+            activeMouseHoldButtonsMask = buttonsMask
+            lastMouseHoldProgressLogNanoseconds = 0
+            logInputDebug(
+                "buttons-down without explicit mouse-down \(inputLocationContext(NSEvent.mouseLocation, displayID: displayID)) " +
+                "buttons=\(buttonsMask)"
+            )
+        }
+
+        guard let activeMouseHoldStartNanoseconds else { return }
+        guard force || now >= (activeMouseHoldStartNanoseconds + InputTelemetry.minimumHoldDurationNanoseconds) else {
+            return
+        }
+        guard force ||
+            lastMouseHoldProgressLogNanoseconds == 0 ||
+            now >= (lastMouseHoldProgressLogNanoseconds + InputTelemetry.holdProgressLogIntervalNanoseconds) else {
+            return
+        }
+
+        activeMouseHoldButtonsMask = buttonsMask
+        lastMouseHoldProgressLogNanoseconds = now
+        logInputDebug(
+            "hold active \(millisecondsSince(activeMouseHoldStartNanoseconds, now: now)) ms " +
+            "\(inputLocationContext(NSEvent.mouseLocation, displayID: displayID)) buttons=\(buttonsMask)"
+        )
     }
 
     private func installCursorEventMonitors(for displayID: CGDirectDisplayID) {
@@ -1673,6 +1856,96 @@ final class SenderSessionCoordinator {
     private func logCursorDebug(_ message: String) {
         guard NetworkProtocol.enableCursorDebugLogging else { return }
         print("[Sender][Cursor] \(message)")
+    }
+
+    private func logInputDebug(_ message: String) {
+        guard NetworkProtocol.enableCursorDebugLogging else { return }
+        print("[Sender][Input] \(message)")
+    }
+
+    private func currentPressedMouseButtonsMask() -> UInt64 {
+        UInt64(truncatingIfNeeded: NSEvent.pressedMouseButtons)
+    }
+
+    private func mouseButtonsMask(for eventType: NSEvent.EventType) -> UInt64 {
+        switch eventType {
+        case .leftMouseDown, .leftMouseUp, .leftMouseDragged:
+            return 1 << 0
+        case .rightMouseDown, .rightMouseUp, .rightMouseDragged:
+            return 1 << 1
+        case .otherMouseDown, .otherMouseUp, .otherMouseDragged:
+            return 1 << 2
+        default:
+            return 0
+        }
+    }
+
+    private func inputEventName(for eventType: NSEvent.EventType) -> String {
+        switch eventType {
+        case .leftMouseDown:
+            return "left-down"
+        case .leftMouseUp:
+            return "left-up"
+        case .leftMouseDragged:
+            return "left-dragged"
+        case .rightMouseDown:
+            return "right-down"
+        case .rightMouseUp:
+            return "right-up"
+        case .rightMouseDragged:
+            return "right-dragged"
+        case .otherMouseDown:
+            return "other-down"
+        case .otherMouseUp:
+            return "other-up"
+        case .otherMouseDragged:
+            return "other-dragged"
+        default:
+            return String(describing: eventType)
+        }
+    }
+
+    private func inputLocationContext(_ mouseLocation: CGPoint, displayID: CGDirectDisplayID) -> String {
+        guard let frame = screenFrame(for: displayID) else {
+            return String(
+                format: "mouse=(%.1f, %.1f) display=%u screen=unavailable",
+                mouseLocation.x,
+                mouseLocation.y,
+                displayID
+            )
+        }
+
+        let containment = frame.contains(mouseLocation) ? "inside" : "outside"
+        return String(
+            format: "mouse=(%.1f, %.1f) display=%u %@",
+            mouseLocation.x,
+            mouseLocation.y,
+            displayID,
+            containment
+        )
+    }
+
+    private func screenFrame(for displayID: CGDirectDisplayID) -> CGRect? {
+        guard let screen = NSScreen.screens.first(where: { screen in
+            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
+            return CGDirectDisplayID(screenNumber.uint32Value) == displayID
+        }) else {
+            return nil
+        }
+
+        return screen.frame
+    }
+
+    private func activeMouseHoldDurationMilliseconds(at nowNanoseconds: UInt64) -> Int {
+        guard let activeMouseHoldStartNanoseconds else { return 0 }
+        return millisecondsSince(activeMouseHoldStartNanoseconds, now: nowNanoseconds)
+    }
+
+    private func millisecondsSince(_ startNanoseconds: UInt64, now nowNanoseconds: UInt64) -> Int {
+        guard nowNanoseconds >= startNanoseconds else { return 0 }
+        return Int((nowNanoseconds - startNanoseconds) / 1_000_000)
     }
 
     private func updateCursorDebugStatus(_ message: String) {

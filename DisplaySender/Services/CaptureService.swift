@@ -9,7 +9,7 @@ import ScreenCaptureKit
 final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     private enum ProcessingBacklog {
         static let maxPendingScreenSamples = 2
-        static let lagWarningNanoseconds: UInt64 = 75_000_000
+        static let lagWarningNanoseconds: UInt64 = 20_000_000
         static let logIntervalNanoseconds: UInt64 = 1_000_000_000
     }
 
@@ -196,6 +196,9 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
             "scale=\(String(format: "%.2f", captureScale)) -> pixels=\(captureWidthPixels)x\(captureHeightPixels) " +
             "(requested \(width)x\(height), pipeline \(pipelineDescription))"
         )
+        if !NetworkProtocol.enableSenderAudioCapture {
+            print("[CaptureService] Audio capture disabled for diagnostics")
+        }
 
         let configuration = SCStreamConfiguration()
         configuration.width = captureWidthPixels
@@ -203,10 +206,12 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(framesPerSecond, 1)))
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         configuration.scalesToFit = false
-        configuration.capturesAudio = true
-        configuration.excludesCurrentProcessAudio = true
-        configuration.sampleRate = Int(NetworkProtocol.audioSampleRateHz)
-        configuration.channelCount = NetworkProtocol.audioChannelCount
+        configuration.capturesAudio = NetworkProtocol.enableSenderAudioCapture
+        configuration.excludesCurrentProcessAudio = NetworkProtocol.enableSenderAudioCapture
+        if NetworkProtocol.enableSenderAudioCapture {
+            configuration.sampleRate = Int(NetworkProtocol.audioSampleRateHz)
+            configuration.channelCount = NetworkProtocol.audioChannelCount
+        }
         if #available(macOS 14.0, *) {
             configuration.captureResolution = .best
         }
@@ -215,7 +220,9 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
-        try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
+        if NetworkProtocol.enableSenderAudioCapture {
+            try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
+        }
         try await newStream.startCapture()
 
         self.stream = newStream
@@ -272,6 +279,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
                 )
             }
         case .audio:
+            guard NetworkProtocol.enableSenderAudioCapture else { return }
             guard let audioPacket = makeAudioPacket(from: sampleBuffer) else { return }
             onCapturedAudio?(audioPacket)
         default:
@@ -301,6 +309,10 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func logIncompleteScreenFrameIfNeeded(status: SCFrameStatus, at timestampNanoseconds: UInt64) {
+        if status == .idle {
+            return
+        }
+
         let shouldLog: Bool
         if let lastIncompleteScreenFrameLogTimestampNanoseconds {
             shouldLog = timestampNanoseconds >= (lastIncompleteScreenFrameLogTimestampNanoseconds + 1_000_000_000)
@@ -310,7 +322,26 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
         guard shouldLog else { return }
         lastIncompleteScreenFrameLogTimestampNanoseconds = timestampNanoseconds
-        print("[CaptureService] Ignoring incomplete screen frame with status \(status.rawValue)")
+        print("[CaptureService] Ignoring \(screenFrameStatusDescription(status)) screen frame")
+    }
+
+    private func screenFrameStatusDescription(_ status: SCFrameStatus) -> String {
+        switch status {
+        case .complete:
+            return "complete"
+        case .idle:
+            return "idle"
+        case .blank:
+            return "blank"
+        case .suspended:
+            return "suspended"
+        case .started:
+            return "started"
+        case .stopped:
+            return "stopped"
+        @unknown default:
+            return "unknown(\(status.rawValue))"
+        }
     }
 
     private func currentCaptureGeneration() -> UInt64 {
