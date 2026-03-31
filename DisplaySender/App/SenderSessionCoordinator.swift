@@ -105,9 +105,11 @@ final class SenderSessionCoordinator {
 
     var onChange: (() -> Void)?
 
-    private var desiredHost: String?
+    private var desiredHosts: [String] = []
+    private var currentDesiredHostIndex = 0
     private var desiredPort: UInt16 = NetworkProtocol.defaultPort
     private var shouldMaintainConnection = false
+    private var currentHostCompletedHandshake = false
 
     private var heartbeatTimer: Timer?
     private var heartbeatTimeoutTimer: Timer?
@@ -346,16 +348,22 @@ final class SenderSessionCoordinator {
     /// `targetWidth` / `targetHeight` are retained as a fallback when the receiver cannot report display metrics.
     func connect(
         receiverHost: String,
+        alternateReceiverHosts: [String] = [],
         port: UInt16 = NetworkProtocol.defaultPort,
         videoTransportMode: NetworkProtocol.VideoTransportMode = .tcp,
         targetWidth: Int = 2560,
         targetHeight: Int = 1440
     ) {
-        desiredHost = receiverHost
+        desiredHosts = orderedUniqueHosts(
+            primaryHost: receiverHost,
+            alternateHosts: alternateReceiverHosts
+        )
+        currentDesiredHostIndex = 0
         desiredPort = port
         shouldMaintainConnection = true
+        currentHostCompletedHandshake = false
 
-        self.receiverHost = receiverHost
+        self.receiverHost = desiredHosts.first ?? receiverHost
         self.targetWidth = targetWidth
         self.targetHeight = targetHeight
         requestedVideoTransportMode = videoTransportMode
@@ -380,7 +388,6 @@ final class SenderSessionCoordinator {
         targetUsesHiDPI = true
         awaitingUDPReadyToStart = false
         awaitingFirstRenderedFrame = false
-        configuredEndpointSummary = "\(receiverHost):\(port) [\(videoTransportMode.rawValue.uppercased())]"
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
         state = .connecting
@@ -391,7 +398,7 @@ final class SenderSessionCoordinator {
         // Pre-connecting here can fail before the handshake finishes and strand the sender
         // in a connected-but-never-starting state.
         videoDatagramTransportService.disconnect()
-        transportService.connect(host: receiverHost, port: port)
+        beginConnectionAttempt()
     }
 
     /// Starts capture and frame transport after handshake succeeds.
@@ -530,6 +537,9 @@ final class SenderSessionCoordinator {
     /// Stops sender session and resets services to idle placeholders.
     func stopSession() {
         shouldMaintainConnection = false
+        desiredHosts = []
+        currentDesiredHostIndex = 0
+        currentHostCompletedHandshake = false
         stopHeartbeatTimers()
         stopCursorTracking(sendHiddenState: true)
         stopInputEventLogging()
@@ -641,6 +651,7 @@ final class SenderSessionCoordinator {
             case .helloAck:
                 let ack = try envelope.decodePayload(as: HelloAckPayload.self)
                 if ack.accepted {
+                    currentHostCompletedHandshake = true
                     applyReceiverDisplayMetrics(ack.displayMetrics)
                     state = .connected
                     lastInboundHeartbeatAt = Date()
@@ -738,15 +749,18 @@ final class SenderSessionCoordinator {
         videoDatagramTransportService.disconnect()
         transportService.disconnect()
 
-        guard shouldMaintainConnection, let host = desiredHost else { return }
+        let shouldRotateHost = !currentHostCompletedHandshake
+        currentHostCompletedHandshake = false
+        if shouldRotateHost {
+            rotateToAlternateHost(after: reason)
+        }
+
+        guard shouldMaintainConnection, currentDesiredHost != nil else { return }
 
         Timer.scheduledTimer(withTimeInterval: NetworkProtocol.reconnectDelaySeconds, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.shouldMaintainConnection else { return }
-                if self.requestedVideoTransportMode == .udp {
-                    self.videoDatagramTransportService.connect(host: host, port: self.desiredPort)
-                }
-                self.transportService.connect(host: host, port: self.desiredPort)
+                self.beginConnectionAttempt()
             }
         }
     }
@@ -870,14 +884,43 @@ final class SenderSessionCoordinator {
         frameDispatchGate.setNegotiatedMode(videoTransportMode)
         encoderService.setPreferredKeyFrameIntervalFrames(NetworkProtocol.keyFrameIntervalFrames(for: videoTransportMode))
         if videoTransportMode == .udp {
-            if let desiredHost {
-                videoDatagramTransportService.connect(host: desiredHost, port: desiredPort)
+            if let currentDesiredHost {
+                videoDatagramTransportService.connect(host: currentDesiredHost, port: desiredPort)
             }
         } else {
             awaitingUDPReadyToStart = false
             awaitingFirstRenderedFrame = false
             videoDatagramTransportService.disconnect()
         }
+    }
+
+    private var currentDesiredHost: String? {
+        guard desiredHosts.indices.contains(currentDesiredHostIndex) else { return nil }
+        return desiredHosts[currentDesiredHostIndex]
+    }
+
+    private func orderedUniqueHosts(primaryHost: String, alternateHosts: [String]) -> [String] {
+        var seenHosts = Set<String>()
+        return ([primaryHost] + alternateHosts).compactMap { host in
+            let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedHost.isEmpty else { return nil }
+            guard seenHosts.insert(trimmedHost).inserted else { return nil }
+            return trimmedHost
+        }
+    }
+
+    private func beginConnectionAttempt() {
+        guard let host = currentDesiredHost else { return }
+        receiverHost = host
+        configuredEndpointSummary = "\(host):\(desiredPort) [\(requestedVideoTransportMode.rawValue.uppercased())]"
+        transportService.connect(host: host, port: desiredPort)
+    }
+
+    private func rotateToAlternateHost(after reason: String) {
+        guard desiredHosts.count > 1 else { return }
+        currentDesiredHostIndex = (currentDesiredHostIndex + 1) % desiredHosts.count
+        guard let host = currentDesiredHost else { return }
+        print("[Sender] Retrying via alternate receiver path \(host):\(desiredPort) after \(reason)")
     }
 
     func setStreamingPipelinePreference(_ preference: NetworkProtocol.StreamingPipelinePreference) {

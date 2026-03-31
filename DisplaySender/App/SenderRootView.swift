@@ -460,12 +460,21 @@ struct SenderRootView: View {
 
     private func connect(using videoTransportMode: NetworkProtocol.VideoTransportMode) {
         guard let target = resolvedConnectionTarget() else { return }
+        let alternateHosts: [String]
+        if let receiver = selectedReceiver() {
+            let primaryHost = selectedPath(for: receiver)?.host ?? receiver.host
+            alternateHosts = ([receiver.host] + receiver.pathOptions.map(\.host))
+                .filter { $0 != primaryHost }
+        } else {
+            alternateHosts = []
+        }
 
         UserDefaults.standard.set(target.host, forKey: Self.savedHostKey)
         UserDefaults.standard.set(String(target.port), forKey: Self.savedPortKey)
 
         coordinator.connect(
             receiverHost: target.host,
+            alternateReceiverHosts: alternateHosts,
             port: target.port,
             videoTransportMode: videoTransportMode
         )
