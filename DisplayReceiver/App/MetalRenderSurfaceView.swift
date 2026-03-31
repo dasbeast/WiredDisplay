@@ -441,10 +441,18 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
             lastPresentedOwnershipIntent = .remote
 
-            let normalizedPosition = predictedCursorPosition(at: now) ?? CGPoint(
-                x: cursorState.normalizedX,
-                y: cursorState.normalizedY
-            )
+            let normalizedPosition: CGPoint
+            if NetworkProtocol.enableCursorPrediction {
+                normalizedPosition = predictedCursorPosition(at: now) ?? CGPoint(
+                    x: cursorState.normalizedX,
+                    y: cursorState.normalizedY
+                )
+            } else {
+                normalizedPosition = CGPoint(
+                    x: cursorState.normalizedX,
+                    y: cursorState.normalizedY
+                )
+            }
             let usingSystemCursorMirror = usesSystemCursorMirror
             logCursorVisibilityIfNeeded(true, detail: usingSystemCursorMirror ? "system-mirror" : "overlay-fallback")
             let cursorPoint = CGPoint(
@@ -669,8 +677,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 targetPredictionLeadNanoseconds
             )
             let baseLeadAttenuation = min(turnAttenuation, decelerationAttenuation)
+            let predictionStrength = NetworkProtocol.cursorPredictionStrength
             let adjustedPredictionLeadNanoseconds = UInt64(
-                Double(predictionLeadNanoseconds) * baseLeadAttenuation
+                Double(predictionLeadNanoseconds) * baseLeadAttenuation * predictionStrength
             )
 
             if adjustedPredictionLeadNanoseconds == 0 {

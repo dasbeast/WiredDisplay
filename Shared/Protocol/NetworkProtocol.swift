@@ -2,6 +2,8 @@ import Foundation
 
 /// Defines wire-level messages and protocol validation shared by sender and receiver.
 enum NetworkProtocol {
+    static let cursorPredictionDefaultsKey = "receiver.enableCursorPrediction"
+    static let cursorPredictionStrengthDefaultsKey = "receiver.cursorPredictionStrength"
     static let protocolVersion: UInt16 = 2
     static let defaultPort: UInt16 = 50999
     static let discoveryServiceType = "_wireddisplay._tcp."
@@ -19,6 +21,18 @@ enum NetworkProtocol {
     static let captureFramesPerSecond: Int = 60
     static let cursorOverlayFramesPerSecond: Int = 60
     static let cursorAppearanceRefreshFramesPerSecond: Int = 30
+    static var enableCursorPrediction: Bool {
+        if UserDefaults.standard.object(forKey: cursorPredictionDefaultsKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: cursorPredictionDefaultsKey)
+    }
+    static var cursorPredictionStrength: Double {
+        if UserDefaults.standard.object(forKey: cursorPredictionStrengthDefaultsKey) == nil {
+            return 1.0
+        }
+        return min(1.0, max(0.0, UserDefaults.standard.double(forKey: cursorPredictionStrengthDefaultsKey)))
+    }
     static let cursorPredictionLeadNanoseconds: UInt64 = 8_000_000
     static let cursorMaximumPredictionLeadNanoseconds: UInt64 = 16_000_000
     static let cursorHandoffEdgeThresholdNormalized: Double = 0.05
