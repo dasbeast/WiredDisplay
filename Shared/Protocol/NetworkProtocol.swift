@@ -20,16 +20,17 @@ enum NetworkProtocol {
     static let cursorOverlayFramesPerSecond: Int = 120
     static let cursorAppearanceRefreshFramesPerSecond: Int = 30
     static let cursorPredictionLeadNanoseconds: UInt64 = 16_000_000
+    static let cursorMaximumPredictionLeadNanoseconds: UInt64 = 33_000_000
     static let cursorHandoffEdgeThresholdNormalized: Double = 0.05
     static let cursorHandoffReacquireInsetPoints: Double = 2.0
     static let cursorHandoffDetectionWindowNanoseconds: UInt64 = 500_000_000
     // Keep the receiver-side cursor overlay code available; the sender UI decides at runtime
     // whether a session should use this path or capture the native cursor directly in video.
     static let enableReceiverSideCursorOverlay: Bool = true
-    // Sampling live AppKit cursor images has proven unstable during cursor-shape transitions
-    // (for example I-beam, resize arrows, and pointing-hand updates), so keep the receiver
-    // on its built-in arrow fallback until a safer cursor-kind transport exists.
-    static let enableDynamicCursorAppearanceMirroring: Bool = false
+    // Mirror cursor shapes (I-beam, resize arrows, pointing hand, etc.) over the side-cursor
+    // path. The sender UI exposes a runtime toggle for this so it can be disabled quickly if a
+    // specific app or cursor family proves unstable.
+    static let enableDynamicCursorAppearanceMirroring: Bool = true
     static let useReceiverSystemCursorMirror: Bool = false
     static let hideReceiverLocalCursorWhileStreaming: Bool = false
     static let useSwiftUIReceiverCursorOverlay: Bool = false

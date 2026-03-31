@@ -553,14 +553,18 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
-            // Instantaneous velocity (normalised units / nanosecond).
-            let instantVX = (latest.normalizedX - previous.normalizedX) / Double(senderDeltaNanoseconds)
-            let instantVY = (latest.normalizedY - previous.normalizedY) / Double(senderDeltaNanoseconds)
+            let receiverDeltaNanoseconds = latest.receiverTimestampNanoseconds - previous.receiverTimestampNanoseconds
 
-            // If the cursor is essentially stationary, zero out velocity to prevent
-            // residual smoothed momentum from causing jittery bounces.
-            let motionThreshold = 0.00001
-            if abs(instantVX) < motionThreshold && abs(instantVY) < motionThreshold {
+            // Instantaneous velocity (normalised units / nanosecond).
+            let deltaX = latest.normalizedX - previous.normalizedX
+            let deltaY = latest.normalizedY - previous.normalizedY
+            let instantVX = deltaX / Double(senderDeltaNanoseconds)
+            let instantVY = deltaY / Double(senderDeltaNanoseconds)
+
+            // Treat sub-pixel motion as stationary so residual velocity does not create
+            // bounce when the sender is effectively holding still.
+            let positionDeltaThreshold = 0.00005
+            if abs(deltaX) < positionDeltaThreshold && abs(deltaY) < positionDeltaThreshold {
                 smoothedVelocityX = 0
                 smoothedVelocityY = 0
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
@@ -573,9 +577,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             let elapsedSinceLatestNanoseconds = nowNanoseconds >= latest.receiverTimestampNanoseconds
                 ? nowNanoseconds - latest.receiverTimestampNanoseconds
                 : 0
+            let targetPredictionLeadNanoseconds = min(
+                NetworkProtocol.cursorMaximumPredictionLeadNanoseconds,
+                max(
+                    NetworkProtocol.cursorPredictionLeadNanoseconds,
+                    max(senderDeltaNanoseconds, receiverDeltaNanoseconds)
+                )
+            )
             let predictionLeadNanoseconds = min(
                 elapsedSinceLatestNanoseconds,
-                min(NetworkProtocol.cursorPredictionLeadNanoseconds, senderDeltaNanoseconds)
+                targetPredictionLeadNanoseconds
             )
 
             let predictedX = latest.normalizedX + smoothedVelocityX * Double(predictionLeadNanoseconds)

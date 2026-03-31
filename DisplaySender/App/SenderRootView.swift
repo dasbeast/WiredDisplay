@@ -19,6 +19,7 @@ struct SenderRootView: View {
     private static let savedFixedDisplayPresetKey = "fixedDisplayPreset"
     private static let savedStreamingPipelinePreferenceKey = "streamingPipelinePreference"
     private static let savedUseSideCursorOverlayKey = "useSideCursorOverlay"
+    private static let savedUseDynamicCursorAppearanceMirroringKey = "useDynamicCursorAppearanceMirroring"
 
     @State private var receiverHostInput = UserDefaults.standard.string(forKey: SenderRootView.savedHostKey) ?? ""
     @State private var portInput = UserDefaults.standard.string(forKey: SenderRootView.savedPortKey) ?? String(NetworkProtocol.defaultPort)
@@ -58,6 +59,9 @@ struct SenderRootView: View {
         ) ?? .automatic
     @State private var useSideCursorOverlay =
         UserDefaults.standard.object(forKey: SenderRootView.savedUseSideCursorOverlayKey) as? Bool ?? false
+    @State private var useDynamicCursorAppearanceMirroring =
+        UserDefaults.standard.object(forKey: SenderRootView.savedUseDynamicCursorAppearanceMirroringKey) as? Bool ??
+        NetworkProtocol.enableDynamicCursorAppearanceMirroring
     @State private var isAdvancedResolutionsExpanded = false
 
     var body: some View {
@@ -85,6 +89,7 @@ struct SenderRootView: View {
             coordinator.setDisplayResolutionPreference(selectedDisplayResolutionPreference)
             coordinator.setStreamingPipelinePreference(selectedStreamingPipelinePreference)
             coordinator.setUseReceiverSideCursorOverlay(useSideCursorOverlay)
+            coordinator.setUseDynamicCursorAppearanceMirroring(useDynamicCursorAppearanceMirroring)
             coordinator.onChange = {
                 refreshFromCoordinator()
             }
@@ -320,10 +325,30 @@ struct SenderRootView: View {
                         refreshFromCoordinator()
                     }
 
+                Toggle("Mirror Cursor Shapes", isOn: $useDynamicCursorAppearanceMirroring)
+                    .disabled(!useSideCursorOverlay)
+                    .onChange(of: useDynamicCursorAppearanceMirroring) { _, newValue in
+                        UserDefaults.standard.set(newValue, forKey: Self.savedUseDynamicCursorAppearanceMirroringKey)
+                        coordinator.setUseDynamicCursorAppearanceMirroring(newValue)
+                        refreshFromCoordinator()
+                    }
+
                 Text(
                     useSideCursorOverlay
                         ? "Uses the receiver-side cursor overlay path. Native cursor capture is disabled in the video stream."
                         : "Captures the macOS cursor directly inside the video stream and skips the side cursor path."
+                )
+                .foregroundStyle(.secondary)
+                .font(.callout)
+
+                Text(
+                    useSideCursorOverlay
+                        ? (
+                            useDynamicCursorAppearanceMirroring
+                                ? "Also mirrors cursor shapes like I-beam, resize arrows, and pointing hands."
+                                : "Cursor shape mirroring is off, so the receiver stays on the default arrow cursor."
+                        )
+                        : "Cursor shape mirroring only applies when Side Cursor Overlay is enabled."
                 )
                 .foregroundStyle(.secondary)
                 .font(.callout)
@@ -553,6 +578,9 @@ struct SenderRootView: View {
         if useSideCursorOverlay != coordinator.useReceiverSideCursorOverlay {
             useSideCursorOverlay = coordinator.useReceiverSideCursorOverlay
         }
+        if useDynamicCursorAppearanceMirroring != coordinator.useDynamicCursorAppearanceMirroring {
+            useDynamicCursorAppearanceMirroring = coordinator.useDynamicCursorAppearanceMirroring
+        }
         negotiatedResolutionText = "\(coordinator.targetWidth)x\(coordinator.targetHeight)"
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         wiredWarning = coordinator.wiredPathAvailable ? "" : "No wired route currently available. Verify Thunderbolt Bridge and cable link."
@@ -627,7 +655,13 @@ struct SenderRootView: View {
     }
 
     private var cursorModeSummaryText: String {
-        coordinator.useReceiverSideCursorOverlay ? "Side Cursor Overlay" : "Native Cursor Capture"
+        if coordinator.useReceiverSideCursorOverlay {
+            return coordinator.useDynamicCursorAppearanceMirroring
+                ? "Side Cursor Overlay + Shape Mirroring"
+                : "Side Cursor Overlay + Arrow Cursor"
+        }
+
+        return "Native Cursor Capture"
     }
 }
 

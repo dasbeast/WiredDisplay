@@ -623,9 +623,8 @@ final class VideoDatagramTransportService {
         }
     }
 
-    /// The UDP path only carries interframes in hybrid mode. When the sender emits a
-    /// recovery keyframe over TCP, clear stale UDP deltas and allow the next post-keyframe
-    /// interframes to flow again.
+    /// Clear stale queued deltas at each keyframe boundary so the next UDP keyframe establishes
+    /// a fresh decode baseline for subsequent interframes.
     func noteKeyFrameBoundary() {
         queue.async { [weak self] in
             guard let self else { return }

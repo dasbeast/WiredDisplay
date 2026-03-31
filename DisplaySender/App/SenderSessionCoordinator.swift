@@ -11,6 +11,14 @@ final class SenderSessionCoordinator {
         case bottom
     }
 
+    private struct CursorAppearanceDescriptor: Equatable {
+        let objectIdentifier: ObjectIdentifier
+        let widthPoints: CGFloat
+        let heightPoints: CGFloat
+        let hotSpotX: CGFloat
+        let hotSpotY: CGFloat
+    }
+
     private enum InputTelemetry {
         static let holdTimerIntervalMilliseconds = 50
         static let minimumHoldDurationNanoseconds: UInt64 = 500_000_000
@@ -74,6 +82,7 @@ final class SenderSessionCoordinator {
     private(set) var resolvedStreamingPipelineMode: NetworkProtocol.StreamingPipelineMode =
         NetworkProtocol.resolvedStreamingPipelineMode(for: .automatic) { didSet { onChange?() } }
     private(set) var useReceiverSideCursorOverlay = false { didSet { onChange?() } }
+    private(set) var useDynamicCursorAppearanceMirroring = NetworkProtocol.enableDynamicCursorAppearanceMirroring { didSet { onChange?() } }
     private(set) var displayResolutionPreference: DisplayResolutionPreference = .matchReceiver { didSet { onChange?() } }
     private(set) var preferredDisplayPreset: VirtualDisplayPreset = .defaultFixed { didSet { onChange?() } }
 
@@ -126,6 +135,8 @@ final class SenderSessionCoordinator {
     private var lastSentCursorState: CursorStatePayload?
     private var lastSentCursorAppearanceSignature: UInt64?
     private var cachedCursorAppearance: CursorAppearancePayload?
+    private var cachedCursorAppearanceDescriptor: CursorAppearanceDescriptor?
+    private var cachedArrowCursorAppearance: CursorAppearancePayload?
     private var frozenCursorAppearanceWhileButtonPressed: CursorAppearancePayload?
     private var nextCursorAppearanceRefreshNanoseconds: UInt64 = 0
     private var wasMouseButtonPressed = false
@@ -168,20 +179,19 @@ final class SenderSessionCoordinator {
             case .tcp:
                 self.transportService.sendVideoFrame(encodedFrame)
             case .udp:
+                if !encodedFrame.isKeyFrame && frameDispatchGate.awaitingFirstRenderedFrame {
+                    Task { @MainActor [weak self] in
+                        self?.requestRecoveryKeyFrameIfNeeded(
+                            minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
+                        )
+                    }
+                    return
+                }
+
                 if encodedFrame.isKeyFrame {
                     self.videoDatagramTransportService.noteKeyFrameBoundary()
-                    self.transportService.sendVideoFrame(encodedFrame)
-                } else {
-                    if frameDispatchGate.awaitingFirstRenderedFrame {
-                        Task { @MainActor [weak self] in
-                            self?.requestRecoveryKeyFrameIfNeeded(
-                                minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
-                            )
-                        }
-                        return
-                    }
-                    self.videoDatagramTransportService.sendVideoFrame(encodedFrame)
                 }
+                self.videoDatagramTransportService.sendVideoFrame(encodedFrame)
             }
 
             // Only the metrics counter requires MainActor.
@@ -414,7 +424,11 @@ final class SenderSessionCoordinator {
             "[Sender] Display resolution: preference=\(displayResolutionPreference.rawValue), " +
             "preset=\(preferredDisplayPreset.id)"
         )
-        print("[Sender] Cursor mode: \(useReceiverSideCursorOverlay ? "side-overlay" : "native-captured")")
+        print(
+            "[Sender] Cursor mode: " +
+            "\(useReceiverSideCursorOverlay ? "side-overlay" : "native-captured"), " +
+            "shapes=\(useDynamicCursorAppearanceMirroring ? "mirrored" : "arrow-only")"
+        )
 
         // Create virtual display so macOS extends the desktop onto it.
         let virtualDisplayID = virtualDisplayService.createDisplay(
@@ -571,18 +585,16 @@ final class SenderSessionCoordinator {
         case .tcp:
             transportService.sendVideoFrame(encodedFrame)
         case .udp:
+            if !encodedFrame.isKeyFrame && awaitingFirstRenderedFrame {
+                requestRecoveryKeyFrameIfNeeded(
+                    minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
+                )
+                return
+            }
             if encodedFrame.isKeyFrame {
                 videoDatagramTransportService.noteKeyFrameBoundary()
-                transportService.sendVideoFrame(encodedFrame)
-            } else {
-                if awaitingFirstRenderedFrame {
-                    requestRecoveryKeyFrameIfNeeded(
-                        minimumIntervalSeconds: NetworkProtocol.udpStartupRecoveryIntervalSeconds
-                    )
-                    return
-                }
-                videoDatagramTransportService.sendVideoFrame(encodedFrame)
             }
+            videoDatagramTransportService.sendVideoFrame(encodedFrame)
         }
         recordOutboundFrame(encodedFrame)
     }
@@ -880,6 +892,17 @@ final class SenderSessionCoordinator {
         applyCursorOverlayModeIfRunning()
     }
 
+    func setUseDynamicCursorAppearanceMirroring(_ enabled: Bool) {
+        guard enabled != useDynamicCursorAppearanceMirroring else { return }
+        useDynamicCursorAppearanceMirroring = enabled
+        resetCursorAppearanceCaches()
+
+        guard state == .running, useReceiverSideCursorOverlay else { return }
+        let displayID = virtualDisplayService.displayID
+        guard displayID != 0 else { return }
+        pollCursorState(for: displayID)
+    }
+
     func setDisplayResolutionPreference(_ preference: DisplayResolutionPreference) {
         guard preference != displayResolutionPreference else { return }
         displayResolutionPreference = preference
@@ -1014,9 +1037,7 @@ final class SenderSessionCoordinator {
 
         lastSentCursorState = nil
         lastSentCursorAppearanceSignature = nil
-        cachedCursorAppearance = nil
-        frozenCursorAppearanceWhileButtonPressed = nil
-        nextCursorAppearanceRefreshNanoseconds = 0
+        resetCursorAppearanceCaches()
         wasMouseButtonPressed = false
         lastCursorDebugStatus = nil
         lastCursorDebugLogNanoseconds = 0
@@ -1033,8 +1054,8 @@ final class SenderSessionCoordinator {
         cursorPacketSuppressedCount = 0
         lastCursorTelemetryLogNanoseconds = 0
         logCursorDebug("tracking started for display \(displayID)")
-        if !NetworkProtocol.enableDynamicCursorAppearanceMirroring {
-            logCursorDebug("dynamic cursor appearance mirroring disabled; receiver will use arrow fallback")
+        if !useDynamicCursorAppearanceMirroring {
+            logCursorDebug("dynamic cursor appearance mirroring disabled; sender will use arrow cursor")
         }
         installCursorEventMonitors(for: displayID)
         startCursorRefreshTimer(for: displayID)
@@ -1067,9 +1088,7 @@ final class SenderSessionCoordinator {
 
         lastSentCursorState = nil
         lastSentCursorAppearanceSignature = nil
-        cachedCursorAppearance = nil
-        frozenCursorAppearanceWhileButtonPressed = nil
-        nextCursorAppearanceRefreshNanoseconds = 0
+        resetCursorAppearanceCaches()
         wasMouseButtonPressed = false
         lastCursorDebugLogNanoseconds = 0
         lastVisibleCursorNormalizedPosition = nil
@@ -1262,7 +1281,7 @@ final class SenderSessionCoordinator {
     }
 
     private func cursorRefreshFramesPerSecond() -> Int {
-        if NetworkProtocol.enableDynamicCursorAppearanceMirroring {
+        if useDynamicCursorAppearanceMirroring {
             return max(
                 NetworkProtocol.cursorOverlayFramesPerSecond,
                 NetworkProtocol.cursorAppearanceRefreshFramesPerSecond
@@ -1714,7 +1733,9 @@ final class SenderSessionCoordinator {
     }
 
     private func currentCursorAppearance(forceRefresh: Bool) -> CursorAppearancePayload? {
-        guard NetworkProtocol.enableDynamicCursorAppearanceMirroring else { return nil }
+        guard useDynamicCursorAppearanceMirroring else {
+            return defaultArrowCursorAppearance()
+        }
 
         let now = DispatchTime.now().uptimeNanoseconds
 
@@ -1757,16 +1778,40 @@ final class SenderSessionCoordinator {
         )
         nextCursorAppearanceRefreshNanoseconds = nowNanoseconds + intervalNanoseconds
 
-        guard let appearance = sampleCurrentCursorAppearance() else {
+        let snapshot = currentCursorAppearanceSnapshot()
+
+        if let cachedCursorAppearance,
+           snapshot?.descriptor == cachedCursorAppearanceDescriptor {
+            return cachedCursorAppearance
+        }
+
+        guard let snapshot,
+              let appearance = sampleCurrentCursorAppearance(from: snapshot.cursor) else {
             return cachedCursorAppearance
         }
 
         cachedCursorAppearance = appearance
+        cachedCursorAppearanceDescriptor = snapshot.descriptor
         return appearance
     }
 
-    private func sampleCurrentCursorAppearance() -> CursorAppearancePayload? {
+    private func currentCursorAppearanceSnapshot() -> (cursor: NSCursor, descriptor: CursorAppearanceDescriptor)? {
         let cursor = NSCursor.currentSystem ?? NSCursor.current
+        let image = cursor.image
+        let hotSpot = cursor.hotSpot
+        return (
+            cursor: cursor,
+            descriptor: CursorAppearanceDescriptor(
+                objectIdentifier: ObjectIdentifier(cursor),
+                widthPoints: image.size.width,
+                heightPoints: image.size.height,
+                hotSpotX: hotSpot.x,
+                hotSpotY: hotSpot.y
+            )
+        )
+    }
+
+    private func sampleCurrentCursorAppearance(from cursor: NSCursor) -> CursorAppearancePayload? {
         let image = cursor.image
         var proposedRect = CGRect(origin: .zero, size: image.size)
         guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
@@ -1787,6 +1832,27 @@ final class SenderSessionCoordinator {
             hotSpotX: hotSpot.x,
             hotSpotY: hotSpot.y
         )
+    }
+
+    private func defaultArrowCursorAppearance() -> CursorAppearancePayload? {
+        if let cachedArrowCursorAppearance {
+            return cachedArrowCursorAppearance
+        }
+
+        guard let appearance = sampleCurrentCursorAppearance(from: .arrow) else {
+            return nil
+        }
+
+        cachedArrowCursorAppearance = appearance
+        return appearance
+    }
+
+    private func resetCursorAppearanceCaches() {
+        cachedCursorAppearance = nil
+        cachedCursorAppearanceDescriptor = nil
+        frozenCursorAppearanceWhileButtonPressed = nil
+        nextCursorAppearanceRefreshNanoseconds = 0
+        lastSentCursorAppearanceSignature = nil
     }
 
     private func cursorAppearanceSignature(pngData: Data, size: CGSize, hotSpot: CGPoint) -> UInt64 {
