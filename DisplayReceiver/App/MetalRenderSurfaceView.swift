@@ -163,11 +163,6 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var lastLoggedCursorVisibilityDetail: String?
         private var lastCursorPacketAgeLogNanoseconds: UInt64 = 0
 
-        /// Smoothed velocity (normalised units / nanosecond) used for cursor prediction.
-        private var smoothedVelocityX: Double = 0
-        private var smoothedVelocityY: Double = 0
-        /// Exponential-smoothing factor applied to new velocity samples.
-        private let velocitySmoothingAlpha: Double = 0.55
         /// Stop extrapolating once a cursor sample is old enough that prediction becomes visibly wrong.
         private let cursorPredictionStopAgeNanoseconds: UInt64 = 75_000_000
         /// Disable linear prediction when successive motion vectors diverge too far.
@@ -187,6 +182,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             cursorImageView.isHidden = true
             cursorImageView.autoresizingMask = []
             addSubview(cursorImageView)
+            cursorImageView.wantsLayer = true
 
             installTrackingArea()
         }
@@ -503,7 +499,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 y: cursorPoint.y - displayedHotSpot.y
             )
 
-            cursorImageView.frame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            cursorImageView.layer?.frame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
+            CATransaction.commit()
             cursorImageView.isHidden = false
         }
 
@@ -525,72 +524,64 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         // MARK: - Cursor prediction
 
         private func predictedCursorPosition(at nowNanoseconds: UInt64) -> CGPoint? {
-            let snapshot = ReceiverCursorStore.shared.snapshotPair()
-            guard let latest = snapshot.latest, latest.isVisible else {
-                smoothedVelocityX = 0
-                smoothedVelocityY = 0
-                return nil
-            }
+            let history = contiguousPredictableCursorHistory()
+            guard let latest = history.last, latest.isVisible else { return nil }
 
             let latestAgeNanoseconds = nowNanoseconds >= latest.receiverTimestampNanoseconds
                 ? nowNanoseconds - latest.receiverTimestampNanoseconds
                 : 0
             if latestAgeNanoseconds > cursorPredictionStopAgeNanoseconds {
-                smoothedVelocityX = 0
-                smoothedVelocityY = 0
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
-            guard let previous = snapshot.previous,
-                  previous.isVisible,
-                  latest.senderTimestampNanoseconds > previous.senderTimestampNanoseconds,
-                  latest.receiverTimestampNanoseconds >= previous.receiverTimestampNanoseconds else {
-                smoothedVelocityX = 0
-                smoothedVelocityY = 0
+            guard history.count >= 2 else {
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
-            let senderDeltaNanoseconds = latest.senderTimestampNanoseconds - previous.senderTimestampNanoseconds
-            guard senderDeltaNanoseconds > 0 else {
-                smoothedVelocityX = 0
-                smoothedVelocityY = 0
+            let oldest = history[0]
+            let previous = history[history.count - 2]
+            let senderWindowNanoseconds = latest.senderTimestampNanoseconds - oldest.senderTimestampNanoseconds
+            guard senderWindowNanoseconds > 0 else {
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
             let receiverDeltaNanoseconds = latest.receiverTimestampNanoseconds - previous.receiverTimestampNanoseconds
 
-            // Instantaneous velocity (normalised units / nanosecond).
-            let deltaX = latest.normalizedX - previous.normalizedX
-            let deltaY = latest.normalizedY - previous.normalizedY
-            let instantVX = deltaX / Double(senderDeltaNanoseconds)
-            let instantVY = deltaY / Double(senderDeltaNanoseconds)
+            // Use a short sender-time window rather than a single packet delta so
+            // packet timing jitter does not become visible spatial jitter.
+            let windowDeltaX = latest.normalizedX - oldest.normalizedX
+            let windowDeltaY = latest.normalizedY - oldest.normalizedY
+            let windowVelocityX = windowDeltaX / Double(senderWindowNanoseconds)
+            let windowVelocityY = windowDeltaY / Double(senderWindowNanoseconds)
 
             // Treat sub-pixel motion as stationary so residual velocity does not create
             // bounce when the sender is effectively holding still.
             let positionDeltaThreshold = 0.00005
-            if abs(deltaX) < positionDeltaThreshold && abs(deltaY) < positionDeltaThreshold {
-                smoothedVelocityX = 0
-                smoothedVelocityY = 0
+            if abs(windowDeltaX) < positionDeltaThreshold && abs(windowDeltaY) < positionDeltaThreshold {
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
-            let previousSmoothedVelocityX = smoothedVelocityX
-            let previousSmoothedVelocityY = smoothedVelocityY
-
-            // Exponentially-smoothed velocity to reduce jitter from variable sender timing.
-            smoothedVelocityX = velocitySmoothingAlpha * instantVX + (1.0 - velocitySmoothingAlpha) * smoothedVelocityX
-            smoothedVelocityY = velocitySmoothingAlpha * instantVY + (1.0 - velocitySmoothingAlpha) * smoothedVelocityY
+            let recentSenderDeltaNanoseconds = latest.senderTimestampNanoseconds - previous.senderTimestampNanoseconds
+            let recentVelocityX: Double
+            let recentVelocityY: Double
+            if recentSenderDeltaNanoseconds > 0 {
+                recentVelocityX = (latest.normalizedX - previous.normalizedX) / Double(recentSenderDeltaNanoseconds)
+                recentVelocityY = (latest.normalizedY - previous.normalizedY) / Double(recentSenderDeltaNanoseconds)
+            } else {
+                recentVelocityX = windowVelocityX
+                recentVelocityY = windowVelocityY
+            }
 
             let turnAttenuation: Double
-            let previousSpeed = hypot(previousSmoothedVelocityX, previousSmoothedVelocityY)
-            let instantSpeed = hypot(instantVX, instantVY)
-            if previousSpeed > 0, instantSpeed > 0 {
+            let windowSpeed = hypot(windowVelocityX, windowVelocityY)
+            let recentSpeed = hypot(recentVelocityX, recentVelocityY)
+            if windowSpeed > 0, recentSpeed > 0 {
                 let cosine = max(
                     -1.0,
                     min(
                         1.0,
-                        ((instantVX * previousSmoothedVelocityX) + (instantVY * previousSmoothedVelocityY)) /
-                            (instantSpeed * previousSpeed)
+                        ((windowVelocityX * recentVelocityX) + (windowVelocityY * recentVelocityY)) /
+                            (windowSpeed * recentSpeed)
                     )
                 )
                 turnAttenuation = max(
@@ -606,12 +597,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             // Scale prediction down when decelerating to prevent overshoot bounce on stop.
-            // When instantaneous speed drops below the previous smoothed speed (same direction,
-            // slowing down), reduce prediction proportionally so the cursor gracefully retreats
-            // toward the actual position rather than snapping on the first stationary packet.
+            // When the most recent segment is slower than the history-window trend,
+            // reduce prediction proportionally so the cursor settles cleanly on stop.
             let decelerationAttenuation: Double
-            if previousSpeed > 0 {
-                decelerationAttenuation = min(1.0, instantSpeed / previousSpeed)
+            if windowSpeed > 0 {
+                decelerationAttenuation = min(1.0, recentSpeed / windowSpeed)
             } else {
                 decelerationAttenuation = 1.0
             }
@@ -623,7 +613,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 NetworkProtocol.cursorMaximumPredictionLeadNanoseconds,
                 max(
                     NetworkProtocol.cursorPredictionLeadNanoseconds,
-                    max(senderDeltaNanoseconds, receiverDeltaNanoseconds)
+                    max(senderWindowNanoseconds / UInt64(history.count - 1), receiverDeltaNanoseconds)
                 )
             )
             let predictionLeadNanoseconds = min(
@@ -638,13 +628,40 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
-            let predictedX = latest.normalizedX + smoothedVelocityX * Double(adjustedPredictionLeadNanoseconds)
-            let predictedY = latest.normalizedY + smoothedVelocityY * Double(adjustedPredictionLeadNanoseconds)
+            let predictedX = latest.normalizedX + windowVelocityX * Double(adjustedPredictionLeadNanoseconds)
+            let predictedY = latest.normalizedY + windowVelocityY * Double(adjustedPredictionLeadNanoseconds)
 
             return CGPoint(
                 x: max(0, min(1, predictedX)),
                 y: max(0, min(1, predictedY))
             )
+        }
+
+        private func contiguousPredictableCursorHistory() -> [ReceiverCursorState] {
+            let history = ReceiverCursorStore.shared.snapshotHistory()
+            guard let latest = history.last else { return [] }
+
+            var collected: [ReceiverCursorState] = []
+            collected.reserveCapacity(history.count)
+
+            for state in history.reversed() {
+                guard state.isVisible,
+                      state.ownershipIntent == .remote,
+                      state.senderTimestampNanoseconds <= latest.senderTimestampNanoseconds,
+                      state.receiverTimestampNanoseconds <= latest.receiverTimestampNanoseconds else {
+                    break
+                }
+
+                if let newer = collected.last,
+                   state.senderTimestampNanoseconds >= newer.senderTimestampNanoseconds ||
+                   state.receiverTimestampNanoseconds > newer.receiverTimestampNanoseconds {
+                    break
+                }
+
+                collected.append(state)
+            }
+
+            return collected.reversed()
         }
 
         private func logStaleCursorPacketIfNeeded(nowNanoseconds: UInt64) {

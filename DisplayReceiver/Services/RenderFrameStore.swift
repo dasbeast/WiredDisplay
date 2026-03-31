@@ -65,17 +65,16 @@ struct ReceiverCursorSnapshot {
 /// Thread-safe cursor state store shared between receiver control handling and presentation.
 final class ReceiverCursorStore {
     static let shared = ReceiverCursorStore()
+    private static let maximumHistoryCount = 6
 
     private let lock = NSLock()
-    private var previousState: ReceiverCursorState?
-    private var latestState: ReceiverCursorState?
+    private var historyStates: [ReceiverCursorState] = []
 
     private init() {}
 
     func reset() {
         lock.lock()
-        previousState = nil
-        latestState = nil
+        historyStates.removeAll(keepingCapacity: true)
         lock.unlock()
     }
 
@@ -84,7 +83,7 @@ final class ReceiverCursorStore {
         let resolvedState: ReceiverCursorState
         if state.appearance != nil {
             resolvedState = state
-        } else if let latestState {
+        } else if let latestState = historyStates.last {
             resolvedState = ReceiverCursorState(
                 senderTimestampNanoseconds: state.senderTimestampNanoseconds,
                 receiverTimestampNanoseconds: state.receiverTimestampNanoseconds,
@@ -98,14 +97,16 @@ final class ReceiverCursorStore {
             resolvedState = state
         }
 
-        previousState = latestState
-        latestState = resolvedState
+        historyStates.append(resolvedState)
+        if historyStates.count > Self.maximumHistoryCount {
+            historyStates.removeFirst(historyStates.count - Self.maximumHistoryCount)
+        }
         lock.unlock()
     }
 
     func snapshot(maxAgeNanoseconds: UInt64? = nil) -> ReceiverCursorState? {
         lock.lock()
-        let state = latestState
+        let state = historyStates.last
         lock.unlock()
 
         guard let state else { return nil }
@@ -118,7 +119,16 @@ final class ReceiverCursorStore {
 
     func snapshotPair() -> ReceiverCursorSnapshot {
         lock.lock()
-        let snapshot = ReceiverCursorSnapshot(previous: previousState, latest: latestState)
+        let latest = historyStates.last
+        let previous = historyStates.dropLast().last
+        let snapshot = ReceiverCursorSnapshot(previous: previous, latest: latest)
+        lock.unlock()
+        return snapshot
+    }
+
+    func snapshotHistory() -> [ReceiverCursorState] {
+        lock.lock()
+        let snapshot = historyStates
         lock.unlock()
         return snapshot
     }
