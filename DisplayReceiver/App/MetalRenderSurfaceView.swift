@@ -499,9 +499,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 y: cursorPoint.y - displayedHotSpot.y
             )
 
+            let cursorFrame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
+            cursorImageView.frame = cursorFrame
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            cursorImageView.layer?.frame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
+            cursorImageView.layer?.frame = cursorFrame
             CATransaction.commit()
             cursorImageView.isHidden = false
         }
