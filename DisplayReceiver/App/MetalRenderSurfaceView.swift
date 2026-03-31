@@ -170,6 +170,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var trackingArea: NSTrackingArea?
         private var lastLoggedCursorPresentationMode: String?
         private var lastLoggedCursorVisibility: Bool?
+        private var lastLoggedCursorVisibilityDetail: String?
         private var lastCursorPacketAgeLogNanoseconds: UInt64 = 0
 
         /// Smoothed velocity (normalised units / nanosecond) used for cursor prediction.
@@ -808,8 +809,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         private func logCursorVisibilityIfNeeded(_ isVisible: Bool, detail: String) {
             guard NetworkProtocol.enableCursorDebugLogging else { return }
-            guard lastLoggedCursorVisibility != isVisible || lastLoggedCursorPresentationMode == nil else { return }
+            guard lastLoggedCursorVisibility != isVisible || lastLoggedCursorVisibilityDetail != detail else { return }
             lastLoggedCursorVisibility = isVisible
+            lastLoggedCursorVisibilityDetail = detail
             print("[Receiver][CursorHost] visibility -> \(isVisible ? "visible" : "hidden") (\(detail))")
         }
 

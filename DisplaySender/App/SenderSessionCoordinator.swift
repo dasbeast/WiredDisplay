@@ -1958,7 +1958,7 @@ final class SenderSessionCoordinator {
         guard lastCursorDebugStatus != message else { return }
         let now = DispatchTime.now().uptimeNanoseconds
         if lastCursorDebugLogNanoseconds != 0,
-           now < (lastCursorDebugLogNanoseconds + 250_000_000) {
+           now < (lastCursorDebugLogNanoseconds + 1_000_000_000) {
             lastCursorDebugStatus = message
             return
         }

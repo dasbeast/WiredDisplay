@@ -18,6 +18,7 @@ final class ReceiverSessionCoordinator {
     private let audioPlaybackService: AudioPlaybackService
     private let frameDecodePipeline: ReceiverFrameDecodePipeline
     private let wiredPathMonitor = WiredPathStatusMonitor()
+    private let cursorPacketRelay = ReceiverCursorPacketRelay()
 
     private(set) var state: SessionState = .idle { didSet { onChange?() } }
     private(set) var listeningPort: UInt16 = NetworkProtocol.defaultPort { didSet { onChange?() } }
@@ -126,6 +127,7 @@ final class ReceiverSessionCoordinator {
                 self.frameDecodePipeline.reset()
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
+                self.cursorPacketRelay.reset()
                 self.resetCursorOverlayState()
                 if case .running = self.state {
                     self.state = .listening
@@ -134,12 +136,33 @@ final class ReceiverSessionCoordinator {
         }
 
         let frameDecodePipeline = self.frameDecodePipeline
+        let cursorPacketRelay = self.cursorPacketRelay
+        cursorPacketRelay.onOverlaySummaryChange = { [weak self] ownershipIntent, isVisible in
+            self?.applyCursorOverlaySummary(
+                ownershipIntent: ownershipIntent,
+                isVisible: isVisible
+            )
+        }
         listenerService.onEnvelope = { [weak self] envelope in
             if envelope.type == .videoFrame {
                 frameDecodePipeline.enqueueVideoEnvelope(
                     envelope,
                     arrivalNanoseconds: DispatchTime.now().uptimeNanoseconds
                 )
+                return
+            }
+
+            if envelope.type == .cursorState {
+                do {
+                    let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
+                    cursorPacketRelay.handle(cursorState)
+                } catch {
+                    guard let self else { return }
+                    Task { @MainActor in
+                        self.lastErrorMessage = error.localizedDescription
+                        self.state = .failed(error.localizedDescription)
+                    }
+                }
                 return
             }
 
@@ -228,6 +251,7 @@ final class ReceiverSessionCoordinator {
         frameDecodePipeline.reset()
         RenderFrameStore.shared.reset()
         ReceiverCursorStore.shared.reset()
+        cursorPacketRelay.reset()
 
         renderService.prepareRenderer()
         audioPlaybackService.prepare()
@@ -240,6 +264,7 @@ final class ReceiverSessionCoordinator {
         frameDecodePipeline.reset()
         audioPlaybackService.stop()
         ReceiverCursorStore.shared.reset()
+        cursorPacketRelay.reset()
         resetCursorOverlayState()
         listenerService.stopListening()
         videoDatagramListenerService.stopListening()
@@ -253,6 +278,7 @@ final class ReceiverSessionCoordinator {
                 frameDecodePipeline.reset()
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
+                cursorPacketRelay.reset()
                 resetCursorOverlayState()
                 let hello = try envelope.decodePayload(as: HelloPayload.self)
                 peerName = hello.senderName
@@ -290,96 +316,7 @@ final class ReceiverSessionCoordinator {
                     renderedFrameReceiverTimestampNanoseconds: lastRenderedFrameTelemetry?.receiverRenderTimestampNanoseconds
                 )
             case .cursorState:
-                let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
-                let receiverTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
-                if lastLoggedCursorOwnershipIntent != cursorState.ownershipIntent {
-                    lastLoggedCursorOwnershipIntent = cursorState.ownershipIntent
-                    if NetworkProtocol.enableCursorDebugLogging {
-                        print(
-                            String(
-                                format: "[Receiver][Cursor] packet %@ at %.4f, %.4f appearance=%@",
-                                cursorState.ownershipIntent.rawValue,
-                                cursorState.normalizedX,
-                                cursorState.normalizedY,
-                                cursorState.appearance != nil ? "yes" : "no"
-                            )
-                        )
-                    }
-                } else if NetworkProtocol.enableCursorDebugLogging, let appearance = cursorState.appearance {
-                    print("[Receiver][Cursor] packet appearance signature \(appearance.signature)")
-                }
-                ReceiverCursorStore.shared.update(
-                    state: ReceiverCursorState(
-                        senderTimestampNanoseconds: cursorState.timestampNanoseconds,
-                        receiverTimestampNanoseconds: receiverTimestampNanoseconds,
-                        normalizedX: cursorState.normalizedX,
-                        normalizedY: cursorState.normalizedY,
-                        isVisible: cursorState.isVisible,
-                        ownershipIntent: cursorState.ownershipIntent,
-                        appearance: cursorState.appearance
-                    )
-                )
-                NotificationCenter.default.post(name: .wiredDisplayCursorStateUpdated, object: nil)
-                if NetworkProtocol.useSwiftUIReceiverCursorOverlay,
-                   let appearance = cursorState.appearance {
-                    updateCursorOverlayAppearance(from: appearance)
-                }
-
-                if NetworkProtocol.useSwiftUIReceiverCursorOverlay {
-                    if cursorState.ownershipIntent == .remote && cursorState.isVisible {
-                        cursorOverlaySummary = String(
-                            format: "visible (%.3f, %.3f)",
-                            cursorState.normalizedX,
-                            cursorState.normalizedY
-                        )
-                        cursorOverlayNormalizedX = cursorState.normalizedX
-                        cursorOverlayNormalizedY = cursorState.normalizedY
-                        isCursorOverlayVisible = true
-                    } else if cursorState.ownershipIntent == .localHandoff {
-                        cursorOverlaySummary = "local handoff"
-                        cursorOverlayNormalizedX = nil
-                        cursorOverlayNormalizedY = nil
-                        isCursorOverlayVisible = false
-                    } else {
-                        cursorOverlaySummary = "hidden"
-                        cursorOverlayNormalizedX = nil
-                        cursorOverlayNormalizedY = nil
-                        isCursorOverlayVisible = false
-                    }
-                } else if cursorState.ownershipIntent == .remote && cursorState.isVisible {
-                    if cursorOverlaySummary != "visible" {
-                        cursorOverlaySummary = "visible"
-                    }
-                    if !isCursorOverlayVisible {
-                        isCursorOverlayVisible = true
-                    }
-                } else if cursorState.ownershipIntent == .localHandoff {
-                    if cursorOverlaySummary != "local handoff" {
-                        cursorOverlaySummary = "local handoff"
-                    }
-                    if isCursorOverlayVisible {
-                        isCursorOverlayVisible = false
-                    }
-                    if cursorOverlayNormalizedX != nil {
-                        cursorOverlayNormalizedX = nil
-                    }
-                    if cursorOverlayNormalizedY != nil {
-                        cursorOverlayNormalizedY = nil
-                    }
-                } else {
-                    if cursorOverlaySummary != "hidden" {
-                        cursorOverlaySummary = "hidden"
-                    }
-                    if isCursorOverlayVisible {
-                        isCursorOverlayVisible = false
-                    }
-                    if cursorOverlayNormalizedX != nil {
-                        cursorOverlayNormalizedX = nil
-                    }
-                    if cursorOverlayNormalizedY != nil {
-                        cursorOverlayNormalizedY = nil
-                    }
-                }
+                break
             case .videoFrame:
                 break
             case .requestKeyFrame:
@@ -421,6 +358,44 @@ final class ReceiverSessionCoordinator {
         image.size = CGSize(width: appearance.widthPoints, height: appearance.heightPoints)
         cursorOverlayImage = image
         cursorOverlayHotSpot = CGPoint(x: appearance.hotSpotX, y: appearance.hotSpotY)
+    }
+
+    private func applyCursorOverlaySummary(
+        ownershipIntent: CursorOwnershipIntent,
+        isVisible: Bool
+    ) {
+        if ownershipIntent == .remote && isVisible {
+            if cursorOverlaySummary != "visible" {
+                cursorOverlaySummary = "visible"
+            }
+            if !isCursorOverlayVisible {
+                isCursorOverlayVisible = true
+            }
+            return
+        }
+
+        if ownershipIntent == .localHandoff {
+            if cursorOverlaySummary != "local handoff" {
+                cursorOverlaySummary = "local handoff"
+            }
+            if isCursorOverlayVisible {
+                isCursorOverlayVisible = false
+            }
+        } else {
+            if cursorOverlaySummary != "hidden" {
+                cursorOverlaySummary = "hidden"
+            }
+            if isCursorOverlayVisible {
+                isCursorOverlayVisible = false
+            }
+        }
+
+        if cursorOverlayNormalizedX != nil {
+            cursorOverlayNormalizedX = nil
+        }
+        if cursorOverlayNormalizedY != nil {
+            cursorOverlayNormalizedY = nil
+        }
     }
 
     private func requestRecoveryKeyFrame(failedFrameIndex: UInt64?, reason: String) {
@@ -505,6 +480,74 @@ final class ReceiverSessionCoordinator {
             backingScaleFactor: Double(screen.backingScaleFactor),
             refreshRateHz: refreshRateHz
         )
+    }
+}
+
+private final class ReceiverCursorPacketRelay {
+    private let lock = NSLock()
+    private var lastLoggedOwnershipIntent: CursorOwnershipIntent?
+    private var lastPublishedOwnershipIntent: CursorOwnershipIntent?
+    private var lastPublishedVisibility: Bool?
+
+    var onOverlaySummaryChange: (@MainActor (CursorOwnershipIntent, Bool) -> Void)?
+
+    func reset() {
+        lock.lock()
+        lastLoggedOwnershipIntent = nil
+        lastPublishedOwnershipIntent = nil
+        lastPublishedVisibility = nil
+        lock.unlock()
+    }
+
+    func handle(_ cursorState: CursorStatePayload) {
+        let receiverTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+        let shouldPublishSummaryChange: Bool
+
+        lock.lock()
+        if lastLoggedOwnershipIntent != cursorState.ownershipIntent {
+            lastLoggedOwnershipIntent = cursorState.ownershipIntent
+            if NetworkProtocol.enableCursorDebugLogging {
+                print(
+                    String(
+                        format: "[Receiver][Cursor] packet %@ at %.4f, %.4f appearance=%@",
+                        cursorState.ownershipIntent.rawValue,
+                        cursorState.normalizedX,
+                        cursorState.normalizedY,
+                        cursorState.appearance != nil ? "yes" : "no"
+                    )
+                )
+            }
+        } else if NetworkProtocol.enableCursorDebugLogging, let appearance = cursorState.appearance {
+            print("[Receiver][Cursor] packet appearance signature \(appearance.signature)")
+        }
+
+        shouldPublishSummaryChange =
+            lastPublishedOwnershipIntent != cursorState.ownershipIntent ||
+            lastPublishedVisibility != cursorState.isVisible
+        if shouldPublishSummaryChange {
+            lastPublishedOwnershipIntent = cursorState.ownershipIntent
+            lastPublishedVisibility = cursorState.isVisible
+        }
+        lock.unlock()
+
+        ReceiverCursorStore.shared.update(
+            state: ReceiverCursorState(
+                senderTimestampNanoseconds: cursorState.timestampNanoseconds,
+                receiverTimestampNanoseconds: receiverTimestampNanoseconds,
+                normalizedX: cursorState.normalizedX,
+                normalizedY: cursorState.normalizedY,
+                isVisible: cursorState.isVisible,
+                ownershipIntent: cursorState.ownershipIntent,
+                appearance: cursorState.appearance
+            )
+        )
+        NotificationCenter.default.post(name: .wiredDisplayCursorStateUpdated, object: nil)
+
+        if shouldPublishSummaryChange, let onOverlaySummaryChange {
+            Task { @MainActor in
+                onOverlaySummaryChange(cursorState.ownershipIntent, cursorState.isVisible)
+            }
+        }
     }
 }
 
