@@ -145,6 +145,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var trackingArea: NSTrackingArea?
         private var lastLoggedCursorPresentationMode: String?
         private var lastLoggedCursorVisibility: Bool?
+        private var lastCursorPacketAgeLogNanoseconds: UInt64 = 0
 
         /// Smoothed velocity (normalised units / nanosecond) used for cursor prediction.
         private var smoothedVelocityX: Double = 0
@@ -406,6 +407,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
             cursorHiddenSinceNanoseconds = nil
+            logStaleCursorPacketIfNeeded(nowNanoseconds: now)
 
             if lastPresentedOwnershipIntent == .localHandoff {
                 logCursorDebug("reacquiring remote cursor after local handoff")
@@ -557,6 +559,41 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             return CGPoint(
                 x: max(0, min(1, predictedX)),
                 y: max(0, min(1, predictedY))
+            )
+        }
+
+        private func logStaleCursorPacketIfNeeded(nowNanoseconds: UInt64) {
+            guard NetworkProtocol.enableCursorDebugLogging else { return }
+
+            let snapshot = ReceiverCursorStore.shared.snapshotPair()
+            guard let latest = snapshot.latest else { return }
+            guard latest.receiverTimestampNanoseconds <= nowNanoseconds else { return }
+
+            let packetAgeNanoseconds = nowNanoseconds - latest.receiverTimestampNanoseconds
+            let staleThresholdNanoseconds: UInt64 = 40_000_000
+            guard packetAgeNanoseconds >= staleThresholdNanoseconds else { return }
+            guard lastCursorPacketAgeLogNanoseconds == 0 ||
+                nowNanoseconds >= (lastCursorPacketAgeLogNanoseconds + 1_000_000_000) else {
+                return
+            }
+
+            lastCursorPacketAgeLogNanoseconds = nowNanoseconds
+            let senderDeltaNanoseconds: UInt64
+            let receiverDeltaNanoseconds: UInt64
+            if let previous = snapshot.previous,
+               latest.senderTimestampNanoseconds > previous.senderTimestampNanoseconds,
+               latest.receiverTimestampNanoseconds >= previous.receiverTimestampNanoseconds {
+                senderDeltaNanoseconds = latest.senderTimestampNanoseconds - previous.senderTimestampNanoseconds
+                receiverDeltaNanoseconds = latest.receiverTimestampNanoseconds - previous.receiverTimestampNanoseconds
+            } else {
+                senderDeltaNanoseconds = 0
+                receiverDeltaNanoseconds = 0
+            }
+
+            logCursorDebug(
+                "stale cursor packet age=\(packetAgeNanoseconds / 1_000_000) ms " +
+                "senderDelta=\(senderDeltaNanoseconds / 1_000_000) ms " +
+                "receiverDelta=\(receiverDeltaNanoseconds / 1_000_000) ms"
             )
         }
 

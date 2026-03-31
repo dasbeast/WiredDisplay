@@ -415,7 +415,7 @@ final class TransportService {
         // (bufferbloat) that causes latency spikes under sustained 5K HEVC load.
         connection.batch {
             while !pendingOutboundFrames.isEmpty && networkInFlightCount < maxNetworkInFlight {
-                let frame = pendingOutboundFrames.removeFirst()
+                guard let frame = dequeueNextOutboundFrame() else { break }
                 networkInFlightCount += 1
                 connection.send(content: frame.data, completion: .contentProcessed { [weak self] error in
                     guard let self else { return }
@@ -425,6 +425,19 @@ final class TransportService {
                 })
             }
         }
+    }
+
+    private func dequeueNextOutboundFrame() -> OutboundFrame? {
+        guard !pendingOutboundFrames.isEmpty else { return nil }
+
+        let priorityOrder: [OutboundFrameKind] = [.control, .cursor, .audio, .video]
+        for kind in priorityOrder {
+            if let index = pendingOutboundFrames.firstIndex(where: { $0.kind == kind }) {
+                return pendingOutboundFrames.remove(at: index)
+            }
+        }
+
+        return pendingOutboundFrames.removeFirst()
     }
 
     private func receiveNextChunk(on connection: NWConnection) {

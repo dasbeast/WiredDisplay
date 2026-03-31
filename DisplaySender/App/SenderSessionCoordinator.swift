@@ -12,7 +12,7 @@ final class SenderSessionCoordinator {
     }
 
     private enum InputTelemetry {
-        static let holdTimerIntervalMilliseconds = 250
+        static let holdTimerIntervalMilliseconds = 50
         static let minimumHoldDurationNanoseconds: UInt64 = 500_000_000
         static let holdProgressLogIntervalNanoseconds: UInt64 = 1_000_000_000
     }
@@ -119,11 +119,9 @@ final class SenderSessionCoordinator {
     private var localCursorEventMonitor: Any?
     private var globalCursorEventMonitor: Any?
     private var inputHoldTelemetryTimer: DispatchSourceTimer?
-    private var localInputEventMonitor: Any?
-    private var globalInputEventMonitor: Any?
     private var inputLoggingDisplayID: CGDirectDisplayID?
     private var activeMouseHoldStartNanoseconds: UInt64?
-    private var activeMouseHoldButtonsMask: UInt64 = 0
+    private var lastObservedMouseButtonsMask: UInt64 = 0
     private var lastMouseHoldProgressLogNanoseconds: UInt64 = 0
     private var lastSentCursorState: CursorStatePayload?
     private var lastSentCursorAppearanceSignature: UInt64?
@@ -1092,33 +1090,8 @@ final class SenderSessionCoordinator {
 
         inputLoggingDisplayID = displayID
         activeMouseHoldStartNanoseconds = nil
-        activeMouseHoldButtonsMask = 0
+        lastObservedMouseButtonsMask = currentPressedMouseButtonsMask()
         lastMouseHoldProgressLogNanoseconds = 0
-
-        let eventMask: NSEvent.EventTypeMask = [
-            .leftMouseDown,
-            .leftMouseUp,
-            .leftMouseDragged,
-            .rightMouseDown,
-            .rightMouseUp,
-            .rightMouseDragged,
-            .otherMouseDown,
-            .otherMouseUp,
-            .otherMouseDragged
-        ]
-
-        localInputEventMonitor = NSEvent.addLocalMonitorForEvents(matching: eventMask) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handleObservedInputEvent(event, for: displayID)
-            }
-            return event
-        }
-
-        globalInputEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handleObservedInputEvent(event, for: displayID)
-            }
-        }
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(
@@ -1128,7 +1101,7 @@ final class SenderSessionCoordinator {
         )
         timer.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in
-                self?.emitMouseHoldProgressIfNeeded(force: false)
+                self?.pollInputLogging(for: displayID)
             }
         }
         timer.activate()
@@ -1144,63 +1117,45 @@ final class SenderSessionCoordinator {
         inputHoldTelemetryTimer?.cancel()
         inputHoldTelemetryTimer = nil
 
-        if let localInputEventMonitor {
-            NSEvent.removeMonitor(localInputEventMonitor)
-            self.localInputEventMonitor = nil
-        }
-
-        if let globalInputEventMonitor {
-            NSEvent.removeMonitor(globalInputEventMonitor)
-            self.globalInputEventMonitor = nil
-        }
-
         inputLoggingDisplayID = nil
         activeMouseHoldStartNanoseconds = nil
-        activeMouseHoldButtonsMask = 0
+        lastObservedMouseButtonsMask = 0
         lastMouseHoldProgressLogNanoseconds = 0
     }
 
-    private func handleObservedInputEvent(_ event: NSEvent, for displayID: CGDirectDisplayID) {
+    private func pollInputLogging(for displayID: CGDirectDisplayID) {
         let now = DispatchTime.now().uptimeNanoseconds
         let buttonsMask = currentPressedMouseButtonsMask()
         let mouseLocation = NSEvent.mouseLocation
+        let previousButtonsMask = lastObservedMouseButtonsMask
 
-        switch event.type {
-        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+        if previousButtonsMask == 0 && buttonsMask != 0 {
             activeMouseHoldStartNanoseconds = now
-            activeMouseHoldButtonsMask = buttonsMask != 0 ? buttonsMask : mouseButtonsMask(for: event.type)
             lastMouseHoldProgressLogNanoseconds = 0
             logInputDebug(
-                "\(inputEventName(for: event.type)) \(inputLocationContext(mouseLocation, displayID: displayID)) " +
-                "buttons=\(activeMouseHoldButtonsMask)"
-            )
-        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            let durationMilliseconds = activeMouseHoldDurationMilliseconds(at: now)
-            logInputDebug(
-                "\(inputEventName(for: event.type)) after \(durationMilliseconds) ms " +
+                "\(inputTransitionName(for: buttonsMask, isPressed: true)) " +
                 "\(inputLocationContext(mouseLocation, displayID: displayID)) buttons=\(buttonsMask)"
             )
-            if buttonsMask == 0 {
-                activeMouseHoldStartNanoseconds = nil
-                activeMouseHoldButtonsMask = 0
-                lastMouseHoldProgressLogNanoseconds = 0
-            } else {
-                activeMouseHoldButtonsMask = buttonsMask
-            }
-        case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            if activeMouseHoldStartNanoseconds == nil && buttonsMask != 0 {
+        } else if previousButtonsMask != 0 && buttonsMask == 0 {
+            let durationMilliseconds = activeMouseHoldDurationMilliseconds(at: now)
+            logInputDebug(
+                "\(inputTransitionName(for: previousButtonsMask, isPressed: false)) after \(durationMilliseconds) ms " +
+                "\(inputLocationContext(mouseLocation, displayID: displayID)) buttons=\(buttonsMask)"
+            )
+            activeMouseHoldStartNanoseconds = nil
+            lastMouseHoldProgressLogNanoseconds = 0
+        } else if previousButtonsMask != 0 && buttonsMask != 0 && previousButtonsMask != buttonsMask {
+            if activeMouseHoldStartNanoseconds == nil {
                 activeMouseHoldStartNanoseconds = now
-                activeMouseHoldButtonsMask = buttonsMask
-                lastMouseHoldProgressLogNanoseconds = 0
-                logInputDebug(
-                    "drag-start without prior down \(inputLocationContext(mouseLocation, displayID: displayID)) " +
-                    "buttons=\(buttonsMask)"
-                )
             }
-            emitMouseHoldProgressIfNeeded(force: false)
-        default:
-            break
+            logInputDebug(
+                "buttons-changed \(previousButtonsMask)->\(buttonsMask) " +
+                "\(inputLocationContext(mouseLocation, displayID: displayID))"
+            )
         }
+
+        lastObservedMouseButtonsMask = buttonsMask
+        emitMouseHoldProgressIfNeeded(force: false)
     }
 
     private func emitMouseHoldProgressIfNeeded(force: Bool) {
@@ -1218,14 +1173,12 @@ final class SenderSessionCoordinator {
                 )
             }
             activeMouseHoldStartNanoseconds = nil
-            activeMouseHoldButtonsMask = 0
             lastMouseHoldProgressLogNanoseconds = 0
             return
         }
 
         if activeMouseHoldStartNanoseconds == nil {
             activeMouseHoldStartNanoseconds = now
-            activeMouseHoldButtonsMask = buttonsMask
             lastMouseHoldProgressLogNanoseconds = 0
             logInputDebug(
                 "buttons-down without explicit mouse-down \(inputLocationContext(NSEvent.mouseLocation, displayID: displayID)) " +
@@ -1243,7 +1196,6 @@ final class SenderSessionCoordinator {
             return
         }
 
-        activeMouseHoldButtonsMask = buttonsMask
         lastMouseHoldProgressLogNanoseconds = now
         logInputDebug(
             "hold active \(millisecondsSince(activeMouseHoldStartNanoseconds, now: now)) ms " +
@@ -1292,7 +1244,7 @@ final class SenderSessionCoordinator {
     }
 
     private func startCursorRefreshTimer(for displayID: CGDirectDisplayID) {
-        let refreshFramesPerSecond = max(1, NetworkProtocol.cursorAppearanceRefreshFramesPerSecond)
+        let refreshFramesPerSecond = max(1, cursorRefreshFramesPerSecond())
         let intervalNanoseconds = Int(1_000_000_000 / refreshFramesPerSecond)
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(
@@ -1307,6 +1259,17 @@ final class SenderSessionCoordinator {
         }
         timer.activate()
         cursorTrackingRefreshTimer = timer
+    }
+
+    private func cursorRefreshFramesPerSecond() -> Int {
+        if NetworkProtocol.enableDynamicCursorAppearanceMirroring {
+            return max(
+                NetworkProtocol.cursorOverlayFramesPerSecond,
+                NetworkProtocol.cursorAppearanceRefreshFramesPerSecond
+            )
+        }
+
+        return NetworkProtocol.cursorOverlayFramesPerSecond
     }
 
     private func scheduleCursorPoll(for displayID: CGDirectDisplayID) {
@@ -1867,41 +1830,17 @@ final class SenderSessionCoordinator {
         UInt64(truncatingIfNeeded: NSEvent.pressedMouseButtons)
     }
 
-    private func mouseButtonsMask(for eventType: NSEvent.EventType) -> UInt64 {
-        switch eventType {
-        case .leftMouseDown, .leftMouseUp, .leftMouseDragged:
-            return 1 << 0
-        case .rightMouseDown, .rightMouseUp, .rightMouseDragged:
-            return 1 << 1
-        case .otherMouseDown, .otherMouseUp, .otherMouseDragged:
-            return 1 << 2
+    private func inputTransitionName(for buttonsMask: UInt64, isPressed: Bool) -> String {
+        let suffix = isPressed ? "down" : "up"
+        switch buttonsMask {
+        case 1 << 0:
+            return "left-\(suffix)"
+        case 1 << 1:
+            return "right-\(suffix)"
+        case 1 << 2:
+            return "other-\(suffix)"
         default:
-            return 0
-        }
-    }
-
-    private func inputEventName(for eventType: NSEvent.EventType) -> String {
-        switch eventType {
-        case .leftMouseDown:
-            return "left-down"
-        case .leftMouseUp:
-            return "left-up"
-        case .leftMouseDragged:
-            return "left-dragged"
-        case .rightMouseDown:
-            return "right-down"
-        case .rightMouseUp:
-            return "right-up"
-        case .rightMouseDragged:
-            return "right-dragged"
-        case .otherMouseDown:
-            return "other-down"
-        case .otherMouseUp:
-            return "other-up"
-        case .otherMouseDragged:
-            return "other-dragged"
-        default:
-            return String(describing: eventType)
+            return "buttons-\(suffix)"
         }
     }
 
