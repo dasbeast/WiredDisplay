@@ -136,6 +136,8 @@ final class SenderSessionCoordinator {
     private var lastMouseHoldProgressLogNanoseconds: UInt64 = 0
     private var lastSentCursorState: CursorStatePayload?
     private var lastSentCursorAppearanceSignature: UInt64?
+    private var prevSentCursorAppearanceSignature: UInt64?
+    private var lastSentCursorAppearanceNanoseconds: UInt64 = 0
     private var cachedCursorAppearance: CursorAppearancePayload?
     private var cachedCursorAppearanceDescriptor: CursorAppearanceDescriptor?
     private var cachedArrowCursorAppearance: CursorAppearancePayload?
@@ -1080,6 +1082,8 @@ final class SenderSessionCoordinator {
 
         lastSentCursorState = nil
         lastSentCursorAppearanceSignature = nil
+        prevSentCursorAppearanceSignature = nil
+        lastSentCursorAppearanceNanoseconds = 0
         resetCursorAppearanceCaches()
         wasMouseButtonPressed = false
         lastCursorDebugStatus = nil
@@ -1131,6 +1135,8 @@ final class SenderSessionCoordinator {
 
         lastSentCursorState = nil
         lastSentCursorAppearanceSignature = nil
+        prevSentCursorAppearanceSignature = nil
+        lastSentCursorAppearanceNanoseconds = 0
         resetCursorAppearanceCaches()
         wasMouseButtonPressed = false
         lastCursorDebugLogNanoseconds = 0
@@ -1162,7 +1168,7 @@ final class SenderSessionCoordinator {
             leeway: .milliseconds(50)
         )
         timer.setEventHandler { [weak self] in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.pollInputLogging(for: displayID)
             }
         }
@@ -1280,14 +1286,14 @@ final class SenderSessionCoordinator {
         ]
 
         localCursorEventMonitor = NSEvent.addLocalMonitorForEvents(matching: eventMask) { [weak self] event in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.scheduleCursorPoll(for: displayID)
             }
             return event
         }
 
         globalCursorEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.scheduleCursorPoll(for: displayID)
             }
         }
@@ -1315,7 +1321,7 @@ final class SenderSessionCoordinator {
             leeway: .milliseconds(1)
         )
         timer.setEventHandler { [weak self] in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.scheduleCursorPoll(for: displayID)
             }
         }
@@ -1354,7 +1360,7 @@ final class SenderSessionCoordinator {
         }
 
         let workItem = DispatchWorkItem { [weak self] in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 guard let self else { return }
                 self.pendingCursorPollDisplayID = nil
                 self.pendingCursorPollWorkItem = nil
@@ -1430,7 +1436,9 @@ final class SenderSessionCoordinator {
         }
         lastSentCursorState = nextState
         if let appearance = nextState.appearance {
+            prevSentCursorAppearanceSignature = lastSentCursorAppearanceSignature
             lastSentCursorAppearanceSignature = appearance.signature
+            lastSentCursorAppearanceNanoseconds = DispatchTime.now().uptimeNanoseconds
         }
         cursorPacketSentCount += 1
         transportService.sendCursorState(nextState)
@@ -1636,7 +1644,18 @@ final class SenderSessionCoordinator {
         let appearanceToSend: CursorAppearancePayload?
         if let appearance,
            lastSentCursorState == nil || appearance.signature != lastSentCursorAppearanceSignature {
-            appearanceToSend = appearance
+            // Hysteresis: if the new signature matches the *previously* sent signature, the cursor
+            // is oscillating between two shapes (e.g. pointer ↔ I-beam at a UI element boundary).
+            // Suppress the re-send until the new shape has been stable for 200 ms, so we don't
+            // flood the control channel with rapid appearance toggles.
+            let isOscillating = appearance.signature == prevSentCursorAppearanceSignature
+            let oscillationCooldownNanoseconds: UInt64 = 200_000_000
+            if isOscillating, lastSentCursorAppearanceNanoseconds > 0,
+               nowNanoseconds < lastSentCursorAppearanceNanoseconds + oscillationCooldownNanoseconds {
+                appearanceToSend = nil
+            } else {
+                appearanceToSend = appearance
+            }
         } else {
             appearanceToSend = nil
         }
@@ -1896,6 +1915,8 @@ final class SenderSessionCoordinator {
         frozenCursorAppearanceWhileButtonPressed = nil
         nextCursorAppearanceRefreshNanoseconds = 0
         lastSentCursorAppearanceSignature = nil
+        prevSentCursorAppearanceSignature = nil
+        lastSentCursorAppearanceNanoseconds = 0
     }
 
     private func cursorAppearanceSignature(pngData: Data, size: CGSize, hotSpot: CGPoint) -> UInt64 {
