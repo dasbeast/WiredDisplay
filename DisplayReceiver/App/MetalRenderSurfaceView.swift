@@ -177,7 +177,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var smoothedVelocityX: Double = 0
         private var smoothedVelocityY: Double = 0
         /// Exponential-smoothing factor applied to new velocity samples.
-        private let velocitySmoothingAlpha: Double = 0.35
+        private let velocitySmoothingAlpha: Double = 0.55
         /// Stop extrapolating once a cursor sample is old enough that prediction becomes visibly wrong.
         private let cursorPredictionStopAgeNanoseconds: UInt64 = 75_000_000
         /// Disable linear prediction when successive motion vectors diverge too far.
@@ -615,6 +615,17 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 turnAttenuation = 1.0
             }
 
+            // Scale prediction down when decelerating to prevent overshoot bounce on stop.
+            // When instantaneous speed drops below the previous smoothed speed (same direction,
+            // slowing down), reduce prediction proportionally so the cursor gracefully retreats
+            // toward the actual position rather than snapping on the first stationary packet.
+            let decelerationAttenuation: Double
+            if previousSpeed > 0 {
+                decelerationAttenuation = min(1.0, instantSpeed / previousSpeed)
+            } else {
+                decelerationAttenuation = 1.0
+            }
+
             let elapsedSinceLatestNanoseconds = nowNanoseconds >= latest.receiverTimestampNanoseconds
                 ? nowNanoseconds - latest.receiverTimestampNanoseconds
                 : 0
@@ -630,7 +641,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 targetPredictionLeadNanoseconds
             )
             let adjustedPredictionLeadNanoseconds = UInt64(
-                Double(predictionLeadNanoseconds) * turnAttenuation
+                Double(predictionLeadNanoseconds) * turnAttenuation * decelerationAttenuation
             )
 
             if adjustedPredictionLeadNanoseconds == 0 {
