@@ -17,7 +17,7 @@ enum NetworkProtocol {
     static let targetFramesPerSecond: Int = 60
     static let keyFrameIntervalSeconds: Int = 1
     static let captureFramesPerSecond: Int = 60
-    static let cursorOverlayFramesPerSecond: Int = 120
+    static let cursorOverlayFramesPerSecond: Int = 60
     static let cursorAppearanceRefreshFramesPerSecond: Int = 30
     static let cursorPredictionLeadNanoseconds: UInt64 = 8_000_000
     static let cursorMaximumPredictionLeadNanoseconds: UInt64 = 16_000_000
@@ -36,7 +36,7 @@ enum NetworkProtocol {
     static let useSwiftUIReceiverCursorOverlay: Bool = false
     static let showSenderCursorFallbackWhileTestingOverlay: Bool = false
     static let useDebugCursorOverlayMarker: Bool = false
-    static let enableCursorDebugLogging: Bool = true
+    static let enableCursorDebugLogging: Bool = false
     static let videoDatagramChunkPayloadBytes: Int = 1400
     static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 150_000_000
     static let videoDatagramMaxOutstandingFrames: Int = 3

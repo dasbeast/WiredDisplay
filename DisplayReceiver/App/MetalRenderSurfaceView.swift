@@ -162,11 +162,18 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var lastLoggedCursorVisibility: Bool?
         private var lastLoggedCursorVisibilityDetail: String?
         private var lastCursorPacketAgeLogNanoseconds: UInt64 = 0
+        private var consecutiveStaleCursorPresentationCount = 0
+        private var lastCursorPresentationRecoveryNanoseconds: UInt64 = 0
 
         /// Stop extrapolating once a cursor sample is old enough that prediction becomes visibly wrong.
         private let cursorPredictionStopAgeNanoseconds: UInt64 = 75_000_000
         /// Disable linear prediction when successive motion vectors diverge too far.
         private let cursorPredictionTurnCosineThreshold: Double = 0.85
+        /// If the latest cursor sample stays older than this for multiple refreshes in a row,
+        /// assume the presentation driver has fallen behind and restart it.
+        private let cursorPresentationRecoveryPacketAgeNanoseconds: UInt64 = 120_000_000
+        private let cursorPresentationRecoveryConsecutiveThreshold = 8
+        private let cursorPresentationRecoveryCooldownNanoseconds: UInt64 = 2_000_000_000
         /// Keep the hidden local cursor slightly inset so Universal Control does not
         /// steal it when the visible mirrored cursor reaches a physical screen edge.
         private let hiddenCursorEdgeInsetNormalized: CGFloat = 0.004
@@ -424,6 +431,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
             cursorHiddenSinceNanoseconds = nil
             logStaleCursorPacketIfNeeded(nowNanoseconds: now)
+            recoverCursorPresentationIfNeeded(cursorState: cursorState, nowNanoseconds: now)
 
             if lastPresentedOwnershipIntent == .localHandoff {
                 logCursorDebug("reacquiring remote cursor after local handoff")
@@ -506,6 +514,43 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             cursorImageView.layer?.frame = cursorFrame
             CATransaction.commit()
             cursorImageView.isHidden = false
+        }
+
+        private func recoverCursorPresentationIfNeeded(
+            cursorState: ReceiverCursorState,
+            nowNanoseconds: UInt64
+        ) {
+            guard cursorState.receiverTimestampNanoseconds <= nowNanoseconds else {
+                consecutiveStaleCursorPresentationCount = 0
+                return
+            }
+
+            let packetAgeNanoseconds = nowNanoseconds - cursorState.receiverTimestampNanoseconds
+            guard packetAgeNanoseconds >= cursorPresentationRecoveryPacketAgeNanoseconds else {
+                consecutiveStaleCursorPresentationCount = 0
+                return
+            }
+
+            consecutiveStaleCursorPresentationCount += 1
+            guard consecutiveStaleCursorPresentationCount >= cursorPresentationRecoveryConsecutiveThreshold else {
+                return
+            }
+            guard lastCursorPresentationRecoveryNanoseconds == 0 ||
+                nowNanoseconds >= lastCursorPresentationRecoveryNanoseconds + cursorPresentationRecoveryCooldownNanoseconds else {
+                return
+            }
+
+            lastCursorPresentationRecoveryNanoseconds = nowNanoseconds
+            consecutiveStaleCursorPresentationCount = 0
+            displayLinkRefreshScheduled = false
+            needsCursorReassertion = true
+            logCursorDebug(
+                "recovering cursor presentation after stale packet age " +
+                "\(packetAgeNanoseconds / 1_000_000) ms"
+            )
+            stopDisplayLink()
+            stopRefreshTimer()
+            syncPresentationDriverState()
         }
 
         private func presentLocalCursorHandoff() {

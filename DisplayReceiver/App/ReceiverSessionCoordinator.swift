@@ -541,8 +541,6 @@ private final class ReceiverCursorPacketRelay {
                 appearance: cursorState.appearance
             )
         )
-        NotificationCenter.default.post(name: .wiredDisplayCursorStateUpdated, object: nil)
-
         if shouldPublishSummaryChange, let onOverlaySummaryChange {
             Task { @MainActor in
                 onOverlaySummaryChange(cursorState.ownershipIntent, cursorState.isVisible)
