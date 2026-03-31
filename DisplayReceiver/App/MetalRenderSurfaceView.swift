@@ -178,6 +178,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var smoothedVelocityY: Double = 0
         /// Exponential-smoothing factor applied to new velocity samples.
         private let velocitySmoothingAlpha: Double = 0.35
+        /// Stop extrapolating once a cursor sample is old enough that prediction becomes visibly wrong.
+        private let cursorPredictionStopAgeNanoseconds: UInt64 = 75_000_000
+        /// Disable linear prediction when successive motion vectors diverge too far.
+        private let cursorPredictionTurnCosineThreshold: Double = 0.85
         /// Keep the hidden local cursor slightly inset so Universal Control does not
         /// steal it when the visible mirrored cursor reaches a physical screen edge.
         private let hiddenCursorEdgeInsetNormalized: CGFloat = 0.004
@@ -538,6 +542,15 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return nil
             }
 
+            let latestAgeNanoseconds = nowNanoseconds >= latest.receiverTimestampNanoseconds
+                ? nowNanoseconds - latest.receiverTimestampNanoseconds
+                : 0
+            if latestAgeNanoseconds > cursorPredictionStopAgeNanoseconds {
+                smoothedVelocityX = 0
+                smoothedVelocityY = 0
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
+
             guard let previous = snapshot.previous,
                   previous.isVisible,
                   latest.senderTimestampNanoseconds > previous.senderTimestampNanoseconds,
@@ -571,9 +584,36 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
+            let previousSmoothedVelocityX = smoothedVelocityX
+            let previousSmoothedVelocityY = smoothedVelocityY
+
             // Exponentially-smoothed velocity to reduce jitter from variable sender timing.
             smoothedVelocityX = velocitySmoothingAlpha * instantVX + (1.0 - velocitySmoothingAlpha) * smoothedVelocityX
             smoothedVelocityY = velocitySmoothingAlpha * instantVY + (1.0 - velocitySmoothingAlpha) * smoothedVelocityY
+
+            let turnAttenuation: Double
+            let previousSpeed = hypot(previousSmoothedVelocityX, previousSmoothedVelocityY)
+            let instantSpeed = hypot(instantVX, instantVY)
+            if previousSpeed > 0, instantSpeed > 0 {
+                let cosine = max(
+                    -1.0,
+                    min(
+                        1.0,
+                        ((instantVX * previousSmoothedVelocityX) + (instantVY * previousSmoothedVelocityY)) /
+                            (instantSpeed * previousSpeed)
+                    )
+                )
+                turnAttenuation = max(
+                    0.0,
+                    min(
+                        1.0,
+                        (cosine - cursorPredictionTurnCosineThreshold) /
+                            (1.0 - cursorPredictionTurnCosineThreshold)
+                    )
+                )
+            } else {
+                turnAttenuation = 1.0
+            }
 
             let elapsedSinceLatestNanoseconds = nowNanoseconds >= latest.receiverTimestampNanoseconds
                 ? nowNanoseconds - latest.receiverTimestampNanoseconds
@@ -589,9 +629,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 elapsedSinceLatestNanoseconds,
                 targetPredictionLeadNanoseconds
             )
+            let adjustedPredictionLeadNanoseconds = UInt64(
+                Double(predictionLeadNanoseconds) * turnAttenuation
+            )
 
-            let predictedX = latest.normalizedX + smoothedVelocityX * Double(predictionLeadNanoseconds)
-            let predictedY = latest.normalizedY + smoothedVelocityY * Double(predictionLeadNanoseconds)
+            if adjustedPredictionLeadNanoseconds == 0 {
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
+
+            let predictedX = latest.normalizedX + smoothedVelocityX * Double(adjustedPredictionLeadNanoseconds)
+            let predictedY = latest.normalizedY + smoothedVelocityY * Double(adjustedPredictionLeadNanoseconds)
 
             return CGPoint(
                 x: max(0, min(1, predictedX)),
