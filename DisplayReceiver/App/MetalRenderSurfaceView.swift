@@ -648,7 +648,8 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             // reduce prediction proportionally so the cursor settles cleanly on stop.
             let decelerationAttenuation: Double
             if windowSpeed > 0 {
-                decelerationAttenuation = min(1.0, recentSpeed / windowSpeed)
+                let speedRatio = min(1.0, recentSpeed / windowSpeed)
+                decelerationAttenuation = speedRatio * speedRatio
             } else {
                 decelerationAttenuation = 1.0
             }
@@ -667,8 +668,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 elapsedSinceLatestNanoseconds,
                 targetPredictionLeadNanoseconds
             )
+            let baseLeadAttenuation = min(turnAttenuation, decelerationAttenuation)
             let adjustedPredictionLeadNanoseconds = UInt64(
-                Double(predictionLeadNanoseconds) * turnAttenuation * decelerationAttenuation
+                Double(predictionLeadNanoseconds) * baseLeadAttenuation
             )
 
             if adjustedPredictionLeadNanoseconds == 0 {
