@@ -23,6 +23,7 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var isCursorOverlayVisible = false
     @Published private(set) var cursorOverlayImage: NSImage?
     @Published private(set) var cursorOverlayHotSpot: CGPoint?
+    @Published private(set) var isReceiverWindowFullScreen = false
 
     let coordinator = ReceiverSessionCoordinator()
     let advertisementService = ReceiverAdvertisementService()
@@ -64,6 +65,7 @@ final class ReceiverAppController: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.isReceiverWindowVisible = isVisible
+                self.isReceiverWindowFullScreen = self.windowManager.isWindowFullScreen()
             }
         }
 
@@ -82,10 +84,12 @@ final class ReceiverAppController: ObservableObject {
 
     func presentReceiverWindow(fullScreen: Bool) {
         windowManager.present(appController: self, enterFullScreen: fullScreen)
+        isReceiverWindowFullScreen = windowManager.isWindowFullScreen()
     }
 
     func hideReceiverWindow() {
         windowManager.hide()
+        isReceiverWindowFullScreen = false
     }
 
     func toggleReceiverWindow() {
@@ -94,6 +98,11 @@ final class ReceiverAppController: ObservableObject {
         } else {
             presentReceiverWindow(fullScreen: false)
         }
+    }
+
+    func leaveReceiverFullScreen() {
+        windowManager.leaveFullScreenIfNeeded()
+        isReceiverWindowFullScreen = windowManager.isWindowFullScreen()
     }
 
     func quitApplication() {
@@ -134,6 +143,7 @@ final class ReceiverAppController: ObservableObject {
             powerManagementService.stopPreventingSleep()
             hideReceiverWindow()
         }
+        isReceiverWindowFullScreen = windowManager.isWindowFullScreen()
     }
 
     private func statusText(for state: ReceiverSessionCoordinator.SessionState) -> String {

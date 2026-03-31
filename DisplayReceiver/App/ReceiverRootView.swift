@@ -5,46 +5,11 @@ import SwiftUI
 /// A small status overlay shows connection info while the receiver is idle.
 struct ReceiverRootView: View {
     @ObservedObject var appController: ReceiverAppController
-    @AppStorage(NetworkProtocol.cursorPredictionDefaultsKey)
-    private var enableCursorPrediction = true
-    @AppStorage(NetworkProtocol.cursorPredictionStrengthDefaultsKey)
-    private var cursorPredictionStrength = 1.0
 
     var body: some View {
         ZStack {
             MetalRenderSurfaceView()
                 .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("Predict Cursor Motion", isOn: $enableCursorPrediction)
-                Text(
-                    enableCursorPrediction
-                        ? "Draws the cursor slightly ahead to hide network delay."
-                        : "Draws only the latest real cursor packet with no prediction."
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-                if enableCursorPrediction {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Prediction Strength")
-                            Spacer()
-                            Text("\(Int(cursorPredictionStrength * 100))%")
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(value: $cursorPredictionStrength, in: 0...1)
-                        Text("Lower values reduce overshoot. Higher values feel snappier.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .padding(12)
-            .frame(maxWidth: 320)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 
             if !appController.isStreaming {
                 VStack(alignment: .leading, spacing: 8) {

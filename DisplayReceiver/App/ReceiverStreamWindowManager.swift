@@ -48,6 +48,15 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         }
     }
 
+    func leaveFullScreenIfNeeded() {
+        guard let window, window.styleMask.contains(.fullScreen) else { return }
+        window.toggleFullScreen(nil)
+    }
+
+    func isWindowFullScreen() -> Bool {
+        window?.styleMask.contains(.fullScreen) ?? false
+    }
+
     func windowWillClose(_ notification: Notification) {
         setCursorHidden(false)
         onVisibilityChange?(false)

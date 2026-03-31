@@ -3,6 +3,10 @@ import SwiftUI
 struct ReceiverMenuBarView: View {
     @ObservedObject var appController: ReceiverAppController
     @ObservedObject var updater: DisplayReceiverUpdater
+    @AppStorage(NetworkProtocol.cursorPredictionDefaultsKey)
+    private var enableCursorPrediction = true
+    @AppStorage(NetworkProtocol.cursorPredictionStrengthDefaultsKey)
+    private var cursorPredictionStrength = 1.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -58,6 +62,30 @@ struct ReceiverMenuBarView: View {
             if appController.isStreaming {
                 Button("Bring Stream Full Screen") {
                     appController.presentReceiverWindow(fullScreen: true)
+                }
+                if appController.isReceiverWindowFullScreen {
+                    Button("Leave Full Screen") {
+                        appController.leaveReceiverFullScreen()
+                    }
+                }
+            }
+
+            Divider()
+
+            Toggle("Predict Cursor Motion", isOn: $enableCursorPrediction)
+
+            if enableCursorPrediction {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Prediction Strength")
+                        Spacer()
+                        Text("\(Int(cursorPredictionStrength * 100))%")
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $cursorPredictionStrength, in: 0...1)
+                    Text("Lower values reduce overshoot. Higher values feel snappier.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
 
