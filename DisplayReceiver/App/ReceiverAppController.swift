@@ -87,7 +87,7 @@ final class ReceiverAppController: ObservableObject {
         NotificationCenter.default.publisher(for: .receiverReopenMainWindow)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                self?.presentReceiverWindow(fullScreen: true)
+                self?.presentReceiverWindow(fullScreen: false)
             }
             .store(in: &cancellables)
 
@@ -105,7 +105,7 @@ final class ReceiverAppController: ObservableObject {
         // Defer past the SwiftUI @StateObject initialization cycle so that
         // the onVisibilityChange @Published write doesn't land during a view update.
         Task { @MainActor in
-            self.presentReceiverWindow(fullScreen: true)
+            self.presentReceiverWindow(fullScreen: false)
         }
     }
 
@@ -123,7 +123,7 @@ final class ReceiverAppController: ObservableObject {
         if isReceiverWindowVisible {
             hideReceiverWindow()
         } else {
-            presentReceiverWindow(fullScreen: true)
+            presentReceiverWindow(fullScreen: false)
         }
     }
 
