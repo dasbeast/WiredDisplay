@@ -46,7 +46,7 @@ enum NetworkProtocol {
     // path. The sender UI exposes a runtime toggle for this so it can be disabled quickly if a
     // specific app or cursor family proves unstable.
     static let enableDynamicCursorAppearanceMirroring: Bool = true
-    static let useReceiverSystemCursorMirror: Bool = true
+    static let useReceiverSystemCursorMirror: Bool = false
     static let hideReceiverLocalCursorWhileStreaming: Bool = false
     static let useSwiftUIReceiverCursorOverlay: Bool = false
     static let showSenderCursorFallbackWhileTestingOverlay: Bool = false
