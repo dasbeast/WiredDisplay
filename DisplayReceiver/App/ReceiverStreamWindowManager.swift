@@ -8,43 +8,43 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     private weak var window: NSWindow?
     private var hostingController: NSHostingController<ReceiverRootView>?
     private var isCursorHidden = false
+    private var wantsFullScreenPresentation = false
 
     func present(appController: ReceiverAppController, enterFullScreen: Bool) {
         let window = ensureWindow(appController: appController)
+        wantsFullScreenPresentation = enterFullScreen
         prepareWindowForPresentation(window, enterFullScreen: enterFullScreen)
+        NSApp.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        window.makeMain()
         setCursorHidden(appController.isStreaming)
         onVisibilityChange?(true)
-
-        guard enterFullScreen, !window.styleMask.contains(.fullScreen) else {
-            return
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
-            guard let window = self.window, !window.styleMask.contains(.fullScreen) else { return }
-            window.toggleFullScreen(nil)
-        }
+        requestFullScreenIfNeeded()
     }
 
     func hide() {
         guard let window else { return }
+        wantsFullScreenPresentation = false
         setCursorHidden(false)
 
         if window.styleMask.contains(.fullScreen) {
             window.toggleFullScreen(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 self.window?.orderOut(nil)
+                NSApp.setActivationPolicy(.accessory)
                 self.onVisibilityChange?(false)
             }
         } else {
             window.orderOut(nil)
+            NSApp.setActivationPolicy(.accessory)
             onVisibilityChange?(false)
         }
     }
 
     func leaveFullScreenIfNeeded() {
         guard let window, window.styleMask.contains(.fullScreen) else { return }
+        wantsFullScreenPresentation = false
         window.toggleFullScreen(nil)
     }
 
@@ -53,8 +53,18 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        wantsFullScreenPresentation = false
         setCursorHidden(false)
+        NSApp.setActivationPolicy(.accessory)
         onVisibilityChange?(false)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        requestFullScreenIfNeeded()
+    }
+
+    func windowDidBecomeMain(_ notification: Notification) {
+        requestFullScreenIfNeeded()
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
@@ -62,6 +72,9 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
+        if !wantsFullScreenPresentation {
+            NSApp.setActivationPolicy(.accessory)
+        }
         onVisibilityChange?(window?.isVisible ?? false)
     }
 
@@ -128,6 +141,25 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
 
     private func targetScreenFrame(for window: NSWindow?) -> NSRect? {
         window?.screen?.frame ?? NSScreen.main?.frame ?? NSScreen.screens.first?.frame
+    }
+
+    private func requestFullScreenIfNeeded() {
+        guard wantsFullScreenPresentation,
+              let window,
+              window.isVisible,
+              !window.styleMask.contains(.fullScreen) else {
+            return
+        }
+
+        DispatchQueue.main.async {
+            guard self.wantsFullScreenPresentation,
+                  let window = self.window,
+                  window.isVisible,
+                  !window.styleMask.contains(.fullScreen) else {
+                return
+            }
+            window.toggleFullScreen(nil)
+        }
     }
 
     private func setCursorHidden(_ hidden: Bool) {
