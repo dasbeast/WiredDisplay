@@ -307,7 +307,7 @@ final class VideoDatagramListenerService {
     var canAcceptDatagrams: Bool { isListening }
 
     private var listener: NWListener?
-    private var activeConnection: NWConnection?
+    private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
     var onStateChange: ((Bool) -> Void)?
     var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data?, Data) -> Void)?
@@ -356,8 +356,10 @@ final class VideoDatagramListenerService {
     }
 
     func stopListening() {
-        activeConnection?.cancel()
-        activeConnection = nil
+        for connection in activeConnections.values {
+            connection.cancel()
+        }
+        activeConnections.removeAll(keepingCapacity: false)
         listener?.cancel()
         listener = nil
         reassembler.reset()
@@ -366,14 +368,15 @@ final class VideoDatagramListenerService {
     }
 
     private func activate(connection: NWConnection) {
-        activeConnection?.cancel()
-        activeConnection = connection
-        reassembler.reset()
+        let connectionID = ObjectIdentifier(connection)
+        activeConnections[connectionID] = connection
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             if case .failed(let error) = state {
                 self.onError?(error)
+            } else if case .cancelled = state {
+                self.activeConnections.removeValue(forKey: connectionID)
             }
         }
 
@@ -399,6 +402,11 @@ final class VideoDatagramListenerService {
     }
 
     private func handle(datagram: Data) {
+        if let cursorState = BinaryCursorWire.deserialize(data: datagram) {
+            onCursorState?(cursorState)
+            return
+        }
+
         if let chunk = VideoDatagramWire.deserialize(datagram: datagram) {
             let now = DispatchTime.now().uptimeNanoseconds
             guard let frameData = reassembler.insert(

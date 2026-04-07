@@ -277,6 +277,43 @@ final class NetworkProtocolTests: XCTestCase {
         XCTAssertEqual(decodedFrame.payload, encodedFrame.payload)
     }
 
+    func testBinaryCursorWireRoundTripsCursorMotionState() throws {
+        let cursorState = CursorStatePayload(
+            timestampNanoseconds: 123_456_789,
+            normalizedX: 0.375,
+            normalizedY: 0.625,
+            isVisible: true,
+            ownershipIntent: .remote,
+            appearance: nil
+        )
+
+        let serialized = BinaryCursorWire.serialize(cursorState: cursorState)
+        let decoded = try XCTUnwrap(BinaryCursorWire.deserialize(data: serialized))
+
+        XCTAssertEqual(decoded.timestampNanoseconds, cursorState.timestampNanoseconds)
+        XCTAssertEqual(decoded.isVisible, cursorState.isVisible)
+        XCTAssertEqual(decoded.ownershipIntent, cursorState.ownershipIntent)
+        XCTAssertNil(decoded.appearance)
+        XCTAssertEqual(decoded.normalizedX, cursorState.normalizedX, accuracy: 0.0001)
+        XCTAssertEqual(decoded.normalizedY, cursorState.normalizedY, accuracy: 0.0001)
+    }
+
+    func testBinaryCursorWireRejectsInvalidOwnershipEncoding() {
+        var serialized = BinaryCursorWire.serialize(
+            cursorState: CursorStatePayload(
+                timestampNanoseconds: 1,
+                normalizedX: 0.5,
+                normalizedY: 0.5,
+                isVisible: false,
+                ownershipIntent: .hidden,
+                appearance: nil
+            )
+        )
+        serialized[4] = 0b0000_0110
+
+        XCTAssertNil(BinaryCursorWire.deserialize(data: serialized))
+    }
+
     private func makeEncodedFrame(
         codec: VideoCodec,
         payload: Data,

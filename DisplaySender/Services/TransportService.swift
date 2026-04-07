@@ -791,9 +791,31 @@ final class CursorDatagramTransportService {
     func sendCursorState(_ cursorState: CursorStatePayload) {
         queue.async { [weak self] in
             guard let self else { return }
-            self.enqueueCursorPacket(cursorState)
-            self.flushPendingPacketIfPossible()
+
+            if cursorState.appearance == nil {
+                self.sendCursorMotionImmediately(cursorState)
+            } else {
+                self.enqueueCursorPacket(cursorState)
+                self.flushPendingPacketIfPossible()
+            }
         }
+    }
+
+    private func sendCursorMotionImmediately(_ cursorState: CursorStatePayload) {
+        guard isConnected, let connection else { return }
+
+        let motionState = CursorStatePayload(
+            timestampNanoseconds: cursorState.timestampNanoseconds,
+            normalizedX: cursorState.normalizedX,
+            normalizedY: cursorState.normalizedY,
+            isVisible: cursorState.isVisible,
+            ownershipIntent: cursorState.ownershipIntent,
+            appearance: nil
+        )
+        let packet = BinaryCursorWire.serialize(cursorState: motionState)
+
+        // Cursor motion is latency-sensitive and safe to drop, so bypass the completion-gated queue.
+        connection.send(content: packet, completion: .idempotent)
     }
 
     private func enqueueCursorPacket(_ cursorState: CursorStatePayload) {

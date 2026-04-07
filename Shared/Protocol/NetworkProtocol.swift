@@ -214,6 +214,7 @@ enum NetworkProtocol {
     static let binaryMagic: UInt32 = 0x57445646 // "WDVF" – WiredDisplay Video Frame
     static let videoDatagramMagic: UInt32 = 0x57445644 // "WDVD" – WiredDisplay Video Datagram
     static let binaryAudioMagic: UInt32 = 0x57444146 // "WDAF" – WiredDisplay Audio Frame
+    static let binaryCursorMagic: UInt32 = 0x5744434D // "WDCM" – WiredDisplay Cursor Motion
     static let audioSampleRateHz: Double = 48_000
     static let audioChannelCount: Int = 2
     static let audioPlaybackMaxQueuedBuffers: Int = 8
@@ -417,6 +418,92 @@ struct CursorStatePayload: Codable, Equatable, Sendable {
     let isVisible: Bool
     let ownershipIntent: CursorOwnershipIntent
     let appearance: CursorAppearancePayload?
+}
+
+/// Compact sender -> receiver cursor motion packet for the high-frequency UDP hot path.
+/// Layout: [4-byte magic][1-byte flags][8-byte timestamp][4-byte x][4-byte y]
+enum BinaryCursorWire {
+    private static let isVisibleFlag: UInt8 = 1 << 0
+    private static let ownershipMask: UInt8 = 0b0000_0110
+    private static let ownershipShift: UInt8 = 1
+    private static let packetLength = 21
+
+    static func serialize(cursorState: CursorStatePayload) -> Data {
+        var data = Data(capacity: packetLength)
+
+        var magic = NetworkProtocol.binaryCursorMagic.bigEndian
+        withUnsafeBytes(of: &magic) { data.append(contentsOf: $0) }
+
+        var flags: UInt8 = ownershipBits(for: cursorState.ownershipIntent) << ownershipShift
+        if cursorState.isVisible {
+            flags |= isVisibleFlag
+        }
+        data.append(flags)
+
+        var timestamp = cursorState.timestampNanoseconds.bigEndian
+        withUnsafeBytes(of: &timestamp) { data.append(contentsOf: $0) }
+
+        var normalizedX = Float32(cursorState.normalizedX).bitPattern.bigEndian
+        var normalizedY = Float32(cursorState.normalizedY).bitPattern.bigEndian
+        withUnsafeBytes(of: &normalizedX) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &normalizedY) { data.append(contentsOf: $0) }
+
+        return data
+    }
+
+    static func deserialize(data: Data) -> CursorStatePayload? {
+        guard data.count == packetLength else { return nil }
+        guard NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 0) == NetworkProtocol.binaryCursorMagic else {
+            return nil
+        }
+
+        let flags = data[4]
+        let ownershipCode = (flags & ownershipMask) >> ownershipShift
+        guard let ownershipIntent = ownershipIntent(for: ownershipCode) else { return nil }
+        let isVisible = (flags & isVisibleFlag) != 0
+
+        guard let timestampNanoseconds = NetworkProtocol.readUInt64BigEndian(from: data, atOffset: 5),
+              let normalizedXBits = NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 13),
+              let normalizedYBits = NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 17) else {
+            return nil
+        }
+
+        let normalizedX = Double(Float32(bitPattern: normalizedXBits))
+        let normalizedY = Double(Float32(bitPattern: normalizedYBits))
+
+        return CursorStatePayload(
+            timestampNanoseconds: timestampNanoseconds,
+            normalizedX: normalizedX,
+            normalizedY: normalizedY,
+            isVisible: isVisible,
+            ownershipIntent: ownershipIntent,
+            appearance: nil
+        )
+    }
+
+    private static func ownershipBits(for ownershipIntent: CursorOwnershipIntent) -> UInt8 {
+        switch ownershipIntent {
+        case .remote:
+            return 0
+        case .localHandoff:
+            return 1
+        case .hidden:
+            return 2
+        }
+    }
+
+    private static func ownershipIntent(for code: UInt8) -> CursorOwnershipIntent? {
+        switch code {
+        case 0:
+            return .remote
+        case 1:
+            return .localHandoff
+        case 2:
+            return .hidden
+        default:
+            return nil
+        }
+    }
 }
 
 struct SenderHeartbeatEvaluation: Equatable, Sendable {
