@@ -169,9 +169,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private let cursorPredictionStopAgeNanoseconds: UInt64 = 75_000_000
         /// Keep the predictor focused on the most recent motion so it does not lean on stale
         /// movement vectors after the sender briefly stalls.
-        private let cursorPredictionHistoryWindowNanoseconds: UInt64 = 50_000_000
+        private let cursorPredictionHistoryWindowNanoseconds: UInt64 = 75_000_000
         /// Disable linear prediction when successive motion vectors diverge too far.
-        private let cursorPredictionTurnCosineThreshold: Double = 0.85
+        private let cursorPredictionTurnCosineThreshold: Double = 0.70
         /// If the latest cursor sample stays older than this for multiple refreshes in a row,
         /// assume the presentation driver has fallen behind and restart it.
         private let cursorPresentationRecoveryPacketAgeNanoseconds: UInt64 = 120_000_000
@@ -689,8 +689,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
             }
 
-            let predictedX = latest.normalizedX + windowVelocityX * Double(adjustedPredictionLeadNanoseconds)
-            let predictedY = latest.normalizedY + windowVelocityY * Double(adjustedPredictionLeadNanoseconds)
+            // Blend recent (last-segment) and window-average velocity so the prediction
+            // tracks the current cursor speed rather than the lagging history average.
+            // 65 % recent gives responsiveness during acceleration/deceleration;
+            // 35 % window average smooths out packet-timing jitter.
+            let blendedVelocityX = recentVelocityX * 0.65 + windowVelocityX * 0.35
+            let blendedVelocityY = recentVelocityY * 0.65 + windowVelocityY * 0.35
+            let predictedX = latest.normalizedX + blendedVelocityX * Double(adjustedPredictionLeadNanoseconds)
+            let predictedY = latest.normalizedY + blendedVelocityY * Double(adjustedPredictionLeadNanoseconds)
 
             return CGPoint(
                 x: max(0, min(1, predictedX)),

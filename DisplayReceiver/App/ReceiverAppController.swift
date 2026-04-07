@@ -84,6 +84,13 @@ final class ReceiverAppController: ObservableObject {
             }
         }
 
+        NotificationCenter.default.publisher(for: .receiverReopenMainWindow)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.presentReceiverWindow(fullScreen: false)
+            }
+            .store(in: &cancellables)
+
         start()
     }
 
@@ -95,6 +102,7 @@ final class ReceiverAppController: ObservableObject {
         )
         refreshAdvertisementState()
         refreshFromCoordinator()
+        presentReceiverWindow(fullScreen: false)
     }
 
     func presentReceiverWindow(fullScreen: Bool) {
@@ -156,13 +164,8 @@ final class ReceiverAppController: ObservableObject {
             if !powerManagementService.isPreventingSleep {
                 powerManagementService.startPreventingSleep()
             }
-        }
-
-        if newStreaming && !wasStreaming {
-            presentReceiverWindow(fullScreen: true)
-        } else if !newStreaming && wasStreaming {
+        } else if wasStreaming {
             powerManagementService.stopPreventingSleep()
-            hideReceiverWindow()
         }
         isReceiverWindowFullScreen = windowManager.isWindowFullScreen()
     }

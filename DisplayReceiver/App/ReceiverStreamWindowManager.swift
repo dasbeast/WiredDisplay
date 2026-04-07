@@ -8,15 +8,11 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     private weak var window: NSWindow?
     private var hostingController: NSHostingController<ReceiverRootView>?
     private var isCursorHidden = false
-    private var previousPresentationOptions: NSApplication.PresentationOptions?
 
     func present(appController: ReceiverAppController, enterFullScreen: Bool) {
         let window = ensureWindow(appController: appController)
-        configureWindowInteraction(window, isStreaming: appController.isStreaming)
-        applyStreamingPresentation()
         NSApplication.shared.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
         setCursorHidden(appController.isStreaming)
         onVisibilityChange?(true)
 
@@ -32,9 +28,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
 
     func hide() {
         guard let window else { return }
-        configureWindowInteraction(window, isStreaming: false)
         setCursorHidden(false)
-        restorePresentation()
 
         if window.styleMask.contains(.fullScreen) {
             window.toggleFullScreen(nil)
@@ -75,24 +69,20 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         let contentView = ReceiverRootView(appController: appController)
         let hostingController = NSHostingController(rootView: contentView)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1728, height: 1117),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 440),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "DisplayReceiver"
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = false
-        window.acceptsMouseMovedEvents = false
-        window.ignoresMouseEvents = false
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = false
+        window.isMovableByWindowBackground = true
+        window.acceptsMouseMovedEvents = true
         window.collectionBehavior = [.fullScreenPrimary, .fullScreenDisallowsTiling, .managed]
         window.contentViewController = hostingController
         window.delegate = self
         window.center()
-        [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].forEach { buttonType in
-            window.standardWindowButton(buttonType)?.isHidden = true
-        }
 
         self.window = window
         self.hostingController = hostingController
@@ -113,29 +103,5 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         }
 
         isCursorHidden = effectiveHidden
-    }
-
-    private func configureWindowInteraction(_ window: NSWindow, isStreaming: Bool) {
-        window.acceptsMouseMovedEvents = !isStreaming
-        window.ignoresMouseEvents = isStreaming
-    }
-
-    private func applyStreamingPresentation() {
-        if previousPresentationOptions == nil {
-            previousPresentationOptions = NSApplication.shared.presentationOptions
-        }
-
-        NSApplication.shared.presentationOptions = [
-            .autoHideDock,
-            .autoHideMenuBar,
-            .disableMenuBarTransparency
-        ]
-    }
-
-    private func restorePresentation() {
-        if let previousPresentationOptions {
-            NSApplication.shared.presentationOptions = previousPresentationOptions
-            self.previousPresentationOptions = nil
-        }
     }
 }

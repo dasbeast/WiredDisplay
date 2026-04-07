@@ -6,7 +6,7 @@ struct ReceiverMenuBarView: View {
     @AppStorage(NetworkProtocol.cursorPredictionDefaultsKey)
     private var enableCursorPrediction = true
     @AppStorage(NetworkProtocol.cursorPredictionStrengthDefaultsKey)
-    private var cursorPredictionStrength = 1.0
+    private var cursorPredictionStrength = 0.75
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {

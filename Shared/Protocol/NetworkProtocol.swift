@@ -29,7 +29,7 @@ enum NetworkProtocol {
     }
     static var cursorPredictionStrength: Double {
         if UserDefaults.standard.object(forKey: cursorPredictionStrengthDefaultsKey) == nil {
-            return 1.0
+            return 0.75
         }
         return min(1.0, max(0.0, UserDefaults.standard.double(forKey: cursorPredictionStrengthDefaultsKey)))
     }
@@ -46,13 +46,13 @@ enum NetworkProtocol {
     // path. The sender UI exposes a runtime toggle for this so it can be disabled quickly if a
     // specific app or cursor family proves unstable.
     static let enableDynamicCursorAppearanceMirroring: Bool = true
-    static let useReceiverSystemCursorMirror: Bool = false
+    static let useReceiverSystemCursorMirror: Bool = true
     static let hideReceiverLocalCursorWhileStreaming: Bool = false
     static let useSwiftUIReceiverCursorOverlay: Bool = false
     static let showSenderCursorFallbackWhileTestingOverlay: Bool = false
     static let useDebugCursorOverlayMarker: Bool = false
     static let enableCursorDebugLogging: Bool = false
-    static let enableTransportDebugLogging: Bool = true
+    static let enableTransportDebugLogging: Bool = false
     static let enableVerboseCursorPacketLogging: Bool = false
     static let transportTelemetryLogIntervalNanoseconds: UInt64 = 1_000_000_000
     static let videoDatagramChunkPayloadBytes: Int = 1400
