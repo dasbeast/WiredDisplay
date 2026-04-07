@@ -167,6 +167,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         /// Stop extrapolating once a cursor sample is old enough that prediction becomes visibly wrong.
         private let cursorPredictionStopAgeNanoseconds: UInt64 = 75_000_000
+        /// Keep the predictor focused on the most recent motion so it does not lean on stale
+        /// movement vectors after the sender briefly stalls.
+        private let cursorPredictionHistoryWindowNanoseconds: UInt64 = 50_000_000
         /// Disable linear prediction when successive motion vectors diverge too far.
         private let cursorPredictionTurnCosineThreshold: Double = 0.85
         /// If the latest cursor sample stays older than this for multiple refreshes in a row,
@@ -710,6 +713,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     break
                 }
 
+                let senderAgeNanoseconds = latest.senderTimestampNanoseconds - state.senderTimestampNanoseconds
+                if senderAgeNanoseconds > cursorPredictionHistoryWindowNanoseconds {
+                    break
+                }
+
                 if let newer = collected.last,
                    state.senderTimestampNanoseconds >= newer.senderTimestampNanoseconds ||
                    state.receiverTimestampNanoseconds > newer.receiverTimestampNanoseconds {
@@ -867,15 +875,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     }
                 } else {
                     consecutiveDriftCount = 0
-                    lastStableWarpNanoseconds = now
+                    let previousStableWarpNanoseconds = lastStableWarpNanoseconds
                     // Recover from overlay fallback once warping has been stable for 2 s.
                     if prefersOverlayFallback,
-                       lastStableWarpNanoseconds > 0,
-                       now >= lastStableWarpNanoseconds + fallbackRecoveryNanoseconds {
+                       previousStableWarpNanoseconds > 0,
+                       now >= previousStableWarpNanoseconds + fallbackRecoveryNanoseconds {
                         prefersOverlayFallback = false
                         logCursorDebug("recovered from overlay fallback after stable warp period")
                         needsCursorReassertion = true
                     }
+                    lastStableWarpNanoseconds = now
                 }
             }
 

@@ -61,6 +61,20 @@ final class ReceiverAppController: ObservableObject {
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: NSWorkspace.willSleepNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.handleSystemWillSleep()
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: NSWorkspace.didWakeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.handleSystemDidWake()
+            }
+            .store(in: &cancellables)
+
         windowManager.onVisibilityChange = { [weak self] isVisible in
             guard let self else { return }
             Task { @MainActor in
@@ -136,8 +150,13 @@ final class ReceiverAppController: ObservableObject {
         cursorOverlayImage = coordinator.cursorOverlayImage
         cursorOverlayHotSpot = coordinator.cursorOverlayHotSpot
 
+        if newStreaming {
+            if !powerManagementService.isPreventingSleep {
+                powerManagementService.startPreventingSleep()
+            }
+        }
+
         if newStreaming && !wasStreaming {
-            powerManagementService.startPreventingSleep()
             presentReceiverWindow(fullScreen: true)
         } else if !newStreaming && wasStreaming {
             powerManagementService.stopPreventingSleep()
@@ -162,5 +181,14 @@ final class ReceiverAppController: ObservableObject {
     private func formatRate(_ value: Double?, unit: String) -> String {
         guard let value else { return "-" }
         return String(format: "%.2f %@", value, unit)
+    }
+
+    private func handleSystemWillSleep() {
+        guard powerManagementService.isPreventingSleep else { return }
+        powerManagementService.stopPreventingSleep()
+    }
+
+    private func handleSystemDidWake() {
+        refreshFromCoordinator()
     }
 }
