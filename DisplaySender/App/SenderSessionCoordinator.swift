@@ -1,4 +1,5 @@
 import AppKit
+import CoreVideo
 import Foundation
 
 /// Coordinates sender-side capture, encoding, and transport lifecycle.
@@ -140,6 +141,8 @@ final class SenderSessionCoordinator {
     private var lastCursorPacketSentCountSnapshot: UInt64 = 0
     private let frameDispatchGate = SenderFrameDispatchGate()
     private var cursorTrackingRefreshTimer: DispatchSourceTimer?
+    private let cursorRefreshDriver = SenderCursorRefreshDriver()
+    private var cursorRefreshDisplayID: CGDirectDisplayID?
     private var localCursorEventMonitor: Any?
     private var globalCursorEventMonitor: Any?
     private var inputHoldTelemetryTimer: DispatchSourceTimer?
@@ -185,6 +188,13 @@ final class SenderSessionCoordinator {
         self.transportService = transportService
         self.videoDatagramTransportService = videoDatagramTransportService
         self.cursorDatagramTransportService = cursorDatagramTransportService
+
+        cursorRefreshDriver.onRefresh = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, let displayID = self.cursorRefreshDisplayID else { return }
+                self.scheduleCursorPoll(for: displayID)
+            }
+        }
 
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
         startTransportTelemetryTimer()
@@ -1158,6 +1168,8 @@ final class SenderSessionCoordinator {
         cursorTrackingRefreshTimer?.setEventHandler {}
         cursorTrackingRefreshTimer?.cancel()
         cursorTrackingRefreshTimer = nil
+        cursorRefreshDriver.stop()
+        cursorRefreshDisplayID = nil
         removeCursorEventMonitors()
 
         if sendHiddenState,
@@ -1359,20 +1371,11 @@ final class SenderSessionCoordinator {
 
     private func startCursorRefreshTimer(for displayID: CGDirectDisplayID) {
         let refreshFramesPerSecond = max(1, cursorRefreshFramesPerSecond())
-        let intervalNanoseconds = Int(1_000_000_000 / refreshFramesPerSecond)
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(
-            deadline: .now() + .nanoseconds(intervalNanoseconds),
-            repeating: .nanoseconds(intervalNanoseconds),
-            leeway: .milliseconds(1)
+        cursorRefreshDisplayID = displayID
+        cursorRefreshDriver.start(
+            displayID: displayID,
+            fallbackFramesPerSecond: refreshFramesPerSecond
         )
-        timer.setEventHandler { [weak self] in
-            MainActor.assumeIsolated {
-                self?.scheduleCursorPoll(for: displayID)
-            }
-        }
-        timer.activate()
-        cursorTrackingRefreshTimer = timer
     }
 
     private func cursorRefreshFramesPerSecond() -> Int {
@@ -2220,6 +2223,107 @@ final class SenderSessionCoordinator {
         cursorPacketsSentPerSecond = rate
         cursorOutboundWindowStartNanoseconds = now
         lastCursorPacketSentCountSnapshot = packetCount
+    }
+}
+
+private final class SenderCursorRefreshDriver {
+    private static let displayLinkCallback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userData in
+        guard let userData else { return kCVReturnError }
+        let driver = Unmanaged<SenderCursorRefreshDriver>.fromOpaque(userData).takeUnretainedValue()
+        driver.scheduleRefresh()
+        return kCVReturnSuccess
+    }
+
+    var onRefresh: (() -> Void)?
+
+    private var displayLink: CVDisplayLink?
+    private var displayLinkDisplayID: CGDirectDisplayID?
+    private var fallbackTimer: DispatchSourceTimer?
+    private let stateLock = NSLock()
+    private var refreshScheduled = false
+
+    func start(displayID: CGDirectDisplayID, fallbackFramesPerSecond: Int) {
+        stop()
+
+        guard startDisplayLink(displayID: displayID) else {
+            startFallbackTimer(framesPerSecond: fallbackFramesPerSecond)
+            return
+        }
+    }
+
+    func stop() {
+        if let displayLink, CVDisplayLinkIsRunning(displayLink) {
+            CVDisplayLinkStop(displayLink)
+        }
+        displayLink = nil
+        displayLinkDisplayID = nil
+
+        fallbackTimer?.setEventHandler {}
+        fallbackTimer?.cancel()
+        fallbackTimer = nil
+
+        stateLock.lock()
+        refreshScheduled = false
+        stateLock.unlock()
+    }
+
+    private func startDisplayLink(displayID: CGDirectDisplayID) -> Bool {
+        var createdDisplayLink: CVDisplayLink?
+        guard CVDisplayLinkCreateWithCGDisplay(displayID, &createdDisplayLink) == kCVReturnSuccess,
+              let createdDisplayLink else {
+            return false
+        }
+
+        let callbackStatus = CVDisplayLinkSetOutputCallback(
+            createdDisplayLink,
+            Self.displayLinkCallback,
+            Unmanaged.passUnretained(self).toOpaque()
+        )
+        guard callbackStatus == kCVReturnSuccess else {
+            return false
+        }
+
+        displayLink = createdDisplayLink
+        displayLinkDisplayID = displayID
+        guard CVDisplayLinkStart(createdDisplayLink) == kCVReturnSuccess else {
+            displayLink = nil
+            displayLinkDisplayID = nil
+            return false
+        }
+        return true
+    }
+
+    private func startFallbackTimer(framesPerSecond: Int) {
+        let intervalNanoseconds = Int(1_000_000_000 / max(1, framesPerSecond))
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now(),
+            repeating: .nanoseconds(intervalNanoseconds),
+            leeway: .microseconds(250)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.onRefresh?()
+        }
+        timer.activate()
+        fallbackTimer = timer
+    }
+
+    private func scheduleRefresh() {
+        stateLock.lock()
+        if refreshScheduled {
+            stateLock.unlock()
+            return
+        }
+        refreshScheduled = true
+        stateLock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            self.refreshScheduled = false
+            self.stateLock.unlock()
+            self.onRefresh?()
+        }
     }
 }
 
