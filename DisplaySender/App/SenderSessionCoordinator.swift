@@ -87,6 +87,7 @@ final class SenderSessionCoordinator {
     private(set) var cursorDatagramQueuedPacketsDropped: UInt64 = 0 { didSet { onChange?() } }
     private(set) var cursorDatagramPendingPackets: Int = 0 { didSet { onChange?() } }
     private(set) var cursorDatagramSendErrors: UInt64 = 0 { didSet { onChange?() } }
+    private(set) var cursorPacketsSentPerSecond: Double? { didSet { onChange?() } }
     private(set) var streamingPipelinePreference: NetworkProtocol.StreamingPipelinePreference = .automatic { didSet { onChange?() } }
     private(set) var resolvedStreamingPipelineMode: NetworkProtocol.StreamingPipelineMode =
         NetworkProtocol.resolvedStreamingPipelineMode(for: .automatic) { didSet { onChange?() } }
@@ -135,6 +136,8 @@ final class SenderSessionCoordinator {
     private var outboundWindowStartNanoseconds: UInt64?
     private var outboundWindowFrameCount: UInt64 = 0
     private var outboundWindowPayloadBytes: UInt64 = 0
+    private var cursorOutboundWindowStartNanoseconds: UInt64?
+    private var lastCursorPacketSentCountSnapshot: UInt64 = 0
     private let frameDispatchGate = SenderFrameDispatchGate()
     private var cursorTrackingRefreshTimer: DispatchSourceTimer?
     private var localCursorEventMonitor: Any?
@@ -400,6 +403,7 @@ final class SenderSessionCoordinator {
         )
         sentFrameCount = 0
         droppedOutboundFrameCount = 0
+        cursorPacketsSentPerSecond = nil
         lastErrorMessage = nil
         sentFramesPerSecond = nil
         sentMegabitsPerSecond = nil
@@ -413,6 +417,8 @@ final class SenderSessionCoordinator {
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
+        cursorOutboundWindowStartNanoseconds = nil
+        lastCursorPacketSentCountSnapshot = 0
         targetUsesHiDPI = true
         awaitingUDPReadyToStart = false
         awaitingFirstRenderedFrame = false
@@ -592,10 +598,13 @@ final class SenderSessionCoordinator {
         awaitingFirstRenderedFrame = false
         frameDispatchGate.setAwaitingFirstRenderedFrame(false)
         droppedOutboundFrameCount = 0
+        cursorPacketsSentPerSecond = nil
         refreshTransportTelemetry()
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
+        cursorOutboundWindowStartNanoseconds = nil
+        lastCursorPacketSentCountSnapshot = 0
         availableDisplayModes = []
         activeDisplayMode = nil
     }
@@ -2165,6 +2174,12 @@ final class SenderSessionCoordinator {
             cursorDatagramSendErrors = cursorSnapshot.sendErrors
         }
 
+        updateCursorSendRate(
+            packetCount: tcpSnapshot.sentCursorFrames +
+                cursorSnapshot.sentMotionPackets +
+                cursorSnapshot.sentQueuedPackets
+        )
+
         guard NetworkProtocol.enableTransportDebugLogging else { return }
 
         let now = DispatchTime.now().uptimeNanoseconds
@@ -2185,6 +2200,26 @@ final class SenderSessionCoordinator {
         )
 
         lastTransportTelemetryLogNanoseconds = now
+    }
+
+    private func updateCursorSendRate(packetCount: UInt64) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard let windowStartNanoseconds = cursorOutboundWindowStartNanoseconds else {
+            cursorOutboundWindowStartNanoseconds = now
+            lastCursorPacketSentCountSnapshot = packetCount
+            return
+        }
+
+        let elapsedNanoseconds = now >= windowStartNanoseconds ? (now - windowStartNanoseconds) : 0
+        guard elapsedNanoseconds >= 1_000_000_000 else { return }
+
+        let packetDelta = packetCount >= lastCursorPacketSentCountSnapshot
+            ? packetCount - lastCursorPacketSentCountSnapshot
+            : 0
+        let rate = Double(packetDelta) * 1_000_000_000.0 / Double(elapsedNanoseconds)
+        cursorPacketsSentPerSecond = rate
+        cursorOutboundWindowStartNanoseconds = now
+        lastCursorPacketSentCountSnapshot = packetCount
     }
 }
 

@@ -10,6 +10,7 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var lastErrorText = "-"
     @Published private(set) var receivedFramesPerSecondText = "-"
     @Published private(set) var receivedMegabitsPerSecondText = "-"
+    @Published private(set) var cursorPacketsReceivedPerSecondText = "-"
     @Published private(set) var isStreaming = false
     @Published private(set) var interfaceLines: [String] = []
     @Published private(set) var wiredPathSummary = "unknown"
@@ -141,6 +142,7 @@ final class ReceiverAppController: ObservableObject {
         lastErrorText = coordinator.lastErrorMessage ?? "-"
         receivedFramesPerSecondText = formatRate(coordinator.receivedFramesPerSecond, unit: "fps")
         receivedMegabitsPerSecondText = formatRate(coordinator.receivedMegabitsPerSecond, unit: "Mbps")
+        cursorPacketsReceivedPerSecondText = formatRate(coordinator.cursorPacketsReceivedPerSecond, unit: "fps")
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         interfaceLines = coordinator.localInterfaceDescriptions
         cursorOverlayText = coordinator.cursorOverlaySummary

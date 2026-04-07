@@ -31,6 +31,7 @@ final class ReceiverSessionCoordinator {
     private(set) var estimatedJitterMilliseconds: Double? { didSet { onChange?() } }
     private(set) var receivedFramesPerSecond: Double? { didSet { onChange?() } }
     private(set) var receivedMegabitsPerSecond: Double? { didSet { onChange?() } }
+    private(set) var cursorPacketsReceivedPerSecond: Double? { didSet { onChange?() } }
     private(set) var renderSourceDescription: String = "-" { didSet { onChange?() } }
     private(set) var replacedBeforeRenderCount: UInt64 = 0 { didSet { onChange?() } }
     private(set) var cursorOverlaySummary: String = "-" { didSet { onChange?() } }
@@ -51,6 +52,8 @@ final class ReceiverSessionCoordinator {
     private var inboundWindowStartNanoseconds: UInt64?
     private var inboundWindowFrameCount: UInt64 = 0
     private var inboundWindowPayloadBytes: UInt64 = 0
+    private var cursorInboundWindowStartNanoseconds: UInt64?
+    private var cursorInboundPacketCount: UInt64 = 0
     private var lastRenderedFrameTelemetry: ReceiverRenderedFrameTelemetry?
     private var lastRecoveryKeyFrameRequestAt: Date?
     private var lastLoggedCursorOwnershipIntent: CursorOwnershipIntent?
@@ -128,6 +131,9 @@ final class ReceiverSessionCoordinator {
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
                 self.cursorPacketRelay.reset()
+                self.cursorPacketsReceivedPerSecond = nil
+                self.cursorInboundWindowStartNanoseconds = nil
+                self.cursorInboundPacketCount = 0
                 self.resetCursorOverlayState()
                 if case .running = self.state {
                     self.state = .listening
@@ -155,6 +161,7 @@ final class ReceiverSessionCoordinator {
             if envelope.type == .cursorState {
                 do {
                     let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
+                    self?.recordReceivedCursorPacket()
                     cursorPacketRelay.handle(cursorState)
                 } catch {
                     guard let self else { return }
@@ -204,6 +211,7 @@ final class ReceiverSessionCoordinator {
         }
 
         videoDatagramListenerService.onCursorState = { cursorState in
+            self.recordReceivedCursorPacket()
             cursorPacketRelay.handle(cursorState)
         }
 
@@ -240,6 +248,7 @@ final class ReceiverSessionCoordinator {
         estimatedJitterMilliseconds = nil
         receivedFramesPerSecond = nil
         receivedMegabitsPerSecond = nil
+        cursorPacketsReceivedPerSecond = nil
         renderSourceDescription = "-"
         replacedBeforeRenderCount = 0
         resetCursorOverlayState()
@@ -250,6 +259,8 @@ final class ReceiverSessionCoordinator {
         inboundWindowStartNanoseconds = nil
         inboundWindowFrameCount = 0
         inboundWindowPayloadBytes = 0
+        cursorInboundWindowStartNanoseconds = nil
+        cursorInboundPacketCount = 0
         lastRecoveryKeyFrameRequestAt = nil
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
         frameDecodePipeline.reset()
@@ -270,6 +281,9 @@ final class ReceiverSessionCoordinator {
         RenderFrameStore.shared.reset()
         ReceiverCursorStore.shared.reset()
         cursorPacketRelay.reset()
+        cursorPacketsReceivedPerSecond = nil
+        cursorInboundWindowStartNanoseconds = nil
+        cursorInboundPacketCount = 0
         resetCursorOverlayState()
         listenerService.stopListening()
         videoDatagramListenerService.stopListening()
@@ -284,6 +298,9 @@ final class ReceiverSessionCoordinator {
                 RenderFrameStore.shared.reset()
                 ReceiverCursorStore.shared.reset()
                 cursorPacketRelay.reset()
+                cursorPacketsReceivedPerSecond = nil
+                cursorInboundWindowStartNanoseconds = nil
+                cursorInboundPacketCount = 0
                 resetCursorOverlayState()
                 let hello = try envelope.decodePayload(as: HelloPayload.self)
                 peerName = hello.senderName
@@ -322,6 +339,7 @@ final class ReceiverSessionCoordinator {
                 )
             case .cursorState:
                 let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
+                recordReceivedCursorPacket()
                 cursorPacketRelay.handle(cursorState)
             case .videoFrame:
                 break
@@ -347,6 +365,26 @@ final class ReceiverSessionCoordinator {
             receiverRenderTimestampNanoseconds: update.renderTimestampNanoseconds
         )
         receivedFrameCount += 1
+    }
+
+    private func recordReceivedCursorPacket() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if cursorInboundWindowStartNanoseconds == nil {
+            cursorInboundWindowStartNanoseconds = now
+            cursorInboundPacketCount = 1
+            return
+        }
+
+        cursorInboundPacketCount &+= 1
+
+        guard let windowStartNanoseconds = cursorInboundWindowStartNanoseconds else { return }
+        let elapsedNanoseconds = now >= windowStartNanoseconds ? (now - windowStartNanoseconds) : 0
+        guard elapsedNanoseconds >= 1_000_000_000 else { return }
+
+        cursorPacketsReceivedPerSecond =
+            Double(cursorInboundPacketCount) * 1_000_000_000.0 / Double(elapsedNanoseconds)
+        cursorInboundWindowStartNanoseconds = now
+        cursorInboundPacketCount = 0
     }
 
     private func resetCursorOverlayState() {

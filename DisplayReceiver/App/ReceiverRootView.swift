@@ -22,6 +22,7 @@ struct ReceiverRootView: View {
                     if appController.isStreaming {
                         Text("Frames: \(appController.receivedFrameCount)")
                         Text("Rate: \(appController.receivedFramesPerSecondText)")
+                        Text("Cursor RX Rate: \(appController.cursorPacketsReceivedPerSecondText)")
                         Text("Throughput: \(appController.receivedMegabitsPerSecondText)")
                         Text("Cursor Overlay: \(appController.cursorOverlayText)")
                     } else {

@@ -200,8 +200,9 @@ final class EncoderService {
         // No B-frames: the single biggest latency saver — decoder doesn't wait for future frames.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse, label: "AllowFrameReordering")
 
-        // Force 1-in-1-out: zero encoder lookahead so every submitted frame is emitted immediately.
-        setCompressionProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0), label: "MaxFrameDelayCount")
+        // RealTime + no frame reordering is enough to keep the encoder on its low-latency path.
+        // Forcing MaxFrameDelayCount = 0 trips unsupported hardware configurations on some
+        // higher-resolution Apple Silicon HEVC sessions and can stall the whole capture pipeline.
 
         // HEVC Main profile for hardware decode compatibility.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel, label: "ProfileLevel")

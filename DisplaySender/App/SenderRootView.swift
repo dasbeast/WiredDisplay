@@ -57,6 +57,7 @@ struct SenderRootView: View {
     @State private var cursorDatagramQueuedPacketsDropped: UInt64 = 0
     @State private var cursorDatagramPendingPackets: Int = 0
     @State private var cursorDatagramSendErrors: UInt64 = 0
+    @State private var cursorPacketsSentPerSecondText = "-"
     @State private var resolvedStreamingPipelineText = "-"
     @State private var wiredPathSummary = "unknown"
     @State private var wiredWarning = ""
@@ -422,6 +423,7 @@ struct SenderRootView: View {
                         Text("Cursor UDP Queued Packets Dropped: \(cursorDatagramQueuedPacketsDropped)")
                         Text("Cursor UDP Pending Packets: \(cursorDatagramPendingPackets)")
                         Text("Cursor UDP Send Errors: \(cursorDatagramSendErrors)")
+                        Text("Cursor Packets Sent Rate: \(cursorPacketsSentPerSecondText)")
                         Text("Send Rate: \(sentFramesPerSecondText)")
                         Text("Send Throughput: \(sentMegabitsPerSecondText)")
                         Text("Heartbeat RTT: \(heartbeatRoundTripText)")
@@ -576,6 +578,7 @@ struct SenderRootView: View {
         droppedOutboundFrameCount = coordinator.droppedOutboundFrameCount
         lastErrorText = coordinator.lastErrorMessage ?? "-"
         sentFramesPerSecondText = formatRate(coordinator.sentFramesPerSecond, unit: "fps")
+        cursorPacketsSentPerSecondText = formatRate(coordinator.cursorPacketsSentPerSecond, unit: "fps")
         sentMegabitsPerSecondText = formatRate(coordinator.sentMegabitsPerSecond, unit: "Mbps")
         heartbeatRoundTripText = formatRate(coordinator.heartbeatRoundTripMilliseconds, unit: "ms")
         estimatedDisplayLatencyText = formatRate(coordinator.estimatedDisplayLatencyMilliseconds, unit: "ms")

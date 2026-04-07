@@ -22,6 +22,7 @@ struct ReceiverMenuBarView: View {
                     Text("Peer: \(appController.peerNameText)")
                     Text("Frames: \(appController.receivedFrameCount)")
                     Text("Rate: \(appController.receivedFramesPerSecondText)")
+                    Text("Cursor RX Rate: \(appController.cursorPacketsReceivedPerSecondText)")
                     Text("Throughput: \(appController.receivedMegabitsPerSecondText)")
                 }
                 .font(.subheadline)
