@@ -52,6 +52,9 @@ enum NetworkProtocol {
     static let showSenderCursorFallbackWhileTestingOverlay: Bool = false
     static let useDebugCursorOverlayMarker: Bool = false
     static let enableCursorDebugLogging: Bool = false
+    static let enableTransportDebugLogging: Bool = true
+    static let enableVerboseCursorPacketLogging: Bool = false
+    static let transportTelemetryLogIntervalNanoseconds: UInt64 = 1_000_000_000
     static let videoDatagramChunkPayloadBytes: Int = 1400
     static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 150_000_000
     static let videoDatagramMaxOutstandingFrames: Int = 3
@@ -193,9 +196,8 @@ enum NetworkProtocol {
         requested: VideoTransportMode,
         canAcceptDatagrams: Bool
     ) -> VideoTransportMode {
-        if requested == .udp && canAcceptDatagrams {
-            return .udp
-        }
+        _ = requested
+        _ = canAcceptDatagrams
         return .tcp
     }
 

@@ -10,6 +10,10 @@ final class TransportService {
         let pendingAudioFrames: Int
         let pendingVideoFrames: Int
         let networkInFlightCount: Int
+        let sentControlFrames: UInt64
+        let sentCursorFrames: UInt64
+        let sentAudioFrames: UInt64
+        let sentVideoFrames: UInt64
         let droppedVideoFrames: UInt64
         let droppedCursorFrames: UInt64
     }
@@ -42,8 +46,18 @@ final class TransportService {
     private var networkInFlightCount = 0
     private let maxNetworkInFlight = 2
     private var droppedCursorStateCount: UInt64 = 0
+    private var sentControlFrameCount: UInt64 = 0
+    private var sentCursorFrameCount: UInt64 = 0
+    private var sentAudioFrameCount: UInt64 = 0
+    private var sentVideoFrameCount: UInt64 = 0
     private(set) var droppedOutboundFrameCount: UInt64 = 0 {
-        didSet { onDroppedFrameCountChange?(droppedOutboundFrameCount) }
+        didSet {
+            onDroppedFrameCountChange?(droppedOutboundFrameCount)
+            if NetworkProtocol.enableTransportDebugLogging,
+               droppedOutboundFrameCount != oldValue {
+                print("[Transport] dropped video frames total=\(droppedOutboundFrameCount)")
+            }
+        }
     }
 
     var onStateChange: ((Bool) -> Void)?
@@ -263,6 +277,10 @@ final class TransportService {
         awaitingKeyFrameAfterDrop = false
         networkInFlightCount = 0
         droppedCursorStateCount = 0
+        sentControlFrameCount = 0
+        sentCursorFrameCount = 0
+        sentAudioFrameCount = 0
+        sentVideoFrameCount = 0
         droppedOutboundFrameCount = 0
 
         isConnected = false
@@ -313,6 +331,9 @@ final class TransportService {
                 awaitingKeyFrameAfterDrop = true
             } else if frame.kind == .cursor {
                 droppedCursorStateCount += 1
+                if NetworkProtocol.enableTransportDebugLogging {
+                    print("[Transport] dropped cursor update total=\(droppedCursorStateCount)")
+                }
                 if droppedCursorStateCount == 1 || droppedCursorStateCount.isMultiple(of: 60) {
                     print(
                         "[Transport] Dropped \(droppedCursorStateCount) cursor updates " +
@@ -419,6 +440,7 @@ final class TransportService {
             while !pendingOutboundFrames.isEmpty && networkInFlightCount < maxNetworkInFlight {
                 guard let frame = dequeueNextOutboundFrame() else { break }
                 networkInFlightCount += 1
+                recordSentFrame(frame.kind)
                 connection.send(content: frame.data, completion: .contentProcessed { [weak self] error in
                     guard let self else { return }
                     self.networkInFlightCount -= 1
@@ -440,6 +462,19 @@ final class TransportService {
         }
 
         return pendingOutboundFrames.removeFirst()
+    }
+
+    private func recordSentFrame(_ kind: OutboundFrameKind) {
+        switch kind {
+        case .control:
+            sentControlFrameCount += 1
+        case .cursor:
+            sentCursorFrameCount += 1
+        case .audio:
+            sentAudioFrameCount += 1
+        case .video:
+            sentVideoFrameCount += 1
+        }
     }
 
     private func receiveNextChunk(on connection: NWConnection) {
@@ -547,6 +582,10 @@ final class TransportService {
             pendingAudioFrames: pendingAudioFrames,
             pendingVideoFrames: pendingVideoFrames,
             networkInFlightCount: networkInFlightCount,
+            sentControlFrames: sentControlFrameCount,
+            sentCursorFrames: sentCursorFrameCount,
+            sentAudioFrames: sentAudioFrameCount,
+            sentVideoFrames: sentVideoFrameCount,
             droppedVideoFrames: droppedOutboundFrameCount,
             droppedCursorFrames: droppedCursorStateCount
         )
@@ -722,6 +761,16 @@ final class VideoDatagramTransportService {
 
 /// UDP transport for low-latency cursor motion delivery.
 final class CursorDatagramTransportService {
+    struct DebugSnapshot {
+        let sentMotionPackets: UInt64
+        let sentQueuedPackets: UInt64
+        let pendingPackets: Int
+        let networkInFlightCount: Int
+        let droppedQueuedPackets: UInt64
+        let sendErrors: UInt64
+        let receivedStateTransitions: UInt64
+    }
+
     private let queue = DispatchQueue(label: "wireddisplay.sender.cursorDatagram")
 
     private(set) var isConnected = false
@@ -733,6 +782,11 @@ final class CursorDatagramTransportService {
     private var networkInFlightCount = 0
     private let maxNetworkInFlight = 4
     private let maxPendingPackets = 4
+    private var sentMotionPacketCount: UInt64 = 0
+    private var sentQueuedPacketCount: UInt64 = 0
+    private var droppedQueuedPacketCount: UInt64 = 0
+    private var sendErrorCount: UInt64 = 0
+    private var stateTransitionCount: UInt64 = 0
 
     var onStateChange: ((Bool) -> Void)?
     var onError: ((Error) -> Void)?
@@ -760,14 +814,17 @@ final class CursorDatagramTransportService {
             switch state {
             case .ready:
                 self.isConnected = true
+                self.stateTransitionCount += 1
                 self.onStateChange?(true)
                 self.flushPendingPacketIfPossible()
             case .failed(let error):
                 self.isConnected = false
+                self.stateTransitionCount += 1
                 self.onStateChange?(false)
                 self.onError?(error)
             case .cancelled:
                 self.isConnected = false
+                self.stateTransitionCount += 1
                 self.onStateChange?(false)
             default:
                 break
@@ -785,6 +842,11 @@ final class CursorDatagramTransportService {
         isConnected = false
         pendingPackets.removeAll(keepingCapacity: false)
         networkInFlightCount = 0
+        sentMotionPacketCount = 0
+        sentQueuedPacketCount = 0
+        droppedQueuedPacketCount = 0
+        sendErrorCount = 0
+        stateTransitionCount = 0
         onStateChange?(false)
     }
 
@@ -813,6 +875,19 @@ final class CursorDatagramTransportService {
             appearance: nil
         )
         let packet = BinaryCursorWire.serialize(cursorState: motionState)
+        sentMotionPacketCount += 1
+        if NetworkProtocol.enableVerboseCursorPacketLogging {
+            print(
+                String(
+                    format: "[CursorDatagram] motion packet #%llu sent visible=%@ ownership=%@ x=%.4f y=%.4f",
+                    sentMotionPacketCount,
+                    motionState.isVisible ? "yes" : "no",
+                    motionState.ownershipIntent.rawValue,
+                    motionState.normalizedX,
+                    motionState.normalizedY
+                )
+            )
+        }
 
         // Cursor motion is latency-sensitive and safe to drop, so bypass the completion-gated queue.
         connection.send(content: packet, completion: .idempotent)
@@ -842,10 +917,18 @@ final class CursorDatagramTransportService {
 
             while pendingPackets.count >= maxPendingPackets {
                 pendingPackets.removeFirst()
+                droppedQueuedPacketCount += 1
+                if NetworkProtocol.enableTransportDebugLogging {
+                    print("[CursorDatagram] dropped queued cursor packet total=\(droppedQueuedPacketCount)")
+                }
             }
 
             pendingPackets.append(encoded)
         } catch {
+            sendErrorCount += 1
+            if NetworkProtocol.enableTransportDebugLogging {
+                print("[CursorDatagram] encode/send preparation error total=\(sendErrorCount): \(error)")
+            }
             onError?(error)
         }
     }
@@ -857,16 +940,35 @@ final class CursorDatagramTransportService {
         while !pendingPackets.isEmpty && networkInFlightCount < maxNetworkInFlight {
             let packet = pendingPackets.removeFirst()
             networkInFlightCount += 1
+            sentQueuedPacketCount += 1
             connection.send(content: packet, completion: .contentProcessed { [weak self] error in
                 guard let self else { return }
                 self.queue.async {
                     self.networkInFlightCount -= 1
                     if let error {
+                        self.sendErrorCount += 1
+                        if NetworkProtocol.enableTransportDebugLogging {
+                            print("[CursorDatagram] send error total=\(self.sendErrorCount): \(error)")
+                        }
                         self.onError?(error)
                     }
                     self.flushPendingPacketIfPossible()
                 }
             })
+        }
+    }
+
+    func debugSnapshot() -> DebugSnapshot {
+        queue.sync {
+            DebugSnapshot(
+                sentMotionPackets: sentMotionPacketCount,
+                sentQueuedPackets: sentQueuedPacketCount,
+                pendingPackets: pendingPackets.count,
+                networkInFlightCount: networkInFlightCount,
+                droppedQueuedPackets: droppedQueuedPacketCount,
+                sendErrors: sendErrorCount,
+                receivedStateTransitions: stateTransitionCount
+            )
         }
     }
 }

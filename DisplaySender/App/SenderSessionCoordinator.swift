@@ -79,6 +79,14 @@ final class SenderSessionCoordinator {
     private(set) var receiveToRenderLatencyMilliseconds: Double? { didSet { onChange?() } }
     private(set) var requestedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp { didSet { onChange?() } }
     private(set) var negotiatedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp { didSet { onChange?() } }
+    private(set) var tcpVideoFramesSent: UInt64 = 0 { didSet { onChange?() } }
+    private(set) var tcpVideoFramesDropped: UInt64 = 0 { didSet { onChange?() } }
+    private(set) var tcpCursorFramesSent: UInt64 = 0 { didSet { onChange?() } }
+    private(set) var cursorDatagramMotionPacketsSent: UInt64 = 0 { didSet { onChange?() } }
+    private(set) var cursorDatagramQueuedPacketsSent: UInt64 = 0 { didSet { onChange?() } }
+    private(set) var cursorDatagramQueuedPacketsDropped: UInt64 = 0 { didSet { onChange?() } }
+    private(set) var cursorDatagramPendingPackets: Int = 0 { didSet { onChange?() } }
+    private(set) var cursorDatagramSendErrors: UInt64 = 0 { didSet { onChange?() } }
     private(set) var streamingPipelinePreference: NetworkProtocol.StreamingPipelinePreference = .automatic { didSet { onChange?() } }
     private(set) var resolvedStreamingPipelineMode: NetworkProtocol.StreamingPipelineMode =
         NetworkProtocol.resolvedStreamingPipelineMode(for: .automatic) { didSet { onChange?() } }
@@ -114,6 +122,7 @@ final class SenderSessionCoordinator {
 
     private var heartbeatTimer: Timer?
     private var heartbeatTimeoutTimer: Timer?
+    private var transportTelemetryTimer: Timer?
     private var lastInboundHeartbeatAt: Date?
     private var estimatedReceiverClockOffsetNanoseconds: Int64?
     private var lastRecoveryKeyFrameRequestAt: Date?
@@ -159,6 +168,7 @@ final class SenderSessionCoordinator {
     private var cursorPacketSentCount: UInt64 = 0
     private var cursorPacketSuppressedCount: UInt64 = 0
     private var lastCursorTelemetryLogNanoseconds: UInt64 = 0
+    private var lastTransportTelemetryLogNanoseconds: UInt64 = 0
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -174,6 +184,7 @@ final class SenderSessionCoordinator {
         self.cursorDatagramTransportService = cursorDatagramTransportService
 
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
+        startTransportTelemetryTimer()
 
         let encoder = self.encoderService
         let frameDispatchGate = self.frameDispatchGate
@@ -353,6 +364,7 @@ final class SenderSessionCoordinator {
     }
 
     deinit {
+        transportTelemetryTimer?.invalidate()
         wiredPathMonitor.stop()
     }
 
@@ -366,6 +378,7 @@ final class SenderSessionCoordinator {
         targetWidth: Int = 2560,
         targetHeight: Int = 1440
     ) {
+        _ = videoTransportMode
         desiredHosts = orderedUniqueHosts(
             primaryHost: receiverHost,
             alternateHosts: alternateReceiverHosts
@@ -378,10 +391,13 @@ final class SenderSessionCoordinator {
         self.receiverHost = desiredHosts.first ?? receiverHost
         self.targetWidth = targetWidth
         self.targetHeight = targetHeight
-        requestedVideoTransportMode = videoTransportMode
-        negotiatedVideoTransportMode = videoTransportMode
-        frameDispatchGate.setNegotiatedMode(videoTransportMode)
-        encoderService.setPreferredKeyFrameIntervalFrames(NetworkProtocol.keyFrameIntervalFrames(for: videoTransportMode))
+        let resolvedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp
+        requestedVideoTransportMode = resolvedVideoTransportMode
+        negotiatedVideoTransportMode = resolvedVideoTransportMode
+        frameDispatchGate.setNegotiatedMode(resolvedVideoTransportMode)
+        encoderService.setPreferredKeyFrameIntervalFrames(
+            NetworkProtocol.keyFrameIntervalFrames(for: resolvedVideoTransportMode)
+        )
         sentFrameCount = 0
         droppedOutboundFrameCount = 0
         lastErrorMessage = nil
@@ -400,6 +416,7 @@ final class SenderSessionCoordinator {
         targetUsesHiDPI = true
         awaitingUDPReadyToStart = false
         awaitingFirstRenderedFrame = false
+        refreshTransportTelemetry()
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
         state = .connecting
@@ -575,6 +592,7 @@ final class SenderSessionCoordinator {
         awaitingFirstRenderedFrame = false
         frameDispatchGate.setAwaitingFirstRenderedFrame(false)
         droppedOutboundFrameCount = 0
+        refreshTransportTelemetry()
         outboundWindowStartNanoseconds = nil
         outboundWindowFrameCount = 0
         outboundWindowPayloadBytes = 0
@@ -895,18 +913,16 @@ final class SenderSessionCoordinator {
     }
 
     private func applyNegotiatedVideoTransport(_ videoTransportMode: NetworkProtocol.VideoTransportMode) {
-        negotiatedVideoTransportMode = videoTransportMode
-        frameDispatchGate.setNegotiatedMode(videoTransportMode)
-        encoderService.setPreferredKeyFrameIntervalFrames(NetworkProtocol.keyFrameIntervalFrames(for: videoTransportMode))
-        if videoTransportMode == .udp {
-            if let currentDesiredHost {
-                videoDatagramTransportService.connect(host: currentDesiredHost, port: desiredPort)
-            }
-        } else {
-            awaitingUDPReadyToStart = false
-            awaitingFirstRenderedFrame = false
-            videoDatagramTransportService.disconnect()
-        }
+        let resolvedVideoTransportMode: NetworkProtocol.VideoTransportMode = .tcp
+        _ = videoTransportMode
+        negotiatedVideoTransportMode = resolvedVideoTransportMode
+        frameDispatchGate.setNegotiatedMode(resolvedVideoTransportMode)
+        encoderService.setPreferredKeyFrameIntervalFrames(
+            NetworkProtocol.keyFrameIntervalFrames(for: resolvedVideoTransportMode)
+        )
+        awaitingUDPReadyToStart = false
+        awaitingFirstRenderedFrame = false
+        videoDatagramTransportService.disconnect()
     }
 
     private var currentDesiredHost: String? {
@@ -2075,7 +2091,7 @@ final class SenderSessionCoordinator {
     }
 
     private func emitCursorTelemetryIfNeeded(for displayID: CGDirectDisplayID) {
-        guard NetworkProtocol.enableCursorDebugLogging else { return }
+        guard NetworkProtocol.enableCursorDebugLogging || NetworkProtocol.enableTransportDebugLogging else { return }
 
         let now = DispatchTime.now().uptimeNanoseconds
         if lastCursorTelemetryLogNanoseconds == 0 {
@@ -2085,7 +2101,7 @@ final class SenderSessionCoordinator {
 
         guard now >= (lastCursorTelemetryLogNanoseconds + 1_000_000_000) else { return }
 
-        let snapshot = transportService.debugSnapshot()
+        refreshTransportTelemetry()
         print(
             "[Sender][Cursor] telemetry display \(displayID): " +
             "requests=\(cursorPollRequestCount) " +
@@ -2093,12 +2109,14 @@ final class SenderSessionCoordinator {
             "coalesced=\(cursorPollCoalescedCount) " +
             "sent=\(cursorPacketSentCount) " +
             "suppressed=\(cursorPacketSuppressedCount) " +
-            "queue=\(snapshot.pendingFrames) " +
-            "(video=\(snapshot.pendingVideoFrames), control=\(snapshot.pendingControlFrames), " +
-            "cursor=\(snapshot.pendingCursorFrames), audio=\(snapshot.pendingAudioFrames)) " +
-            "inFlight=\(snapshot.networkInFlightCount) " +
-            "droppedVideo=\(snapshot.droppedVideoFrames) " +
-            "droppedCursor=\(snapshot.droppedCursorFrames)"
+            "tcpVideoSent=\(tcpVideoFramesSent) " +
+            "tcpVideoDropped=\(tcpVideoFramesDropped) " +
+            "tcpCursorSent=\(tcpCursorFramesSent) " +
+            "udpCursorMotion=\(cursorDatagramMotionPacketsSent) " +
+            "udpCursorQueued=\(cursorDatagramQueuedPacketsSent) " +
+            "udpCursorDropped=\(cursorDatagramQueuedPacketsDropped) " +
+            "udpCursorPending=\(cursorDatagramPendingPackets) " +
+            "udpCursorErrors=\(cursorDatagramSendErrors)"
         )
 
         lastCursorTelemetryLogNanoseconds = now
@@ -2107,6 +2125,66 @@ final class SenderSessionCoordinator {
         cursorPollExecutionCount = 0
         cursorPacketSentCount = 0
         cursorPacketSuppressedCount = 0
+    }
+
+    private func startTransportTelemetryTimer() {
+        transportTelemetryTimer?.invalidate()
+        transportTelemetryTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshTransportTelemetry()
+            }
+        }
+    }
+
+    private func refreshTransportTelemetry() {
+        let tcpSnapshot = transportService.debugSnapshot()
+        let cursorSnapshot = cursorDatagramTransportService.debugSnapshot()
+
+        if tcpVideoFramesSent != tcpSnapshot.sentVideoFrames {
+            tcpVideoFramesSent = tcpSnapshot.sentVideoFrames
+        }
+        if tcpVideoFramesDropped != tcpSnapshot.droppedVideoFrames {
+            tcpVideoFramesDropped = tcpSnapshot.droppedVideoFrames
+        }
+        if tcpCursorFramesSent != tcpSnapshot.sentCursorFrames {
+            tcpCursorFramesSent = tcpSnapshot.sentCursorFrames
+        }
+        if cursorDatagramMotionPacketsSent != cursorSnapshot.sentMotionPackets {
+            cursorDatagramMotionPacketsSent = cursorSnapshot.sentMotionPackets
+        }
+        if cursorDatagramQueuedPacketsSent != cursorSnapshot.sentQueuedPackets {
+            cursorDatagramQueuedPacketsSent = cursorSnapshot.sentQueuedPackets
+        }
+        if cursorDatagramQueuedPacketsDropped != cursorSnapshot.droppedQueuedPackets {
+            cursorDatagramQueuedPacketsDropped = cursorSnapshot.droppedQueuedPackets
+        }
+        if cursorDatagramPendingPackets != cursorSnapshot.pendingPackets {
+            cursorDatagramPendingPackets = cursorSnapshot.pendingPackets
+        }
+        if cursorDatagramSendErrors != cursorSnapshot.sendErrors {
+            cursorDatagramSendErrors = cursorSnapshot.sendErrors
+        }
+
+        guard NetworkProtocol.enableTransportDebugLogging else { return }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        if lastTransportTelemetryLogNanoseconds != 0,
+           now < (lastTransportTelemetryLogNanoseconds + NetworkProtocol.transportTelemetryLogIntervalNanoseconds) {
+            return
+        }
+
+        print(
+            "[Sender][Transport] tcp: sent(video=\(tcpSnapshot.sentVideoFrames), control=\(tcpSnapshot.sentControlFrames), " +
+            "cursor=\(tcpSnapshot.sentCursorFrames), audio=\(tcpSnapshot.sentAudioFrames)) " +
+            "pending=\(tcpSnapshot.pendingFrames) " +
+            "inFlight=\(tcpSnapshot.networkInFlightCount) " +
+            "dropped(video=\(tcpSnapshot.droppedVideoFrames), cursor=\(tcpSnapshot.droppedCursorFrames)) | " +
+            "cursor-udp: motion=\(cursorSnapshot.sentMotionPackets) queued=\(cursorSnapshot.sentQueuedPackets) " +
+            "pending=\(cursorSnapshot.pendingPackets) inFlight=\(cursorSnapshot.networkInFlightCount) " +
+            "dropped=\(cursorSnapshot.droppedQueuedPackets) errors=\(cursorSnapshot.sendErrors)"
+        )
+
+        lastTransportTelemetryLogNanoseconds = now
     }
 }
 

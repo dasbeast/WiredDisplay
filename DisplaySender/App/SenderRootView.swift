@@ -49,6 +49,14 @@ struct SenderRootView: View {
     @State private var endpointSummary = "-"
     @State private var negotiatedResolutionText = "-"
     @State private var videoTransportText = "TCP"
+    @State private var tcpVideoFramesSent: UInt64 = 0
+    @State private var tcpVideoFramesDropped: UInt64 = 0
+    @State private var tcpCursorFramesSent: UInt64 = 0
+    @State private var cursorDatagramMotionPacketsSent: UInt64 = 0
+    @State private var cursorDatagramQueuedPacketsSent: UInt64 = 0
+    @State private var cursorDatagramQueuedPacketsDropped: UInt64 = 0
+    @State private var cursorDatagramPendingPackets: Int = 0
+    @State private var cursorDatagramSendErrors: UInt64 = 0
     @State private var resolvedStreamingPipelineText = "-"
     @State private var wiredPathSummary = "unknown"
     @State private var wiredWarning = ""
@@ -371,15 +379,10 @@ struct SenderRootView: View {
                 }
                 .keyboardShortcut(.cancelAction)
             } else {
-                Button("Connect & Stream TCP") {
-                    connect(using: .tcp)
+                Button("Connect & Stream") {
+                    connect()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!canConnect)
-
-                Button("Connect & Stream UDP") {
-                    connect(using: .udp)
-                }
                 .disabled(!canConnect)
             }
         }
@@ -411,6 +414,14 @@ struct SenderRootView: View {
                         Text("Connection: \(connectionText)")
                         Text("Sent Frames: \(sentFrameCount)")
                         Text("Dropped Outbound Frames: \(droppedOutboundFrameCount)")
+                        Text("TCP Video Frames Sent: \(tcpVideoFramesSent)")
+                        Text("TCP Video Frames Dropped: \(tcpVideoFramesDropped)")
+                        Text("TCP Cursor Frames Sent: \(tcpCursorFramesSent)")
+                        Text("Cursor UDP Motion Packets Sent: \(cursorDatagramMotionPacketsSent)")
+                        Text("Cursor UDP Queued Packets Sent: \(cursorDatagramQueuedPacketsSent)")
+                        Text("Cursor UDP Queued Packets Dropped: \(cursorDatagramQueuedPacketsDropped)")
+                        Text("Cursor UDP Pending Packets: \(cursorDatagramPendingPackets)")
+                        Text("Cursor UDP Send Errors: \(cursorDatagramSendErrors)")
                         Text("Send Rate: \(sentFramesPerSecondText)")
                         Text("Send Throughput: \(sentMegabitsPerSecondText)")
                         Text("Heartbeat RTT: \(heartbeatRoundTripText)")
@@ -458,7 +469,7 @@ struct SenderRootView: View {
         resolvedConnectionTarget() != nil
     }
 
-    private func connect(using videoTransportMode: NetworkProtocol.VideoTransportMode) {
+    private func connect() {
         guard let target = resolvedConnectionTarget() else { return }
         let alternateHosts: [String]
         if let receiver = selectedReceiver() {
@@ -476,7 +487,7 @@ struct SenderRootView: View {
             receiverHost: target.host,
             alternateReceiverHosts: alternateHosts,
             port: target.port,
-            videoTransportMode: videoTransportMode
+            videoTransportMode: .tcp
         )
         refreshFromCoordinator()
     }
@@ -574,6 +585,14 @@ struct SenderRootView: View {
 
         endpointSummary = coordinator.configuredEndpointSummary
         videoTransportText = coordinator.negotiatedVideoTransportMode.rawValue.uppercased()
+        tcpVideoFramesSent = coordinator.tcpVideoFramesSent
+        tcpVideoFramesDropped = coordinator.tcpVideoFramesDropped
+        tcpCursorFramesSent = coordinator.tcpCursorFramesSent
+        cursorDatagramMotionPacketsSent = coordinator.cursorDatagramMotionPacketsSent
+        cursorDatagramQueuedPacketsSent = coordinator.cursorDatagramQueuedPacketsSent
+        cursorDatagramQueuedPacketsDropped = coordinator.cursorDatagramQueuedPacketsDropped
+        cursorDatagramPendingPackets = coordinator.cursorDatagramPendingPackets
+        cursorDatagramSendErrors = coordinator.cursorDatagramSendErrors
         resolvedStreamingPipelineText = coordinator.resolvedStreamingPipelineMode.label
         if selectedDisplayResolutionPreference != coordinator.displayResolutionPreference {
             selectedDisplayResolutionPreference = coordinator.displayResolutionPreference
@@ -655,7 +674,8 @@ struct SenderRootView: View {
         switch coordinator.state {
         case .running, .connected, .waitingForAck, .connecting:
             let path = coordinator.wiredPathAvailable ? "Wired" : "Wireless"
-            return "\(path) via \(videoTransportText)"
+            let cursorPath = coordinator.useReceiverSideCursorOverlay ? " + Cursor UDP" : ""
+            return "\(path) via \(videoTransportText)\(cursorPath)"
         case .failed:
             return wiredPathSummary == "available" ? "Wired path available" : "Wireless or no wired path detected"
         case .idle:

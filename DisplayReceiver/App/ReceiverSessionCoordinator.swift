@@ -267,6 +267,7 @@ final class ReceiverSessionCoordinator {
     func stopListening() {
         frameDecodePipeline.reset()
         audioPlaybackService.stop()
+        RenderFrameStore.shared.reset()
         ReceiverCursorStore.shared.reset()
         cursorPacketRelay.reset()
         resetCursorOverlayState()

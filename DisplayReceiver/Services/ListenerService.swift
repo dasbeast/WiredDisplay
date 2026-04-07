@@ -308,6 +308,11 @@ final class VideoDatagramListenerService {
 
     private var listener: NWListener?
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
+    private var receivedCursorPacketCount: UInt64 = 0
+    private var receivedVideoDatagramCount: UInt64 = 0
+    private var assembledVideoFrameCount: UInt64 = 0
+    private var rejectedDatagramCount: UInt64 = 0
+    private var lastTelemetryLogNanoseconds: UInt64 = 0
 
     var onStateChange: ((Bool) -> Void)?
     var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data?, Data) -> Void)?
@@ -363,6 +368,11 @@ final class VideoDatagramListenerService {
         listener?.cancel()
         listener = nil
         reassembler.reset()
+        receivedCursorPacketCount = 0
+        receivedVideoDatagramCount = 0
+        assembledVideoFrameCount = 0
+        rejectedDatagramCount = 0
+        lastTelemetryLogNanoseconds = 0
         isListening = false
         onStateChange?(false)
     }
@@ -403,11 +413,14 @@ final class VideoDatagramListenerService {
 
     private func handle(datagram: Data) {
         if let cursorState = BinaryCursorWire.deserialize(data: datagram) {
+            receivedCursorPacketCount += 1
+            logTelemetryIfNeeded()
             onCursorState?(cursorState)
             return
         }
 
         if let chunk = VideoDatagramWire.deserialize(datagram: datagram) {
+            receivedVideoDatagramCount += 1
             let now = DispatchTime.now().uptimeNanoseconds
             guard let frameData = reassembler.insert(
                 frameIndex: chunk.frameIndex,
@@ -420,9 +433,13 @@ final class VideoDatagramListenerService {
             }
 
             guard let result = BinaryFrameWire.deserialize(data: frameData) else {
+                rejectedDatagramCount += 1
+                logTelemetryIfNeeded()
                 return
             }
 
+            assembledVideoFrameCount += 1
+            logTelemetryIfNeeded()
             onBinaryVideoFrame?(result.header, result.vps, result.sps, result.pps, result.payload)
             return
         }
@@ -434,10 +451,32 @@ final class VideoDatagramListenerService {
 
         do {
             let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
+            receivedCursorPacketCount += 1
+            logTelemetryIfNeeded()
             onCursorState?(cursorState)
         } catch {
+            rejectedDatagramCount += 1
+            logTelemetryIfNeeded()
             onError?(error)
         }
+    }
+
+    private func logTelemetryIfNeeded() {
+        guard NetworkProtocol.enableTransportDebugLogging else { return }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        if lastTelemetryLogNanoseconds != 0,
+           now < (lastTelemetryLogNanoseconds + NetworkProtocol.transportTelemetryLogIntervalNanoseconds) {
+            return
+        }
+
+        print(
+            "[Receiver][UDP] cursorPackets=\(receivedCursorPacketCount) " +
+            "videoDatagrams=\(receivedVideoDatagramCount) " +
+            "assembledFrames=\(assembledVideoFrameCount) " +
+            "rejected=\(rejectedDatagramCount)"
+        )
+        lastTelemetryLogNanoseconds = now
     }
 }
 

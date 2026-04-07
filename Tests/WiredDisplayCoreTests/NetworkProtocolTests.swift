@@ -32,14 +32,18 @@ final class NetworkProtocolTests: XCTestCase {
         XCTAssertEqual(bitrate, NetworkProtocol.maxVideoBitrateBps)
     }
 
-    func testNegotiatedVideoTransportFallsBackToTCPWhenUDPUnavailable() {
+    func testNegotiatedVideoTransportAlwaysResolvesToTCP() {
         XCTAssertEqual(
             NetworkProtocol.negotiatedVideoTransport(requested: .udp, canAcceptDatagrams: false),
             .tcp
         )
         XCTAssertEqual(
             NetworkProtocol.negotiatedVideoTransport(requested: .udp, canAcceptDatagrams: true),
-            .udp
+            .tcp
+        )
+        XCTAssertEqual(
+            NetworkProtocol.negotiatedVideoTransport(requested: .tcp, canAcceptDatagrams: true),
+            .tcp
         )
     }
 

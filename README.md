@@ -14,8 +14,9 @@ The top-level `WiredDisplay` target is currently just a placeholder shell. The a
 - Receiver is a menu bar app.
 - Receiver advertises itself on the local network with Bonjour.
 - Sender discovers receivers automatically and lets you choose one from the UI.
-- Sender can stream video over `TCP` or `UDP`.
+- Sender streams video over `TCP`.
 - Control messages stay on `TCP`.
+- Cursor motion may use a dedicated `UDP` side channel when receiver-side cursor overlay is enabled.
 - Audio is captured on the sender and played by the receiver app over `TCP`.
 - Receiver automatically opens the stream window and enters full screen when a session starts.
 - Receiver prevents idle sleep and screen saver activation while running.
@@ -35,15 +36,12 @@ The top-level `WiredDisplay` target is currently just a placeholder shell. The a
 ## Transport Modes
 
 - `TCP`
-  - Baseline path.
   - Carries control traffic, video, and audio.
-  - Usually the most stable mode.
+  - Reference and only supported video path.
 
-- `UDP`
-  - Intended for lower latency video.
-  - Video frames are packetized into datagrams and reassembled on the receiver.
-  - Control traffic remains on `TCP`.
-  - Audio still remains on `TCP`.
+- `UDP Cursor Sidecar`
+  - Used only for low-latency cursor motion when receiver-side cursor overlay is enabled.
+  - Cursor appearance and control still remain on the main control path as needed.
 
 ## Repository Layout
 
@@ -98,7 +96,7 @@ For tagged release automation and the required GitHub secrets, see [`docs/ci-cd.
 2. Confirm it appears in the menu bar and shows as discoverable.
 3. Launch `DisplaySender`.
 4. Pick the receiver from the discovered list.
-5. Choose `Connect & Stream TCP` or `Connect & Stream UDP`.
+5. Choose `Connect & Stream`.
 6. Choose the preset and pipeline that fit the sender Mac and network path.
 7. After the session starts, watch the sender stats for FPS and latency.
 
@@ -106,7 +104,7 @@ For tagged release automation and the required GitHub secrets, see [`docs/ci-cd.
 
 - The project uses private `CGVirtualDisplay` APIs.
 - Effective latency and sharpness still vary by sender Mac, selected preset, and chosen network path.
-- `UDP` video is available, but `TCP` is still the reference path for stability.
+- Video transport is `TCP` only. The remaining `UDP` path is reserved for cursor motion telemetry/overlay.
 - Audio playback is app-level audio forwarding. It does not create a new macOS system output device in Sound settings.
 
 ## Useful Files
