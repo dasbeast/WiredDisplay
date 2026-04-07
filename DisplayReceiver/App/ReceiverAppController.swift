@@ -102,7 +102,11 @@ final class ReceiverAppController: ObservableObject {
         )
         refreshAdvertisementState()
         refreshFromCoordinator()
-        presentReceiverWindow(fullScreen: false)
+        // Defer past the SwiftUI @StateObject initialization cycle so that
+        // the onVisibilityChange @Published write doesn't land during a view update.
+        Task { @MainActor in
+            self.presentReceiverWindow(fullScreen: false)
+        }
     }
 
     func presentReceiverWindow(fullScreen: Bool) {
