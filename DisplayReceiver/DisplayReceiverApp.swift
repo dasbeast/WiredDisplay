@@ -4,6 +4,7 @@ import SwiftUI
 
 final class DisplayReceiverAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
         ApplicationInstallPrompter.promptToMoveToApplicationsIfNeeded(appName: "DisplayReceiver")
     }
 

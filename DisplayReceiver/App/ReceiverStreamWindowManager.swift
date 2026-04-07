@@ -14,7 +14,6 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         let window = ensureWindow(appController: appController)
         wantsFullScreenPresentation = enterFullScreen
         prepareWindowForPresentation(window, enterFullScreen: enterFullScreen)
-        NSApp.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeMain()
@@ -32,12 +31,10 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
             window.toggleFullScreen(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 self.window?.orderOut(nil)
-                NSApp.setActivationPolicy(.accessory)
                 self.onVisibilityChange?(false)
             }
         } else {
             window.orderOut(nil)
-            NSApp.setActivationPolicy(.accessory)
             onVisibilityChange?(false)
         }
     }
@@ -55,7 +52,6 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         wantsFullScreenPresentation = false
         setCursorHidden(false)
-        NSApp.setActivationPolicy(.accessory)
         onVisibilityChange?(false)
     }
 
@@ -72,9 +68,6 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
-        if !wantsFullScreenPresentation {
-            NSApp.setActivationPolicy(.accessory)
-        }
         onVisibilityChange?(window?.isVisible ?? false)
     }
 
