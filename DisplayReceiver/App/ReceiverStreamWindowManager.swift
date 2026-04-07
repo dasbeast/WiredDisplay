@@ -71,10 +71,6 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         onVisibilityChange?(window?.isVisible ?? false)
     }
 
-    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
-        [.fullScreen, .hideMenuBar, .hideDock, .disableMenuBarTransparency]
-    }
-
     private func ensureWindow(appController: ReceiverAppController) -> NSWindow {
         if let window, let hostingController {
             hostingController.rootView = ReceiverRootView(appController: appController)
@@ -86,7 +82,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         let initialFrame = preferredWindowFrame()
         let window = NSWindow(
             contentRect: initialFrame,
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -95,8 +91,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         window.titlebarAppearsTransparent = false
         window.isMovableByWindowBackground = true
         window.acceptsMouseMovedEvents = true
-        window.collectionBehavior = [.fullScreenPrimary, .fullScreenDisallowsTiling, .managed]
-        window.toolbar = NSToolbar()
+        window.collectionBehavior = [.fullScreenPrimary]
         window.contentViewController = hostingController
         window.delegate = self
         window.center()
