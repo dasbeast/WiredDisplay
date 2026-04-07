@@ -460,12 +460,12 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             logCursorVisibilityIfNeeded(true, detail: usingSystemCursorMirror ? "system-mirror" : "overlay-fallback")
             let cursorPoint = CGPoint(
                 x: normalizedPosition.x * bounds.width,
-                y: normalizedPosition.y * bounds.height
+                y: (1.0 - normalizedPosition.y) * bounds.height
             )
             let hiddenCursorNormalizedPosition = clampedHiddenCursorPosition(for: normalizedPosition)
             let hiddenCursorPoint = CGPoint(
                 x: hiddenCursorNormalizedPosition.x * bounds.width,
-                y: hiddenCursorNormalizedPosition.y * bounds.height
+                y: (1.0 - hiddenCursorNormalizedPosition.y) * bounds.height
             )
 
             let presentationMode = usingSystemCursorMirror ? "system-mirror" : "overlay-fallback"
@@ -1625,9 +1625,10 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             )
 
             let contentMinX = -contentScale.x
+            let contentMinY = -contentScale.y
             let contentMaxY = contentScale.y
             let hotspotClipX = contentMinX + Float(cursorState.normalizedX) * (contentScale.x * 2.0)
-            let hotspotClipY = contentMaxY - Float(cursorState.normalizedY) * (contentScale.y * 2.0)
+            let hotspotClipY = contentMinY + Float(cursorState.normalizedY) * (contentScale.y * 2.0)
 
             let drawableWidth = Float(drawableSize.width)
             let drawableHeight = Float(drawableSize.height)
