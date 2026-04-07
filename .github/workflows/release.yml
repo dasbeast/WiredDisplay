@@ -50,6 +50,55 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Resolve release version
+        shell: bash
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          sender_version="$(
+            xcodebuild \
+              -project WiredDisplay.xcodeproj \
+              -scheme DisplaySender \
+              -configuration Release \
+              -showBuildSettings \
+            | awk -F' = ' '$1 ~ /MARKETING_VERSION$/ { print $2; exit }'
+          )"
+          receiver_version="$(
+            xcodebuild \
+              -project WiredDisplay.xcodeproj \
+              -scheme DisplayReceiver \
+              -configuration Release \
+              -showBuildSettings \
+            | awk -F' = ' '$1 ~ /MARKETING_VERSION$/ { print $2; exit }'
+          )"
+
+          if [[ -z "$sender_version" || -z "$receiver_version" ]]; then
+            echo "Unable to resolve MARKETING_VERSION for one or both release targets." >&2
+            exit 1
+          fi
+
+          if [[ "$sender_version" != "$receiver_version" ]]; then
+            echo "DisplaySender and DisplayReceiver marketing versions do not match:" >&2
+            echo "  DisplaySender:   $sender_version" >&2
+            echo "  DisplayReceiver: $receiver_version" >&2
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [[ "$sender_version" != "$tag_version" ]]; then
+              echo "Tag version does not match app version:" >&2
+              echo "  Tag:            $tag_version" >&2
+              echo "  App version:    $sender_version" >&2
+              exit 1
+            fi
+          fi
+
+          echo "RELEASE_VERSION=$sender_version" >> "$GITHUB_ENV"
+          rm -rf release
+          mkdir -p release
+
       - name: Validate required release secrets
         shell: bash
         env:
@@ -166,16 +215,37 @@ jobs:
       - name: Release DisplayReceiver
         run: ./scripts/release_displayreceiver.sh
 
+      - name: Publish website homepage
+        shell: bash
+        run: |
+          REMOTE_TARGET="$WDISPLAY_SSH_USER@$WDISPLAY_SSH_HOST"
+          SSH_OPTIONS=()
+
+          if [[ -n "${WDISPLAY_SSH_KEY_FILE:-}" ]]; then
+            SSH_OPTIONS+=(-i "$WDISPLAY_SSH_KEY_FILE")
+          fi
+
+          scp "${SSH_OPTIONS[@]}" website/index.html "$REMOTE_TARGET:$WDISPLAY_REMOTE_DIR/index.html"
+
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wireddisplay-release-${{ github.ref_name }}
-          path: release/**
+          name: wireddisplay-release-v${{ env.RELEASE_VERSION }}
+          path: |
+            website/index.html
+            release/DisplaySender-${{ env.RELEASE_VERSION }}/DisplaySender-${{ env.RELEASE_VERSION }}.zip
+            release/DisplaySender-${{ env.RELEASE_VERSION }}/appcast.xml
+            release/DisplayReceiver-${{ env.RELEASE_VERSION }}/DisplayReceiver-${{ env.RELEASE_VERSION }}.zip
+            release/DisplayReceiver-${{ env.RELEASE_VERSION }}/${{ env.WDISPLAY_RECEIVER_APPCAST_FILENAME || 'DisplayReceiver-appcast.xml' }}
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          overwrite_files: true
+          tag_name: v${{ env.RELEASE_VERSION }}
           files: |
-            release/**/*.zip
-            release/**/*.xml
+            release/DisplaySender-${{ env.RELEASE_VERSION }}/DisplaySender-${{ env.RELEASE_VERSION }}.zip
+            release/DisplaySender-${{ env.RELEASE_VERSION }}/appcast.xml
+            release/DisplayReceiver-${{ env.RELEASE_VERSION }}/DisplayReceiver-${{ env.RELEASE_VERSION }}.zip
+            release/DisplayReceiver-${{ env.RELEASE_VERSION }}/${{ env.WDISPLAY_RECEIVER_APPCAST_FILENAME || 'DisplayReceiver-appcast.xml' }}

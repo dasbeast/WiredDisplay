@@ -4,6 +4,7 @@ import Foundation
 struct FrameMetadata: Codable, Sendable {
     let frameIndex: UInt64
     let timestampNanoseconds: UInt64
+    let encodeCompleteTimestampNanoseconds: UInt64?
     let width: Int
     let height: Int
     let isKeyFrame: Bool
@@ -11,12 +12,14 @@ struct FrameMetadata: Codable, Sendable {
     init(
         frameIndex: UInt64,
         timestampNanoseconds: UInt64,
+        encodeCompleteTimestampNanoseconds: UInt64? = nil,
         width: Int,
         height: Int,
         isKeyFrame: Bool
     ) {
         self.frameIndex = frameIndex
         self.timestampNanoseconds = timestampNanoseconds
+        self.encodeCompleteTimestampNanoseconds = encodeCompleteTimestampNanoseconds
         self.width = width
         self.height = height
         self.isKeyFrame = isKeyFrame

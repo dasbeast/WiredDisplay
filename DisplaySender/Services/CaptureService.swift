@@ -7,6 +7,13 @@ import ScreenCaptureKit
 /// Capture pipeline using SCStream for continuous screen capture.
 /// Can target a specific display (e.g. the virtual extended display).
 final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
+    private enum ProcessingBacklog {
+        static let maxPendingScreenSamples = 2
+        static let lagWarningNanoseconds: UInt64 = 20_000_000
+        static let frameGapWarningNanoseconds: UInt64 = 500_000_000
+        static let logIntervalNanoseconds: UInt64 = 30_000_000_000
+    }
+
     private(set) var isCapturing = false
 
     private var stream: SCStream?
@@ -14,6 +21,16 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     private var forceNextKeyFrame = false
     private var audioPacketIndex: UInt64 = 0
     private let captureQueue = DispatchQueue(label: "wireddisplay.sender.capture", qos: .userInteractive)
+    private let screenProcessingQueue = DispatchQueue(label: "wireddisplay.sender.capture.screen", qos: .userInitiated)
+    private let stateLock = NSLock()
+    private var lastScreenFrameTimestampNanoseconds: UInt64?
+    private var lastScreenFrameGapWarningTimestampNanoseconds: UInt64?
+    private var lastIncompleteScreenFrameLogTimestampNanoseconds: UInt64?
+    private var lastScreenProcessingLagWarningTimestampNanoseconds: UInt64?
+    private var lastScreenProcessingDurationWarningTimestampNanoseconds: UInt64?
+    private var pendingScreenSamples = 0
+    private var droppedScreenSamples: UInt64 = 0
+    private var captureGeneration: UInt64 = 0
     private let outputAudioFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16,
         sampleRate: NetworkProtocol.audioSampleRateHz,
@@ -34,15 +51,26 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         width: Int,
         height: Int,
         framesPerSecond: Int = 60,
-        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode = .adaptiveUpscale
+        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode = .adaptiveUpscale,
+        showsCursor: Bool = true
     ) {
         stopCapture()
 
         isCapturing = true
+        stateLock.lock()
         forceNextKeyFrame = true
         audioPacketIndex = 0
+        captureGeneration &+= 1
+        pendingScreenSamples = 0
+        droppedScreenSamples = 0
+        lastScreenProcessingLagWarningTimestampNanoseconds = nil
+        lastScreenProcessingDurationWarningTimestampNanoseconds = nil
+        stateLock.unlock()
         audioConverter = nil
         audioConverterSourceSignature = nil
+        lastScreenFrameTimestampNanoseconds = nil
+        lastScreenFrameGapWarningTimestampNanoseconds = nil
+        lastIncompleteScreenFrameLogTimestampNanoseconds = nil
 
         if NetworkProtocol.forceSyntheticCaptureForDiagnostics {
             startSyntheticCapture(width: width, height: height, framesPerSecond: framesPerSecond)
@@ -55,7 +83,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
                     width: width,
                     height: height,
                     framesPerSecond: framesPerSecond,
-                    streamingPipelineMode: streamingPipelineMode
+                    streamingPipelineMode: streamingPipelineMode,
+                    showsCursor: showsCursor
                 )
             } catch {
                 print("[CaptureService] SCStream failed: \(error). Falling back to synthetic capture.")
@@ -67,6 +96,9 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stopCapture() {
         isCapturing = false
+        lastScreenFrameTimestampNanoseconds = nil
+        lastScreenFrameGapWarningTimestampNanoseconds = nil
+        lastIncompleteScreenFrameLogTimestampNanoseconds = nil
 
         if let stream {
             self.stream = nil
@@ -85,7 +117,8 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         width: Int,
         height: Int,
         framesPerSecond: Int,
-        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode
+        streamingPipelineMode: NetworkProtocol.StreamingPipelineMode,
+        showsCursor: Bool
     ) async throws {
         let available = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
 
@@ -164,6 +197,9 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
             "scale=\(String(format: "%.2f", captureScale)) -> pixels=\(captureWidthPixels)x\(captureHeightPixels) " +
             "(requested \(width)x\(height), pipeline \(pipelineDescription))"
         )
+        if !NetworkProtocol.enableSenderAudioCapture {
+            print("[CaptureService] Audio capture disabled for diagnostics")
+        }
 
         let configuration = SCStreamConfiguration()
         configuration.width = captureWidthPixels
@@ -171,19 +207,23 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(framesPerSecond, 1)))
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         configuration.scalesToFit = false
-        configuration.capturesAudio = true
-        configuration.excludesCurrentProcessAudio = true
-        configuration.sampleRate = Int(NetworkProtocol.audioSampleRateHz)
-        configuration.channelCount = NetworkProtocol.audioChannelCount
+        configuration.capturesAudio = NetworkProtocol.enableSenderAudioCapture
+        configuration.excludesCurrentProcessAudio = NetworkProtocol.enableSenderAudioCapture
+        if NetworkProtocol.enableSenderAudioCapture {
+            configuration.sampleRate = Int(NetworkProtocol.audioSampleRateHz)
+            configuration.channelCount = NetworkProtocol.audioChannelCount
+        }
         if #available(macOS 14.0, *) {
             configuration.captureResolution = .best
         }
         configuration.queueDepth = 3
-        configuration.showsCursor = true
+        configuration.showsCursor = showsCursor
 
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
-        try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
+        if NetworkProtocol.enableSenderAudioCapture {
+            try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
+        }
         try await newStream.startCapture()
 
         self.stream = newStream
@@ -197,36 +237,53 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
         switch type {
         case .screen:
+            let frameTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+            if let frameStatus = screenFrameStatus(from: sampleBuffer),
+               frameStatus != .complete {
+                logIncompleteScreenFrameIfNeeded(status: frameStatus, at: frameTimestampNanoseconds)
+                return
+            }
+
+            if let lastScreenFrameTimestampNanoseconds,
+               frameTimestampNanoseconds > lastScreenFrameTimestampNanoseconds {
+                let gapNanoseconds = frameTimestampNanoseconds - lastScreenFrameTimestampNanoseconds
+                if gapNanoseconds >= ProcessingBacklog.frameGapWarningNanoseconds {
+                    let shouldLogGapWarning: Bool
+                    if let lastScreenFrameGapWarningTimestampNanoseconds {
+                        shouldLogGapWarning =
+                            frameTimestampNanoseconds >= (
+                                lastScreenFrameGapWarningTimestampNanoseconds +
+                                ProcessingBacklog.logIntervalNanoseconds
+                            )
+                    } else {
+                        shouldLogGapWarning = true
+                    }
+
+                    if shouldLogGapWarning {
+                        lastScreenFrameGapWarningTimestampNanoseconds = frameTimestampNanoseconds
+                        print(
+                            "[CaptureService] Screen frame gap " +
+                            "\(String(format: "%.1f", Double(gapNanoseconds) / 1_000_000.0)) ms " +
+                            "on display \(targetDisplayID)"
+                        )
+                    }
+                }
+            }
+            lastScreenFrameTimestampNanoseconds = frameTimestampNanoseconds
+
             guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
+            let generation = currentCaptureGeneration()
+            guard beginScreenSampleProcessing(for: generation) else { return }
 
-            let frameWidth = CVPixelBufferGetWidth(pixelBuffer)
-            let frameHeight = CVPixelBufferGetHeight(pixelBuffer)
-            guard frameWidth > 0, frameHeight > 0 else { return }
-
-            let currentIndex = frameIndex
-            frameIndex += 1
-
-            let isFirstFrame = forceNextKeyFrame
-            forceNextKeyFrame = false
-
-            let metadata = FrameMetadata(
-                frameIndex: currentIndex,
-                timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
-                width: frameWidth,
-                height: frameHeight,
-                isKeyFrame: isFirstFrame || currentIndex % 60 == 0
-            )
-
-            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-            let frame = CapturedFrame(
-                metadata: metadata,
-                rawData: Data(),
-                bytesPerRow: bytesPerRow,
-                pixelFormat: .yuv420,
-                pixelBuffer: pixelBuffer
-            )
-            onCapturedFrame?(frame)
+            screenProcessingQueue.async { [weak self] in
+                self?.processScreenSample(
+                    pixelBuffer: pixelBuffer,
+                    generation: generation,
+                    enqueuedAtNanoseconds: frameTimestampNanoseconds
+                )
+            }
         case .audio:
+            guard NetworkProtocol.enableSenderAudioCapture else { return }
             guard let audioPacket = makeAudioPacket(from: sampleBuffer) else { return }
             onCapturedAudio?(audioPacket)
         default:
@@ -238,7 +295,206 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         isCapturing = false
+        print("[CaptureService] Stream stopped with error: \(error)")
         onError?(error)
+    }
+
+    private func screenFrameStatus(from sampleBuffer: CMSampleBuffer) -> SCFrameStatus? {
+        guard let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer,
+            createIfNecessary: false
+        ) as? [[SCStreamFrameInfo: Any]],
+        let attachments = attachmentsArray.first,
+        let rawStatus = attachments[.status] as? Int else {
+            return nil
+        }
+
+        return SCFrameStatus(rawValue: rawStatus)
+    }
+
+    private func logIncompleteScreenFrameIfNeeded(status: SCFrameStatus, at timestampNanoseconds: UInt64) {
+        if status == .idle {
+            return
+        }
+
+        let shouldLog: Bool
+        if let lastIncompleteScreenFrameLogTimestampNanoseconds {
+            shouldLog = timestampNanoseconds >= (lastIncompleteScreenFrameLogTimestampNanoseconds + 1_000_000_000)
+        } else {
+            shouldLog = true
+        }
+
+        guard shouldLog else { return }
+        lastIncompleteScreenFrameLogTimestampNanoseconds = timestampNanoseconds
+        print("[CaptureService] Ignoring \(screenFrameStatusDescription(status)) screen frame")
+    }
+
+    private func screenFrameStatusDescription(_ status: SCFrameStatus) -> String {
+        switch status {
+        case .complete:
+            return "complete"
+        case .idle:
+            return "idle"
+        case .blank:
+            return "blank"
+        case .suspended:
+            return "suspended"
+        case .started:
+            return "started"
+        case .stopped:
+            return "stopped"
+        @unknown default:
+            return "unknown(\(status.rawValue))"
+        }
+    }
+
+    private func currentCaptureGeneration() -> UInt64 {
+        stateLock.lock()
+        let generation = captureGeneration
+        stateLock.unlock()
+        return generation
+    }
+
+    private func beginScreenSampleProcessing(for generation: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard generation == captureGeneration else { return false }
+        guard pendingScreenSamples < ProcessingBacklog.maxPendingScreenSamples else {
+            droppedScreenSamples += 1
+            if droppedScreenSamples == 1 || droppedScreenSamples.isMultiple(of: 60) {
+                print(
+                    "[CaptureService] Dropped \(droppedScreenSamples) screen frames before processing " +
+                    "(pending=\(pendingScreenSamples), display \(targetDisplayID))"
+                )
+            }
+            return false
+        }
+
+        pendingScreenSamples += 1
+        return true
+    }
+
+    private func finishScreenSampleProcessing(for generation: UInt64) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard generation == captureGeneration else { return }
+        pendingScreenSamples = max(0, pendingScreenSamples - 1)
+    }
+
+    private func processScreenSample(
+        pixelBuffer: CVPixelBuffer,
+        generation: UInt64,
+        enqueuedAtNanoseconds: UInt64
+    ) {
+        defer { finishScreenSampleProcessing(for: generation) }
+
+        guard isCapturing else { return }
+        guard generation == currentCaptureGeneration() else { return }
+
+        let processingStartNanoseconds = DispatchTime.now().uptimeNanoseconds
+        logScreenProcessingLagIfNeeded(
+            startNanoseconds: processingStartNanoseconds,
+            enqueuedAtNanoseconds: enqueuedAtNanoseconds
+        )
+
+        let frameWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let frameHeight = CVPixelBufferGetHeight(pixelBuffer)
+        guard frameWidth > 0, frameHeight > 0 else { return }
+
+        let currentIndex: UInt64
+        let isFirstFrame: Bool
+        stateLock.lock()
+        guard generation == captureGeneration else {
+            stateLock.unlock()
+            return
+        }
+        currentIndex = frameIndex
+        frameIndex += 1
+        isFirstFrame = forceNextKeyFrame
+        forceNextKeyFrame = false
+        stateLock.unlock()
+
+        let metadata = FrameMetadata(
+            frameIndex: currentIndex,
+            timestampNanoseconds: enqueuedAtNanoseconds,
+            width: frameWidth,
+            height: frameHeight,
+            isKeyFrame: isFirstFrame || currentIndex % 60 == 0
+        )
+
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let frame = CapturedFrame(
+            metadata: metadata,
+            rawData: Data(),
+            bytesPerRow: bytesPerRow,
+            pixelFormat: .yuv420,
+            pixelBuffer: pixelBuffer
+        )
+        onCapturedFrame?(frame)
+
+        logScreenProcessingDurationIfNeeded(startNanoseconds: processingStartNanoseconds)
+    }
+
+    private func logScreenProcessingLagIfNeeded(
+        startNanoseconds: UInt64,
+        enqueuedAtNanoseconds: UInt64
+    ) {
+        guard startNanoseconds > enqueuedAtNanoseconds else { return }
+        let lagNanoseconds = startNanoseconds - enqueuedAtNanoseconds
+        guard lagNanoseconds >= ProcessingBacklog.lagWarningNanoseconds else { return }
+
+        let pending: Int
+        let dropped: UInt64
+        let shouldLog: Bool
+        stateLock.lock()
+        pending = pendingScreenSamples
+        dropped = droppedScreenSamples
+        if let lastWarning = lastScreenProcessingLagWarningTimestampNanoseconds {
+            shouldLog = startNanoseconds >= (lastWarning + ProcessingBacklog.logIntervalNanoseconds)
+        } else {
+            shouldLog = true
+        }
+        if shouldLog {
+            lastScreenProcessingLagWarningTimestampNanoseconds = startNanoseconds
+        }
+        stateLock.unlock()
+
+        guard shouldLog else { return }
+        print(
+            "[CaptureService] Screen sample processing lag " +
+            "\(String(format: "%.1f", Double(lagNanoseconds) / 1_000_000.0)) ms " +
+            "(pending=\(pending), dropped=\(dropped), display \(targetDisplayID))"
+        )
+    }
+
+    private func logScreenProcessingDurationIfNeeded(startNanoseconds: UInt64) {
+        let endNanoseconds = DispatchTime.now().uptimeNanoseconds
+        guard endNanoseconds > startNanoseconds else { return }
+        let durationNanoseconds = endNanoseconds - startNanoseconds
+        guard durationNanoseconds >= ProcessingBacklog.lagWarningNanoseconds else { return }
+
+        let pending: Int
+        let shouldLog: Bool
+        stateLock.lock()
+        pending = pendingScreenSamples
+        if let lastWarning = lastScreenProcessingDurationWarningTimestampNanoseconds {
+            shouldLog = endNanoseconds >= (lastWarning + ProcessingBacklog.logIntervalNanoseconds)
+        } else {
+            shouldLog = true
+        }
+        if shouldLog {
+            lastScreenProcessingDurationWarningTimestampNanoseconds = endNanoseconds
+        }
+        stateLock.unlock()
+
+        guard shouldLog else { return }
+        print(
+            "[CaptureService] Screen sample processing took " +
+            "\(String(format: "%.1f", Double(durationNanoseconds) / 1_000_000.0)) ms " +
+            "(pending=\(pending), display \(targetDisplayID))"
+        )
     }
 
     // MARK: - Synthetic Fallback

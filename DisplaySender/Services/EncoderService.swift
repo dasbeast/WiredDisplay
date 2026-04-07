@@ -200,8 +200,9 @@ final class EncoderService {
         // No B-frames: the single biggest latency saver — decoder doesn't wait for future frames.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse, label: "AllowFrameReordering")
 
-        // Force 1-in-1-out: zero encoder lookahead so every submitted frame is emitted immediately.
-        setCompressionProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0), label: "MaxFrameDelayCount")
+        // RealTime + no frame reordering is enough to keep the encoder on its low-latency path.
+        // Forcing MaxFrameDelayCount = 0 trips unsupported hardware configurations on some
+        // higher-resolution Apple Silicon HEVC sessions and can stall the whole capture pipeline.
 
         // HEVC Main profile for hardware decode compatibility.
         setCompressionProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel, label: "ProfileLevel")
@@ -594,16 +595,37 @@ final class EncoderService {
         framesInFlight = max(0, framesInFlight - 1)
         encodedFrameCount += 1
 
+        let finalizedMetadata = FrameMetadata(
+            frameIndex: encodedFrame.metadata.frameIndex,
+            timestampNanoseconds: encodedFrame.metadata.timestampNanoseconds,
+            encodeCompleteTimestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            width: encodedFrame.metadata.width,
+            height: encodedFrame.metadata.height,
+            isKeyFrame: encodedFrame.metadata.isKeyFrame
+        )
+
         if encodedFrame.hevcVPS != nil { lastVPS = encodedFrame.hevcVPS }
         if encodedFrame.h264SPS != nil { lastSPS = encodedFrame.h264SPS }
         if encodedFrame.h264PPS != nil { lastPPS = encodedFrame.h264PPS }
 
         if encodedFrame.hevcVPS != nil, encodedFrame.h264SPS != nil, encodedFrame.h264PPS != nil {
-            return encodedFrame
+            return EncodedFrame(
+                metadata: finalizedMetadata,
+                codec: encodedFrame.codec,
+                payload: encodedFrame.payload,
+                isKeyFrame: encodedFrame.isKeyFrame,
+                sourceBytesPerRow: encodedFrame.sourceBytesPerRow,
+                sourcePixelFormat: encodedFrame.sourcePixelFormat,
+                targetBitrateKbps: encodedFrame.targetBitrateKbps,
+                targetFramesPerSecond: encodedFrame.targetFramesPerSecond,
+                h264SPS: encodedFrame.h264SPS,
+                h264PPS: encodedFrame.h264PPS,
+                hevcVPS: encodedFrame.hevcVPS
+            )
         }
 
         return EncodedFrame(
-            metadata: encodedFrame.metadata,
+            metadata: finalizedMetadata,
             codec: encodedFrame.codec,
             payload: encodedFrame.payload,
             isKeyFrame: encodedFrame.isKeyFrame,

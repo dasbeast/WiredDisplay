@@ -2,7 +2,9 @@ import Foundation
 
 /// Defines wire-level messages and protocol validation shared by sender and receiver.
 enum NetworkProtocol {
-    static let protocolVersion: UInt16 = 1
+    static let cursorPredictionDefaultsKey = "receiver.enableCursorPrediction"
+    static let cursorPredictionStrengthDefaultsKey = "receiver.cursorPredictionStrength"
+    static let protocolVersion: UInt16 = 2
     static let defaultPort: UInt16 = 50999
     static let discoveryServiceType = "_wireddisplay._tcp."
     static let discoveryServiceDomain = "local."
@@ -17,6 +19,42 @@ enum NetworkProtocol {
     static let targetFramesPerSecond: Int = 60
     static let keyFrameIntervalSeconds: Int = 1
     static let captureFramesPerSecond: Int = 60
+    static let cursorOverlayFramesPerSecond: Int = 60
+    static let cursorAppearanceRefreshFramesPerSecond: Int = 30
+    static var enableCursorPrediction: Bool {
+        if UserDefaults.standard.object(forKey: cursorPredictionDefaultsKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: cursorPredictionDefaultsKey)
+    }
+    static var cursorPredictionStrength: Double {
+        if UserDefaults.standard.object(forKey: cursorPredictionStrengthDefaultsKey) == nil {
+            return 0.75
+        }
+        return min(1.0, max(0.0, UserDefaults.standard.double(forKey: cursorPredictionStrengthDefaultsKey)))
+    }
+    static let cursorPredictionLeadNanoseconds: UInt64 = 8_000_000
+    static let cursorMaximumPredictionLeadNanoseconds: UInt64 = 16_000_000
+    static let cursorHandoffEdgeThresholdNormalized: Double = 0.05
+    static let cursorHandoffReacquireInsetPoints: Double = 2.0
+    static let cursorHandoffDetectionWindowNanoseconds: UInt64 = 500_000_000
+    static let useReceiverCursorDatagramTransport: Bool = true
+    // Keep the receiver-side cursor overlay code available; the sender UI decides at runtime
+    // whether a session should use this path or capture the native cursor directly in video.
+    static let enableReceiverSideCursorOverlay: Bool = true
+    // Mirror cursor shapes (I-beam, resize arrows, pointing hand, etc.) over the side-cursor
+    // path. The sender UI exposes a runtime toggle for this so it can be disabled quickly if a
+    // specific app or cursor family proves unstable.
+    static let enableDynamicCursorAppearanceMirroring: Bool = true
+    static let useReceiverSystemCursorMirror: Bool = false
+    static let hideReceiverLocalCursorWhileStreaming: Bool = false
+    static let useSwiftUIReceiverCursorOverlay: Bool = false
+    static let showSenderCursorFallbackWhileTestingOverlay: Bool = false
+    static let useDebugCursorOverlayMarker: Bool = false
+    static let enableCursorDebugLogging: Bool = false
+    static let enableTransportDebugLogging: Bool = false
+    static let enableVerboseCursorPacketLogging: Bool = false
+    static let transportTelemetryLogIntervalNanoseconds: UInt64 = 1_000_000_000
     static let videoDatagramChunkPayloadBytes: Int = 1400
     static let videoDatagramAssemblyTimeoutNanoseconds: UInt64 = 150_000_000
     static let videoDatagramMaxOutstandingFrames: Int = 3
@@ -158,9 +196,8 @@ enum NetworkProtocol {
         requested: VideoTransportMode,
         canAcceptDatagrams: Bool
     ) -> VideoTransportMode {
-        if requested == .udp && canAcceptDatagrams {
-            return .udp
-        }
+        _ = requested
+        _ = canAcceptDatagrams
         return .tcp
     }
 
@@ -179,9 +216,13 @@ enum NetworkProtocol {
     static let binaryMagic: UInt32 = 0x57445646 // "WDVF" – WiredDisplay Video Frame
     static let videoDatagramMagic: UInt32 = 0x57445644 // "WDVD" – WiredDisplay Video Datagram
     static let binaryAudioMagic: UInt32 = 0x57444146 // "WDAF" – WiredDisplay Audio Frame
+    static let binaryCursorMagic: UInt32 = 0x5744434D // "WDCM" – WiredDisplay Cursor Motion
     static let audioSampleRateHz: Double = 48_000
     static let audioChannelCount: Int = 2
     static let audioPlaybackMaxQueuedBuffers: Int = 8
+    // Disabled while debugging sender-side screen freezes so audio conversion/capture
+    // cannot compete with the screen path on the ScreenCaptureKit callback queue.
+    static let enableSenderAudioCapture: Bool = false
 
     enum MessageType: UInt8, Codable, Sendable {
         case hello = 1
@@ -189,6 +230,7 @@ enum NetworkProtocol {
         case heartbeat = 3
         case videoFrame = 4
         case requestKeyFrame = 5
+        case cursorState = 6
     }
 
     enum VideoTransportMode: String, Codable, Sendable {
@@ -323,14 +365,156 @@ struct HeartbeatPayload: Codable, Sendable {
     let renderedFrameIndex: UInt64?
     /// Sender-side capture timestamp for the most recently rendered frame.
     let renderedFrameSenderTimestampNanoseconds: UInt64?
+    /// Sender-side encode-complete timestamp for the most recently rendered frame.
+    let renderedFrameSenderEncodeTimestampNanoseconds: UInt64?
+    /// Receiver-local arrival timestamp for the most recently rendered frame.
+    let renderedFrameReceiverArrivalTimestampNanoseconds: UInt64?
     /// Receiver-local render timestamp for the most recently rendered frame.
     let renderedFrameReceiverTimestampNanoseconds: UInt64?
+
+    init(
+        transmitTimestampNanoseconds: UInt64,
+        originTimestampNanoseconds: UInt64? = nil,
+        receiveTimestampNanoseconds: UInt64? = nil,
+        renderedFrameIndex: UInt64? = nil,
+        renderedFrameSenderTimestampNanoseconds: UInt64? = nil,
+        renderedFrameSenderEncodeTimestampNanoseconds: UInt64? = nil,
+        renderedFrameReceiverArrivalTimestampNanoseconds: UInt64? = nil,
+        renderedFrameReceiverTimestampNanoseconds: UInt64? = nil
+    ) {
+        self.transmitTimestampNanoseconds = transmitTimestampNanoseconds
+        self.originTimestampNanoseconds = originTimestampNanoseconds
+        self.receiveTimestampNanoseconds = receiveTimestampNanoseconds
+        self.renderedFrameIndex = renderedFrameIndex
+        self.renderedFrameSenderTimestampNanoseconds = renderedFrameSenderTimestampNanoseconds
+        self.renderedFrameSenderEncodeTimestampNanoseconds = renderedFrameSenderEncodeTimestampNanoseconds
+        self.renderedFrameReceiverArrivalTimestampNanoseconds = renderedFrameReceiverArrivalTimestampNanoseconds
+        self.renderedFrameReceiverTimestampNanoseconds = renderedFrameReceiverTimestampNanoseconds
+    }
+}
+
+struct CursorAppearancePayload: Codable, Equatable, Sendable {
+    let signature: UInt64
+    let pngData: Data
+    let widthPoints: Double
+    let heightPoints: Double
+    let hotSpotX: Double
+    let hotSpotY: Double
+}
+
+/// Describes who should currently own and present the cursor.
+enum CursorOwnershipIntent: String, Codable, Equatable, Sendable {
+    /// Sender still owns the cursor and the receiver should mirror it.
+    case remote
+    /// Sender cursor exited through a display edge and the receiver should let the local OS own it.
+    case localHandoff
+    /// Cursor should be treated as absent/hidden, not handed off.
+    case hidden
+}
+
+/// Sender -> receiver cursor sidecar used to render a low-latency pointer overlay.
+struct CursorStatePayload: Codable, Equatable, Sendable {
+    let timestampNanoseconds: UInt64
+    let normalizedX: Double
+    let normalizedY: Double
+    let isVisible: Bool
+    let ownershipIntent: CursorOwnershipIntent
+    let appearance: CursorAppearancePayload?
+}
+
+/// Compact sender -> receiver cursor motion packet for the high-frequency UDP hot path.
+/// Layout: [4-byte magic][1-byte flags][8-byte timestamp][4-byte x][4-byte y]
+enum BinaryCursorWire {
+    private static let isVisibleFlag: UInt8 = 1 << 0
+    private static let ownershipMask: UInt8 = 0b0000_0110
+    private static let ownershipShift: UInt8 = 1
+    private static let packetLength = 21
+
+    static func serialize(cursorState: CursorStatePayload) -> Data {
+        var data = Data(capacity: packetLength)
+
+        var magic = NetworkProtocol.binaryCursorMagic.bigEndian
+        withUnsafeBytes(of: &magic) { data.append(contentsOf: $0) }
+
+        var flags: UInt8 = ownershipBits(for: cursorState.ownershipIntent) << ownershipShift
+        if cursorState.isVisible {
+            flags |= isVisibleFlag
+        }
+        data.append(flags)
+
+        var timestamp = cursorState.timestampNanoseconds.bigEndian
+        withUnsafeBytes(of: &timestamp) { data.append(contentsOf: $0) }
+
+        var normalizedX = Float32(cursorState.normalizedX).bitPattern.bigEndian
+        var normalizedY = Float32(cursorState.normalizedY).bitPattern.bigEndian
+        withUnsafeBytes(of: &normalizedX) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &normalizedY) { data.append(contentsOf: $0) }
+
+        return data
+    }
+
+    static func deserialize(data: Data) -> CursorStatePayload? {
+        guard data.count == packetLength else { return nil }
+        guard NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 0) == NetworkProtocol.binaryCursorMagic else {
+            return nil
+        }
+
+        let flags = data[4]
+        let ownershipCode = (flags & ownershipMask) >> ownershipShift
+        guard let ownershipIntent = ownershipIntent(for: ownershipCode) else { return nil }
+        let isVisible = (flags & isVisibleFlag) != 0
+
+        guard let timestampNanoseconds = NetworkProtocol.readUInt64BigEndian(from: data, atOffset: 5),
+              let normalizedXBits = NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 13),
+              let normalizedYBits = NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 17) else {
+            return nil
+        }
+
+        let normalizedX = Double(Float32(bitPattern: normalizedXBits))
+        let normalizedY = Double(Float32(bitPattern: normalizedYBits))
+
+        return CursorStatePayload(
+            timestampNanoseconds: timestampNanoseconds,
+            normalizedX: normalizedX,
+            normalizedY: normalizedY,
+            isVisible: isVisible,
+            ownershipIntent: ownershipIntent,
+            appearance: nil
+        )
+    }
+
+    private static func ownershipBits(for ownershipIntent: CursorOwnershipIntent) -> UInt8 {
+        switch ownershipIntent {
+        case .remote:
+            return 0
+        case .localHandoff:
+            return 1
+        case .hidden:
+            return 2
+        }
+    }
+
+    private static func ownershipIntent(for code: UInt8) -> CursorOwnershipIntent? {
+        switch code {
+        case 0:
+            return .remote
+        case 1:
+            return .localHandoff
+        case 2:
+            return .hidden
+        default:
+            return nil
+        }
+    }
 }
 
 struct SenderHeartbeatEvaluation: Equatable, Sendable {
     let roundTripMilliseconds: Double
     let receiverClockOffsetNanoseconds: Int64
     let displayLatencyMilliseconds: Double?
+    let captureToEncodeMilliseconds: Double?
+    let encodeToReceiveMilliseconds: Double?
+    let receiveToRenderMilliseconds: Double?
     let shouldClearAwaitingFirstRenderedFrame: Bool
     let shouldRequestRecoveryKeyFrame: Bool
 }
@@ -374,6 +558,9 @@ extension NetworkProtocol {
             heartbeat.renderedFrameIndex == nil
 
         let displayLatencyMilliseconds: Double?
+        let captureToEncodeMilliseconds: Double?
+        let encodeToReceiveMilliseconds: Double?
+        let receiveToRenderMilliseconds: Double?
         if let renderedFrameSenderTimestampNanoseconds = heartbeat.renderedFrameSenderTimestampNanoseconds,
            let renderedFrameReceiverTimestampNanoseconds = heartbeat.renderedFrameReceiverTimestampNanoseconds {
             let senderTimestampOnReceiverClock =
@@ -389,10 +576,48 @@ extension NetworkProtocol {
             displayLatencyMilliseconds = nil
         }
 
+        if let renderedFrameSenderEncodeTimestampNanoseconds = heartbeat.renderedFrameSenderEncodeTimestampNanoseconds,
+           let renderedFrameSenderTimestampNanoseconds = heartbeat.renderedFrameSenderTimestampNanoseconds,
+           renderedFrameSenderEncodeTimestampNanoseconds >= renderedFrameSenderTimestampNanoseconds {
+            captureToEncodeMilliseconds = Double(
+                renderedFrameSenderEncodeTimestampNanoseconds - renderedFrameSenderTimestampNanoseconds
+            ) / 1_000_000.0
+        } else {
+            captureToEncodeMilliseconds = nil
+        }
+
+        if let renderedFrameSenderEncodeTimestampNanoseconds = heartbeat.renderedFrameSenderEncodeTimestampNanoseconds,
+           let renderedFrameReceiverArrivalTimestampNanoseconds = heartbeat.renderedFrameReceiverArrivalTimestampNanoseconds {
+            let encodeTimestampOnReceiverClock =
+                Int64(renderedFrameSenderEncodeTimestampNanoseconds) + receiverClockOffsetNanoseconds
+            let encodeToReceiveNanoseconds =
+                Int64(renderedFrameReceiverArrivalTimestampNanoseconds) - encodeTimestampOnReceiverClock
+            if encodeToReceiveNanoseconds >= 0 {
+                encodeToReceiveMilliseconds = Double(encodeToReceiveNanoseconds) / 1_000_000.0
+            } else {
+                encodeToReceiveMilliseconds = nil
+            }
+        } else {
+            encodeToReceiveMilliseconds = nil
+        }
+
+        if let renderedFrameReceiverArrivalTimestampNanoseconds = heartbeat.renderedFrameReceiverArrivalTimestampNanoseconds,
+           let renderedFrameReceiverTimestampNanoseconds = heartbeat.renderedFrameReceiverTimestampNanoseconds,
+           renderedFrameReceiverTimestampNanoseconds >= renderedFrameReceiverArrivalTimestampNanoseconds {
+            receiveToRenderMilliseconds = Double(
+                renderedFrameReceiverTimestampNanoseconds - renderedFrameReceiverArrivalTimestampNanoseconds
+            ) / 1_000_000.0
+        } else {
+            receiveToRenderMilliseconds = nil
+        }
+
         return SenderHeartbeatEvaluation(
             roundTripMilliseconds: Double(roundTripNanoseconds) / 1_000_000.0,
             receiverClockOffsetNanoseconds: receiverClockOffsetNanoseconds,
             displayLatencyMilliseconds: displayLatencyMilliseconds,
+            captureToEncodeMilliseconds: captureToEncodeMilliseconds,
+            encodeToReceiveMilliseconds: encodeToReceiveMilliseconds,
+            receiveToRenderMilliseconds: receiveToRenderMilliseconds,
             shouldClearAwaitingFirstRenderedFrame: shouldClearAwaitingFirstRenderedFrame,
             shouldRequestRecoveryKeyFrame: shouldRequestRecoveryKeyFrame
         )
@@ -452,6 +677,7 @@ struct KeyFrameRequestPayload: Codable, Sendable {
 struct BinaryFrameHeader: Codable, Sendable {
     let frameIndex: UInt64
     let timestampNanoseconds: UInt64
+    let encodeCompleteTimestampNanoseconds: UInt64?
     let width: Int
     let height: Int
     let isKeyFrame: Bool
@@ -487,6 +713,7 @@ enum BinaryFrameWire {
         let header = BinaryFrameHeader(
             frameIndex: encodedFrame.metadata.frameIndex,
             timestampNanoseconds: encodedFrame.metadata.timestampNanoseconds,
+            encodeCompleteTimestampNanoseconds: encodedFrame.metadata.encodeCompleteTimestampNanoseconds,
             width: encodedFrame.metadata.width,
             height: encodedFrame.metadata.height,
             isKeyFrame: encodedFrame.isKeyFrame,

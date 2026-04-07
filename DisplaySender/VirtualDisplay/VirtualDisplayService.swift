@@ -3,31 +3,163 @@ import CoreGraphics
 
 /// A fixed pixel-resolution preset that can be requested for the virtual display.
 struct VirtualDisplayPreset: Identifiable, Equatable, Hashable {
+    enum ScaleMode: String, Equatable, Hashable {
+        case nonHiDPI
+        case retina2x
+    }
+
     let pixelWidth: Int
     let pixelHeight: Int
+    let scaleMode: ScaleMode
 
-    var id: String { "\(pixelWidth)x\(pixelHeight)" }
-    var label: String { "\(pixelWidth)×\(pixelHeight) pixels" }
+    var id: String { "\(pixelWidth)x\(pixelHeight)-\(scaleMode.rawValue)" }
+    var usesHiDPI: Bool { scaleMode == .retina2x }
+    var logicalWidth: Int { usesHiDPI ? max(1, pixelWidth / 2) : pixelWidth }
+    var logicalHeight: Int { usesHiDPI ? max(1, pixelHeight / 2) : pixelHeight }
+    var shortLabel: String {
+        usesHiDPI
+            ? "\(logicalWidth)×\(logicalHeight) @ 2x"
+            : "\(pixelWidth)×\(pixelHeight) @ 1x"
+    }
+    var label: String {
+        if usesHiDPI {
+            return "\(logicalWidth)×\(logicalHeight) logical · \(pixelWidth)×\(pixelHeight) pixels · 2× Retina"
+        }
+        return "\(pixelWidth)×\(pixelHeight) pixels · non-HiDPI"
+    }
 
-    static let defaultFixed = VirtualDisplayPreset(pixelWidth: 3008, pixelHeight: 1692)
+    private static func make(_ pixelWidth: Int, _ pixelHeight: Int, _ scaleMode: ScaleMode) -> VirtualDisplayPreset {
+        VirtualDisplayPreset(pixelWidth: pixelWidth, pixelHeight: pixelHeight, scaleMode: scaleMode)
+    }
 
-    static let commonPresets: [VirtualDisplayPreset] = [
-        VirtualDisplayPreset(pixelWidth: 5120, pixelHeight: 2880),
-        VirtualDisplayPreset(pixelWidth: 4096, pixelHeight: 2304),
-        VirtualDisplayPreset(pixelWidth: 3840, pixelHeight: 2160),
-        VirtualDisplayPreset(pixelWidth: 3200, pixelHeight: 1800),
-        VirtualDisplayPreset(pixelWidth: 3024, pixelHeight: 1964),
-        VirtualDisplayPreset(pixelWidth: 3008, pixelHeight: 1692),
-        VirtualDisplayPreset(pixelWidth: 2880, pixelHeight: 1620),
-        VirtualDisplayPreset(pixelWidth: 2560, pixelHeight: 1440),
-        VirtualDisplayPreset(pixelWidth: 2304, pixelHeight: 1296),
-        VirtualDisplayPreset(pixelWidth: 2048, pixelHeight: 1152),
-        VirtualDisplayPreset(pixelWidth: 1920, pixelHeight: 1080),
-        VirtualDisplayPreset(pixelWidth: 1680, pixelHeight: 945),
-        VirtualDisplayPreset(pixelWidth: 1600, pixelHeight: 900),
-        VirtualDisplayPreset(pixelWidth: 1366, pixelHeight: 768),
-        VirtualDisplayPreset(pixelWidth: 1280, pixelHeight: 720)
-    ]
+    private static func sortedPresets(_ presets: [VirtualDisplayPreset]) -> [VirtualDisplayPreset] {
+        presets.sorted { lhs, rhs in
+            let leftArea = lhs.pixelWidth * lhs.pixelHeight
+            let rightArea = rhs.pixelWidth * rhs.pixelHeight
+            if leftArea != rightArea {
+                return leftArea > rightArea
+            }
+            if lhs.pixelWidth != rhs.pixelWidth {
+                return lhs.pixelWidth > rhs.pixelWidth
+            }
+            if lhs.pixelHeight != rhs.pixelHeight {
+                return lhs.pixelHeight > rhs.pixelHeight
+            }
+            if lhs.usesHiDPI != rhs.usesHiDPI {
+                return !lhs.usesHiDPI && rhs.usesHiDPI
+            }
+            return lhs.label < rhs.label
+        }
+    }
+
+    static func preset(forID id: String) -> VirtualDisplayPreset? {
+        if let exact = allPresets.first(where: { $0.id == id }) {
+            return exact
+        }
+
+        let parts = id.split(separator: "x")
+        if parts.count == 2,
+           let pixelWidth = Int(parts[0]),
+           let pixelHeight = Int(parts[1]) {
+            return allPresets.first(where: {
+                $0.pixelWidth == pixelWidth &&
+                $0.pixelHeight == pixelHeight &&
+                $0.scaleMode == .nonHiDPI
+            }) ?? allPresets.first(where: {
+                $0.pixelWidth == pixelWidth && $0.pixelHeight == pixelHeight
+            })
+        }
+
+        return nil
+    }
+
+    static let defaultFixed = make(3840, 2160, .nonHiDPI)
+
+    static let standardPresets: [VirtualDisplayPreset] = sortedPresets([
+        make(3840, 2160, .nonHiDPI),
+        make(3840, 2160, .retina2x),
+        make(6016, 3384, .retina2x),
+        make(4096, 2304, .nonHiDPI),
+        make(5120, 2880, .retina2x),
+        make(3008, 1692, .retina2x),
+        make(2560, 1440, .nonHiDPI),
+        make(1920, 1080, .nonHiDPI)
+    ])
+
+    static let advancedPresets: [VirtualDisplayPreset] = {
+        let candidates: [(Int, Int)] = [
+            (7680, 4320),
+            (6016, 3384),
+            (5120, 3200),
+            (5120, 2880),
+            (5120, 2160),
+            (4480, 2520),
+            (4096, 2560),
+            (4096, 2304),
+            (3840, 2560),
+            (3840, 2400),
+            (3840, 2160),
+            (3840, 1600),
+            (3456, 2234),
+            (3440, 1440),
+            (3200, 2048),
+            (3200, 1800),
+            (3072, 1920),
+            (3072, 1800),
+            (3024, 1964),
+            (3008, 1692),
+            (2940, 1912),
+            (2880, 1864),
+            (2880, 1800),
+            (2880, 1620),
+            (2560, 1664),
+            (2560, 1600),
+            (2560, 1440),
+            (2560, 1200),
+            (2560, 1080),
+            (2304, 1440),
+            (2304, 1296),
+            (2234, 1488),
+            (2048, 1536),
+            (2048, 1280),
+            (2048, 1152),
+            (1920, 1200),
+            (1920, 1080),
+            (1728, 1117),
+            (1680, 1050),
+            (1680, 945),
+            (1600, 1024),
+            (1600, 900),
+            (1512, 982),
+            (1470, 956),
+            (1440, 900),
+            (1366, 768),
+            (1280, 800),
+            (1280, 720)
+        ]
+
+        var presets: [VirtualDisplayPreset] = []
+        var seen = Set<String>()
+
+        for (width, height) in candidates {
+            for scaleMode in [ScaleMode.nonHiDPI, .retina2x] {
+                let preset = make(width, height, scaleMode)
+                if seen.insert(preset.id).inserted {
+                    presets.append(preset)
+                }
+            }
+        }
+
+        return sortedPresets(presets)
+    }()
+
+    static let allPresets: [VirtualDisplayPreset] = {
+        var presets = standardPresets
+        for preset in advancedPresets where !presets.contains(preset) {
+            presets.append(preset)
+        }
+        return presets
+    }()
 }
 
 /// A resolved display mode on a virtual display.
@@ -39,7 +171,10 @@ struct VirtualDisplayMode: Identifiable, Equatable, Hashable {
     let scale: Double
     let refreshRateHz: Double
 
-    var id: String { "\(pixelWidth)x\(pixelHeight)" }
+    var id: String {
+        "\(logicalWidth)x\(logicalHeight)-\(pixelWidth)x\(pixelHeight)-" +
+        "\(String(format: "%.2f", scale))-\(String(format: "%.2f", refreshRateHz))"
+    }
 
     var isRetina: Bool { scale >= 1.5 }
 
@@ -140,11 +275,17 @@ final class VirtualDisplayService {
         guard displayID != 0 else { return false }
         let success = VirtualDisplayBridge.applyMode(
             forDisplay: displayID,
+            logicalWidth: UInt32(mode.logicalWidth),
+            logicalHeight: UInt32(mode.logicalHeight),
             pixelWidth: UInt32(mode.pixelWidth),
-            pixelHeight: UInt32(mode.pixelHeight)
+            pixelHeight: UInt32(mode.pixelHeight),
+            refreshRate: mode.refreshRateHz
         )
         if !success {
-            print("[VirtualDisplayService] Failed to apply mode \(mode.pixelWidth)×\(mode.pixelHeight)")
+            print(
+                "[VirtualDisplayService] Failed to apply mode " +
+                "\(mode.pixelWidth)×\(mode.pixelHeight) @ \(String(format: "%.2f", mode.refreshRateHz))Hz"
+            )
         }
         return success
     }

@@ -32,14 +32,18 @@ final class NetworkProtocolTests: XCTestCase {
         XCTAssertEqual(bitrate, NetworkProtocol.maxVideoBitrateBps)
     }
 
-    func testNegotiatedVideoTransportFallsBackToTCPWhenUDPUnavailable() {
+    func testNegotiatedVideoTransportAlwaysResolvesToTCP() {
         XCTAssertEqual(
             NetworkProtocol.negotiatedVideoTransport(requested: .udp, canAcceptDatagrams: false),
             .tcp
         )
         XCTAssertEqual(
             NetworkProtocol.negotiatedVideoTransport(requested: .udp, canAcceptDatagrams: true),
-            .udp
+            .tcp
+        )
+        XCTAssertEqual(
+            NetworkProtocol.negotiatedVideoTransport(requested: .tcp, canAcceptDatagrams: true),
+            .tcp
         )
     }
 
@@ -171,6 +175,33 @@ final class NetworkProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.renderedFrameIndex, payload.renderedFrameIndex)
     }
 
+    func testNetworkEnvelopeRoundTripsCursorStatePayloadWithAppearance() throws {
+        let payload = CursorStatePayload(
+            timestampNanoseconds: 456,
+            normalizedX: 0.25,
+            normalizedY: 0.75,
+            isVisible: true,
+            ownershipIntent: .remote,
+            appearance: CursorAppearancePayload(
+                signature: 0xDEADBEEF,
+                pngData: Data([0x89, 0x50, 0x4E, 0x47]),
+                widthPoints: 23,
+                heightPoints: 22,
+                hotSpotX: 12,
+                hotSpotY: 11
+            )
+        )
+
+        let envelope = try NetworkEnvelope.make(
+            type: .cursorState,
+            sequenceNumber: 8,
+            payload: payload
+        )
+
+        let decoded = try envelope.decodePayload(as: CursorStatePayload.self)
+        XCTAssertEqual(decoded, payload)
+    }
+
     func testNetworkEnvelopeRejectsPayloadWhenVersionDoesNotMatch() throws {
         let envelope = NetworkEnvelope(
             version: NetworkProtocol.protocolVersion + 1,
@@ -248,6 +279,43 @@ final class NetworkProtocolTests: XCTestCase {
         XCTAssertEqual(decodedFrame.header.frameIndex, encodedFrame.metadata.frameIndex)
         XCTAssertEqual(decodedFrame.header.codec, encodedFrame.codec)
         XCTAssertEqual(decodedFrame.payload, encodedFrame.payload)
+    }
+
+    func testBinaryCursorWireRoundTripsCursorMotionState() throws {
+        let cursorState = CursorStatePayload(
+            timestampNanoseconds: 123_456_789,
+            normalizedX: 0.375,
+            normalizedY: 0.625,
+            isVisible: true,
+            ownershipIntent: .remote,
+            appearance: nil
+        )
+
+        let serialized = BinaryCursorWire.serialize(cursorState: cursorState)
+        let decoded = try XCTUnwrap(BinaryCursorWire.deserialize(data: serialized))
+
+        XCTAssertEqual(decoded.timestampNanoseconds, cursorState.timestampNanoseconds)
+        XCTAssertEqual(decoded.isVisible, cursorState.isVisible)
+        XCTAssertEqual(decoded.ownershipIntent, cursorState.ownershipIntent)
+        XCTAssertNil(decoded.appearance)
+        XCTAssertEqual(decoded.normalizedX, cursorState.normalizedX, accuracy: 0.0001)
+        XCTAssertEqual(decoded.normalizedY, cursorState.normalizedY, accuracy: 0.0001)
+    }
+
+    func testBinaryCursorWireRejectsInvalidOwnershipEncoding() {
+        var serialized = BinaryCursorWire.serialize(
+            cursorState: CursorStatePayload(
+                timestampNanoseconds: 1,
+                normalizedX: 0.5,
+                normalizedY: 0.5,
+                isVisible: false,
+                ownershipIntent: .hidden,
+                appearance: nil
+            )
+        )
+        serialized[4] = 0b0000_0110
+
+        XCTAssertNil(BinaryCursorWire.deserialize(data: serialized))
     }
 
     private func makeEncodedFrame(

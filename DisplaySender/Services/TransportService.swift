@@ -3,31 +3,71 @@ import Network
 
 /// Network.framework transport for outgoing envelopes over wired networking.
 final class TransportService {
+    struct QueueDebugSnapshot {
+        let pendingFrames: Int
+        let pendingControlFrames: Int
+        let pendingCursorFrames: Int
+        let pendingAudioFrames: Int
+        let pendingVideoFrames: Int
+        let networkInFlightCount: Int
+        let sentControlFrames: UInt64
+        let sentCursorFrames: UInt64
+        let sentAudioFrames: UInt64
+        let sentVideoFrames: UInt64
+        let droppedVideoFrames: UInt64
+        let droppedCursorFrames: UInt64
+    }
+
     private let queue = DispatchQueue(label: "wireddisplay.sender.transport")
+    private let queueKey = DispatchSpecificKey<UInt8>()
 
     private(set) var isConnected = false
 
     private var connection: NWConnection?
     private var nextSequenceNumber: UInt64 = 1
     private var receiveBuffer = Data()
+    private var receiveBufferReadOffset = 0
 
     private struct OutboundFrame {
         let data: Data
+        let kind: OutboundFrameKind
         let isKeyFrame: Bool
+    }
+
+    private enum OutboundFrameKind {
+        case control
+        case cursor
+        case audio
+        case video
     }
 
     private var pendingOutboundFrames: [OutboundFrame] = []
     private var awaitingKeyFrameAfterDrop = false
     private var networkInFlightCount = 0
     private let maxNetworkInFlight = 2
+    private var droppedCursorStateCount: UInt64 = 0
+    private var sentControlFrameCount: UInt64 = 0
+    private var sentCursorFrameCount: UInt64 = 0
+    private var sentAudioFrameCount: UInt64 = 0
+    private var sentVideoFrameCount: UInt64 = 0
     private(set) var droppedOutboundFrameCount: UInt64 = 0 {
-        didSet { onDroppedFrameCountChange?(droppedOutboundFrameCount) }
+        didSet {
+            onDroppedFrameCountChange?(droppedOutboundFrameCount)
+            if NetworkProtocol.enableTransportDebugLogging,
+               droppedOutboundFrameCount != oldValue {
+                print("[Transport] dropped video frames total=\(droppedOutboundFrameCount)")
+            }
+        }
     }
 
     var onStateChange: ((Bool) -> Void)?
     var onError: ((Error) -> Void)?
     var onEnvelope: ((NetworkEnvelope) -> Void)?
     var onDroppedFrameCountChange: ((UInt64) -> Void)?
+
+    init() {
+        queue.setSpecific(key: queueKey, value: 1)
+    }
 
     func connect(host: String, port: UInt16 = NetworkProtocol.defaultPort) {
         queue.async { [weak self] in
@@ -99,7 +139,11 @@ final class TransportService {
                 )
             }
 
-            let outbound = OutboundFrame(data: framedData, isKeyFrame: encodedFrame.isKeyFrame)
+            let outbound = OutboundFrame(
+                data: framedData,
+                kind: .video,
+                isKeyFrame: encodedFrame.isKeyFrame
+            )
             self.enqueueOutboundFrame(outbound)
             self.flushPendingIfPossible()
         }
@@ -120,7 +164,11 @@ final class TransportService {
                 return
             }
 
-            let outbound = OutboundFrame(data: framedData, isKeyFrame: true)
+            let outbound = OutboundFrame(
+                data: framedData,
+                kind: .audio,
+                isKeyFrame: false
+            )
             self.enqueueOutboundFrame(outbound)
             self.flushPendingIfPossible()
         }
@@ -167,6 +215,8 @@ final class TransportService {
                 receiveTimestampNanoseconds: nil,
                 renderedFrameIndex: nil,
                 renderedFrameSenderTimestampNanoseconds: nil,
+                renderedFrameSenderEncodeTimestampNanoseconds: nil,
+                renderedFrameReceiverArrivalTimestampNanoseconds: nil,
                 renderedFrameReceiverTimestampNanoseconds: nil
             )
 
@@ -184,6 +234,34 @@ final class TransportService {
         }
     }
 
+    func sendCursorState(_ cursorState: CursorStatePayload) {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            do {
+                let envelope = try NetworkEnvelope.make(
+                    type: .cursorState,
+                    sequenceNumber: self.nextSequenceNumber,
+                    payload: cursorState
+                )
+                self.nextSequenceNumber += 1
+                try self.queueEnvelopeForSend(envelope, kind: .cursor, isKeyFrame: false)
+            } catch {
+                self.onError?(error)
+            }
+        }
+    }
+
+    func debugSnapshot() -> QueueDebugSnapshot {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return makeQueueDebugSnapshotLocked()
+        }
+
+        return queue.sync {
+            makeQueueDebugSnapshotLocked()
+        }
+    }
+
     func disconnect() {
         queue.async { [weak self] in
             self?.disconnectLocked()
@@ -194,50 +272,162 @@ final class TransportService {
         connection?.cancel()
         connection = nil
         receiveBuffer.removeAll(keepingCapacity: false)
+        receiveBufferReadOffset = 0
         pendingOutboundFrames.removeAll(keepingCapacity: false)
         awaitingKeyFrameAfterDrop = false
         networkInFlightCount = 0
+        droppedCursorStateCount = 0
+        sentControlFrameCount = 0
+        sentCursorFrameCount = 0
+        sentAudioFrameCount = 0
+        sentVideoFrameCount = 0
         droppedOutboundFrameCount = 0
 
         isConnected = false
         onStateChange?(false)
     }
 
-    private func queueEnvelopeForSend(_ envelope: NetworkEnvelope, isKeyFrame: Bool) throws {
+    private func queueEnvelopeForSend(
+        _ envelope: NetworkEnvelope,
+        kind: OutboundFrameKind = .control,
+        isKeyFrame: Bool
+    ) throws {
         let encoded = try JSONEncoder().encode(envelope)
         guard encoded.count <= NetworkProtocol.maximumEnvelopeBytes else {
             throw TransportServiceError.messageTooLarge
         }
 
         let framedData = wrapLengthPrefix(encoded)
-        enqueueOutboundFrame(OutboundFrame(data: framedData, isKeyFrame: isKeyFrame))
+        enqueueOutboundFrame(
+            OutboundFrame(
+                data: framedData,
+                kind: kind,
+                isKeyFrame: isKeyFrame
+            )
+        )
         flushPendingIfPossible()
     }
 
     private func enqueueOutboundFrame(_ frame: OutboundFrame) {
-        if awaitingKeyFrameAfterDrop && !frame.isKeyFrame {
-            droppedOutboundFrameCount += 1
-            return
-        }
-
-        if frame.isKeyFrame {
-            awaitingKeyFrameAfterDrop = false
-        }
-
-        // When the queue is full, shed the oldest non-keyframes instead of dropping everything.
-        // This preserves recent frames and avoids the costly "drop-all → await keyframe" cascade.
-        while pendingOutboundFrames.count >= NetworkProtocol.maxPendingOutboundFrames {
-            if let dropIndex = pendingOutboundFrames.firstIndex(where: { !$0.isKeyFrame }) {
-                pendingOutboundFrames.remove(at: dropIndex)
+        if frame.kind == .video {
+            if awaitingKeyFrameAfterDrop && !frame.isKeyFrame {
                 droppedOutboundFrameCount += 1
-            } else {
-                // All pending frames are keyframes — drop the oldest one.
-                pendingOutboundFrames.removeFirst()
-                droppedOutboundFrameCount += 1
+                return
+            }
+
+            if frame.isKeyFrame {
+                awaitingKeyFrameAfterDrop = false
             }
         }
 
+        if frame.kind == .cursor,
+           coalesceQueuedCursorFrame(with: frame) {
+            return
+        }
+
+        guard makeQueueSpaceIfNeeded(for: frame) else {
+            if frame.kind == .video {
+                droppedOutboundFrameCount += 1
+                awaitingKeyFrameAfterDrop = true
+            } else if frame.kind == .cursor {
+                droppedCursorStateCount += 1
+                if NetworkProtocol.enableTransportDebugLogging {
+                    print("[Transport] dropped cursor update total=\(droppedCursorStateCount)")
+                }
+                if droppedCursorStateCount == 1 || droppedCursorStateCount.isMultiple(of: 60) {
+                    print(
+                        "[Transport] Dropped \(droppedCursorStateCount) cursor updates " +
+                        "due to outbound queue pressure"
+                    )
+                }
+            }
+            return
+        }
+
         pendingOutboundFrames.append(frame)
+    }
+
+    private func makeQueueSpaceIfNeeded(for frame: OutboundFrame) -> Bool {
+        while pendingOutboundFrames.count >= NetworkProtocol.maxPendingOutboundFrames {
+            switch frame.kind {
+            case .audio:
+                if dropQueuedFrame(where: { $0.kind == .cursor }, countAsVideoDrop: false) {
+                    continue
+                }
+                // Audio should never evict video or control traffic. If we're congested,
+                // replace older queued audio packets with the newest one and otherwise drop it.
+                guard dropQueuedFrame(where: { $0.kind == .audio }, countAsVideoDrop: false) else {
+                    return false
+                }
+            case .video:
+                if dropQueuedFrame(where: { $0.kind == .cursor }, countAsVideoDrop: false) {
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .audio }, countAsVideoDrop: false) {
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .video && !$0.isKeyFrame }, countAsVideoDrop: true) {
+                    awaitingKeyFrameAfterDrop = true
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .video }, countAsVideoDrop: true) {
+                    awaitingKeyFrameAfterDrop = true
+                    continue
+                }
+                return false
+            case .control:
+                if dropQueuedFrame(where: { $0.kind == .cursor }, countAsVideoDrop: false) {
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .audio }, countAsVideoDrop: false) {
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .video && !$0.isKeyFrame }, countAsVideoDrop: true) {
+                    awaitingKeyFrameAfterDrop = true
+                    continue
+                }
+                if dropQueuedFrame(where: { $0.kind == .video }, countAsVideoDrop: true) {
+                    awaitingKeyFrameAfterDrop = true
+                    continue
+                }
+                guard dropQueuedFrame(where: { $0.kind == .control }, countAsVideoDrop: false) else {
+                    return false
+                }
+            case .cursor:
+                if dropQueuedFrame(where: { $0.kind == .cursor }, countAsVideoDrop: false) {
+                    continue
+                }
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private func coalesceQueuedCursorFrame(with frame: OutboundFrame) -> Bool {
+        let originalCount = pendingOutboundFrames.count
+        pendingOutboundFrames.removeAll { $0.kind == .cursor }
+        guard pendingOutboundFrames.count != originalCount else {
+            return false
+        }
+
+        pendingOutboundFrames.append(frame)
+        return true
+    }
+
+    private func dropQueuedFrame(
+        where shouldDrop: (OutboundFrame) -> Bool,
+        countAsVideoDrop: Bool
+    ) -> Bool {
+        guard let dropIndex = pendingOutboundFrames.firstIndex(where: shouldDrop) else {
+            return false
+        }
+
+        pendingOutboundFrames.remove(at: dropIndex)
+        if countAsVideoDrop {
+            droppedOutboundFrameCount += 1
+        }
+        return true
     }
 
     private func flushPendingIfPossible() {
@@ -248,8 +438,9 @@ final class TransportService {
         // (bufferbloat) that causes latency spikes under sustained 5K HEVC load.
         connection.batch {
             while !pendingOutboundFrames.isEmpty && networkInFlightCount < maxNetworkInFlight {
-                let frame = pendingOutboundFrames.removeFirst()
+                guard let frame = dequeueNextOutboundFrame() else { break }
                 networkInFlightCount += 1
+                recordSentFrame(frame.kind)
                 connection.send(content: frame.data, completion: .contentProcessed { [weak self] error in
                     guard let self else { return }
                     self.networkInFlightCount -= 1
@@ -257,6 +448,32 @@ final class TransportService {
                     self.flushPendingIfPossible()
                 })
             }
+        }
+    }
+
+    private func dequeueNextOutboundFrame() -> OutboundFrame? {
+        guard !pendingOutboundFrames.isEmpty else { return nil }
+
+        let priorityOrder: [OutboundFrameKind] = [.control, .cursor, .audio, .video]
+        for kind in priorityOrder {
+            if let index = pendingOutboundFrames.firstIndex(where: { $0.kind == kind }) {
+                return pendingOutboundFrames.remove(at: index)
+            }
+        }
+
+        return pendingOutboundFrames.removeFirst()
+    }
+
+    private func recordSentFrame(_ kind: OutboundFrameKind) {
+        switch kind {
+        case .control:
+            sentControlFrameCount += 1
+        case .cursor:
+            sentCursorFrameCount += 1
+        case .audio:
+            sentAudioFrameCount += 1
+        case .video:
+            sentVideoFrameCount += 1
         }
     }
 
@@ -278,6 +495,7 @@ final class TransportService {
             if isComplete {
                 connection.cancel()
                 self.receiveBuffer.removeAll(keepingCapacity: false)
+                self.receiveBufferReadOffset = 0
                 self.isConnected = false
                 self.onStateChange?(false)
                 return
@@ -288,20 +506,34 @@ final class TransportService {
     }
 
     private func drainBufferedEnvelopes() {
+        let compactThreshold = 1 * 1024 * 1024 // 1 MB — sender receives only control messages
+
         while true {
-            guard receiveBuffer.count >= 4 else { return }
-            let length = Int(readLengthPrefix(from: receiveBuffer))
+            let available = receiveBuffer.count - receiveBufferReadOffset
+            guard available >= 4 else { return }
+
+            let length = Int(
+                NetworkProtocol.readUInt32BigEndian(from: receiveBuffer, atOffset: receiveBufferReadOffset) ?? 0
+            )
             guard length <= NetworkProtocol.maximumMessageBytes else {
                 receiveBuffer.removeAll(keepingCapacity: false)
+                receiveBufferReadOffset = 0
                 onError?(TransportServiceError.messageTooLarge)
                 return
             }
 
             let totalFrameLength = 4 + length
-            guard receiveBuffer.count >= totalFrameLength else { return }
+            guard available >= totalFrameLength else { return }
 
-            let payload = receiveBuffer.subdata(in: 4..<totalFrameLength)
-            receiveBuffer.removeSubrange(0..<totalFrameLength)
+            let payloadStart = receiveBufferReadOffset + 4
+            let payloadEnd   = receiveBufferReadOffset + totalFrameLength
+            let payload = receiveBuffer.subdata(in: payloadStart..<payloadEnd)
+            receiveBufferReadOffset += totalFrameLength
+
+            if receiveBufferReadOffset >= compactThreshold {
+                receiveBuffer.removeSubrange(0..<receiveBufferReadOffset)
+                receiveBufferReadOffset = 0
+            }
 
             do {
                 let envelope = try JSONDecoder().decode(NetworkEnvelope.self, from: payload)
@@ -322,6 +554,41 @@ final class TransportService {
 
     private func readLengthPrefix(from data: Data) -> UInt32 {
         NetworkProtocol.readUInt32BigEndian(from: data, atOffset: 0) ?? 0
+    }
+
+    private func makeQueueDebugSnapshotLocked() -> QueueDebugSnapshot {
+        var pendingControlFrames = 0
+        var pendingCursorFrames = 0
+        var pendingAudioFrames = 0
+        var pendingVideoFrames = 0
+
+        for frame in pendingOutboundFrames {
+            switch frame.kind {
+            case .control:
+                pendingControlFrames += 1
+            case .cursor:
+                pendingCursorFrames += 1
+            case .audio:
+                pendingAudioFrames += 1
+            case .video:
+                pendingVideoFrames += 1
+            }
+        }
+
+        return QueueDebugSnapshot(
+            pendingFrames: pendingOutboundFrames.count,
+            pendingControlFrames: pendingControlFrames,
+            pendingCursorFrames: pendingCursorFrames,
+            pendingAudioFrames: pendingAudioFrames,
+            pendingVideoFrames: pendingVideoFrames,
+            networkInFlightCount: networkInFlightCount,
+            sentControlFrames: sentControlFrameCount,
+            sentCursorFrames: sentCursorFrameCount,
+            sentAudioFrames: sentAudioFrameCount,
+            sentVideoFrames: sentVideoFrameCount,
+            droppedVideoFrames: droppedOutboundFrameCount,
+            droppedCursorFrames: droppedCursorStateCount
+        )
     }
 }
 
@@ -412,9 +679,8 @@ final class VideoDatagramTransportService {
         }
     }
 
-    /// The UDP path only carries interframes in hybrid mode. When the sender emits a
-    /// recovery keyframe over TCP, clear stale UDP deltas and allow the next post-keyframe
-    /// interframes to flow again.
+    /// Clear stale queued deltas at each keyframe boundary so the next UDP keyframe establishes
+    /// a fresh decode baseline for subsequent interframes.
     func noteKeyFrameBoundary() {
         queue.async { [weak self] in
             guard let self else { return }
@@ -489,6 +755,220 @@ final class VideoDatagramTransportService {
                     }
                 }
             }
+        }
+    }
+}
+
+/// UDP transport for low-latency cursor motion delivery.
+final class CursorDatagramTransportService {
+    struct DebugSnapshot {
+        let sentMotionPackets: UInt64
+        let sentQueuedPackets: UInt64
+        let pendingPackets: Int
+        let networkInFlightCount: Int
+        let droppedQueuedPackets: UInt64
+        let sendErrors: UInt64
+        let receivedStateTransitions: UInt64
+    }
+
+    private let queue = DispatchQueue(label: "wireddisplay.sender.cursorDatagram")
+
+    private(set) var isConnected = false
+
+    private var connection: NWConnection?
+    private var connectedHost: String?
+    private var connectedPort: UInt16?
+    private var pendingPackets: [Data] = []
+    private var networkInFlightCount = 0
+    private let maxNetworkInFlight = 4
+    private let maxPendingPackets = 4
+    private var sentMotionPacketCount: UInt64 = 0
+    private var sentQueuedPacketCount: UInt64 = 0
+    private var droppedQueuedPacketCount: UInt64 = 0
+    private var sendErrorCount: UInt64 = 0
+    private var stateTransitionCount: UInt64 = 0
+
+    var onStateChange: ((Bool) -> Void)?
+    var onError: ((Error) -> Void)?
+
+    func connect(host: String, port: UInt16 = NetworkProtocol.defaultPort) {
+        if connection != nil, connectedHost == host, connectedPort == port {
+            return
+        }
+
+        disconnect()
+
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            onError?(TransportServiceError.invalidEndpoint)
+            return
+        }
+
+        let parameters = NetworkDiagnostics.lowLatencyUDPParameters()
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
+        self.connection = connection
+        connectedHost = host
+        connectedPort = port
+
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.isConnected = true
+                self.stateTransitionCount += 1
+                self.onStateChange?(true)
+                self.flushPendingPacketIfPossible()
+            case .failed(let error):
+                self.isConnected = false
+                self.stateTransitionCount += 1
+                self.onStateChange?(false)
+                self.onError?(error)
+            case .cancelled:
+                self.isConnected = false
+                self.stateTransitionCount += 1
+                self.onStateChange?(false)
+            default:
+                break
+            }
+        }
+
+        connection.start(queue: queue)
+    }
+
+    func disconnect() {
+        connection?.cancel()
+        connection = nil
+        connectedHost = nil
+        connectedPort = nil
+        isConnected = false
+        pendingPackets.removeAll(keepingCapacity: false)
+        networkInFlightCount = 0
+        sentMotionPacketCount = 0
+        sentQueuedPacketCount = 0
+        droppedQueuedPacketCount = 0
+        sendErrorCount = 0
+        stateTransitionCount = 0
+        onStateChange?(false)
+    }
+
+    func sendCursorState(_ cursorState: CursorStatePayload) {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            if cursorState.appearance == nil {
+                self.sendCursorMotionImmediately(cursorState)
+            } else {
+                self.enqueueCursorPacket(cursorState)
+                self.flushPendingPacketIfPossible()
+            }
+        }
+    }
+
+    private func sendCursorMotionImmediately(_ cursorState: CursorStatePayload) {
+        guard isConnected, let connection else { return }
+
+        let motionState = CursorStatePayload(
+            timestampNanoseconds: cursorState.timestampNanoseconds,
+            normalizedX: cursorState.normalizedX,
+            normalizedY: cursorState.normalizedY,
+            isVisible: cursorState.isVisible,
+            ownershipIntent: cursorState.ownershipIntent,
+            appearance: nil
+        )
+        let packet = BinaryCursorWire.serialize(cursorState: motionState)
+        sentMotionPacketCount += 1
+        if NetworkProtocol.enableVerboseCursorPacketLogging {
+            print(
+                String(
+                    format: "[CursorDatagram] motion packet #%llu sent visible=%@ ownership=%@ x=%.4f y=%.4f",
+                    sentMotionPacketCount,
+                    motionState.isVisible ? "yes" : "no",
+                    motionState.ownershipIntent.rawValue,
+                    motionState.normalizedX,
+                    motionState.normalizedY
+                )
+            )
+        }
+
+        // Cursor motion is latency-sensitive and safe to drop, so bypass the completion-gated queue.
+        connection.send(content: packet, completion: .idempotent)
+    }
+
+    private func enqueueCursorPacket(_ cursorState: CursorStatePayload) {
+        let motionState = CursorStatePayload(
+            timestampNanoseconds: cursorState.timestampNanoseconds,
+            normalizedX: cursorState.normalizedX,
+            normalizedY: cursorState.normalizedY,
+            isVisible: cursorState.isVisible,
+            ownershipIntent: cursorState.ownershipIntent,
+            appearance: nil
+        )
+
+        do {
+            let envelope = try NetworkEnvelope.make(
+                type: .cursorState,
+                sequenceNumber: 0,
+                payload: motionState
+            )
+            let encoded = try JSONEncoder().encode(envelope)
+            guard encoded.count <= NetworkProtocol.maximumEnvelopeBytes else {
+                onError?(TransportServiceError.messageTooLarge)
+                return
+            }
+
+            while pendingPackets.count >= maxPendingPackets {
+                pendingPackets.removeFirst()
+                droppedQueuedPacketCount += 1
+                if NetworkProtocol.enableTransportDebugLogging {
+                    print("[CursorDatagram] dropped queued cursor packet total=\(droppedQueuedPacketCount)")
+                }
+            }
+
+            pendingPackets.append(encoded)
+        } catch {
+            sendErrorCount += 1
+            if NetworkProtocol.enableTransportDebugLogging {
+                print("[CursorDatagram] encode/send preparation error total=\(sendErrorCount): \(error)")
+            }
+            onError?(error)
+        }
+    }
+
+    private func flushPendingPacketIfPossible() {
+        guard isConnected, let connection else { return }
+        guard !pendingPackets.isEmpty else { return }
+
+        while !pendingPackets.isEmpty && networkInFlightCount < maxNetworkInFlight {
+            let packet = pendingPackets.removeFirst()
+            networkInFlightCount += 1
+            sentQueuedPacketCount += 1
+            connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+                guard let self else { return }
+                self.queue.async {
+                    self.networkInFlightCount -= 1
+                    if let error {
+                        self.sendErrorCount += 1
+                        if NetworkProtocol.enableTransportDebugLogging {
+                            print("[CursorDatagram] send error total=\(self.sendErrorCount): \(error)")
+                        }
+                        self.onError?(error)
+                    }
+                    self.flushPendingPacketIfPossible()
+                }
+            })
+        }
+    }
+
+    func debugSnapshot() -> DebugSnapshot {
+        queue.sync {
+            DebugSnapshot(
+                sentMotionPackets: sentMotionPacketCount,
+                sentQueuedPackets: sentQueuedPacketCount,
+                pendingPackets: pendingPackets.count,
+                networkInFlightCount: networkInFlightCount,
+                droppedQueuedPackets: droppedQueuedPacketCount,
+                sendErrors: sendErrorCount,
+                receivedStateTransitions: stateTransitionCount
+            )
         }
     }
 }

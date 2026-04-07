@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 
 @MainActor
-private enum SenderRuntime {
+enum SenderRuntime {
     static let coordinator = SenderSessionCoordinator()
     static let discoveryService = ReceiverDiscoveryService()
 }
@@ -18,6 +18,8 @@ struct SenderRootView: View {
     private static let savedDisplayResolutionPreferenceKey = "displayResolutionPreference"
     private static let savedFixedDisplayPresetKey = "fixedDisplayPreset"
     private static let savedStreamingPipelinePreferenceKey = "streamingPipelinePreference"
+    private static let savedUseSideCursorOverlayKey = "useSideCursorOverlay"
+    private static let savedUseDynamicCursorAppearanceMirroringKey = "useDynamicCursorAppearanceMirroring"
 
     @State private var receiverHostInput = UserDefaults.standard.string(forKey: SenderRootView.savedHostKey) ?? ""
     @State private var portInput = UserDefaults.standard.string(forKey: SenderRootView.savedPortKey) ?? String(NetworkProtocol.defaultPort)
@@ -40,10 +42,30 @@ struct SenderRootView: View {
     @State private var sentMegabitsPerSecondText = "-"
     @State private var heartbeatRoundTripText = "-"
     @State private var estimatedDisplayLatencyText = "-"
+    @State private var captureToEncodeLatencyText = "-"
+    @State private var encodeToReceiveLatencyText = "-"
+    @State private var receiveToRenderLatencyText = "-"
 
     @State private var endpointSummary = "-"
     @State private var negotiatedResolutionText = "-"
     @State private var videoTransportText = "TCP"
+    @State private var tcpVideoFramesSent: UInt64 = 0
+    @State private var tcpVideoFramesDropped: UInt64 = 0
+    @State private var tcpCursorFramesSent: UInt64 = 0
+    @State private var cursorDatagramMotionPacketsSent: UInt64 = 0
+    @State private var cursorDatagramQueuedPacketsSent: UInt64 = 0
+    @State private var cursorDatagramQueuedPacketsDropped: UInt64 = 0
+    @State private var cursorDatagramPendingPackets: Int = 0
+    @State private var cursorDatagramSendErrors: UInt64 = 0
+    @State private var cursorRefreshDriverModeText = "-"
+    @State private var cursorRefreshSourceCallbacksPerSecondText = "-"
+    @State private var cursorDisplayLinkCallbacksPerSecondText = "-"
+    @State private var cursorRefreshTicksPerSecondText = "-"
+    @State private var cursorPollRequestsPerSecondText = "-"
+    @State private var cursorPollExecutionsPerSecondText = "-"
+    @State private var cursorPollCoalescedPerSecondText = "-"
+    @State private var cursorPacketsSuppressedPerSecondText = "-"
+    @State private var cursorPacketsSentPerSecondText = "-"
     @State private var resolvedStreamingPipelineText = "-"
     @State private var wiredPathSummary = "unknown"
     @State private var wiredWarning = ""
@@ -52,6 +74,12 @@ struct SenderRootView: View {
         NetworkProtocol.StreamingPipelinePreference(
             rawValue: UserDefaults.standard.string(forKey: SenderRootView.savedStreamingPipelinePreferenceKey) ?? ""
         ) ?? .automatic
+    @State private var useSideCursorOverlay =
+        UserDefaults.standard.object(forKey: SenderRootView.savedUseSideCursorOverlayKey) as? Bool ?? false
+    @State private var useDynamicCursorAppearanceMirroring =
+        UserDefaults.standard.object(forKey: SenderRootView.savedUseDynamicCursorAppearanceMirroringKey) as? Bool ??
+        NetworkProtocol.enableDynamicCursorAppearanceMirroring
+    @State private var isAdvancedResolutionsExpanded = false
 
     var body: some View {
         ScrollView {
@@ -62,18 +90,22 @@ struct SenderRootView: View {
                 streamingPipelineSection
                 actionSection
                 statusSection
-                nerdStatsSection
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
         .frame(minWidth: 800, minHeight: 540)
         .onAppear {
-            if let preset = VirtualDisplayPreset.commonPresets.first(where: { $0.id == selectedFixedDisplayPresetID }) {
-                coordinator.setPreferredDisplayPreset(preset)
+            let persistedPreset = VirtualDisplayPreset.preset(forID: selectedFixedDisplayPresetID) ?? .defaultFixed
+            if selectedFixedDisplayPresetID != persistedPreset.id {
+                selectedFixedDisplayPresetID = persistedPreset.id
+                UserDefaults.standard.set(persistedPreset.id, forKey: Self.savedFixedDisplayPresetKey)
             }
+            coordinator.setPreferredDisplayPreset(persistedPreset)
             coordinator.setDisplayResolutionPreference(selectedDisplayResolutionPreference)
             coordinator.setStreamingPipelinePreference(selectedStreamingPipelinePreference)
+            coordinator.setUseReceiverSideCursorOverlay(useSideCursorOverlay)
+            coordinator.setUseDynamicCursorAppearanceMirroring(useDynamicCursorAppearanceMirroring)
             coordinator.onChange = {
                 refreshFromCoordinator()
             }
@@ -192,15 +224,77 @@ struct SenderRootView: View {
 
                 if selectedDisplayResolutionPreference == .fixedPreset {
                     Picker("Preset", selection: $selectedFixedDisplayPresetID) {
-                        ForEach(VirtualDisplayPreset.commonPresets) { preset in
+                        ForEach(VirtualDisplayPreset.standardPresets) { preset in
                             Text(preset.label).tag(preset.id)
                         }
                     }
                     .onChange(of: selectedFixedDisplayPresetID) { _, newID in
-                        guard let preset = VirtualDisplayPreset.commonPresets.first(where: { $0.id == newID }) else { return }
+                        guard let preset = VirtualDisplayPreset.preset(forID: newID) else { return }
                         UserDefaults.standard.set(newID, forKey: Self.savedFixedDisplayPresetKey)
                         coordinator.setPreferredDisplayPreset(preset)
                         refreshFromCoordinator()
+                    }
+
+                    VStack(alignment: .leading, spacing: 0) {
+                        Button {
+                            isAdvancedResolutionsExpanded.toggle()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isAdvancedResolutionsExpanded ? "chevron.down" : "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                Text("Advanced Resolutions")
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                            .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+
+                        if isAdvancedResolutionsExpanded {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("This exposes a much larger set of display modes, including non-HiDPI 4K, Retina variants, MacBook panel sizes, ultrawides, and higher-end panels like 6K and 8K-class experiments.")
+                                    .foregroundStyle(.secondary)
+                                    .font(.callout)
+
+                                Picker("All Presets", selection: $selectedFixedDisplayPresetID) {
+                                    ForEach(VirtualDisplayPreset.allPresets) { preset in
+                                        Text(preset.label).tag(preset.id)
+                                    }
+                                }
+                                .labelsHidden()
+                                .onChange(of: selectedFixedDisplayPresetID) { _, newID in
+                                    guard let preset = VirtualDisplayPreset.preset(forID: newID) else { return }
+                                    UserDefaults.standard.set(newID, forKey: Self.savedFixedDisplayPresetKey)
+                                    coordinator.setPreferredDisplayPreset(preset)
+                                    refreshFromCoordinator()
+                                }
+
+                                if !VirtualDisplayPreset.standardPresets.contains(selectedFixedDisplayPreset) {
+                                    Text("Selected advanced preset: \(selectedFixedDisplayPreset.label)")
+                                        .foregroundStyle(.secondary)
+                                        .font(.callout)
+                                }
+
+                                if isSessionActive && !coordinator.availableDisplayModes.isEmpty {
+                                    Text("Live modes macOS is currently advertising:")
+                                        .font(.callout.weight(.medium))
+                                    ScrollView {
+                                        LazyVStack(alignment: .leading, spacing: 4) {
+                                            ForEach(coordinator.availableDisplayModes) { mode in
+                                                Text(mode.label)
+                                                    .font(.system(.caption, design: .monospaced))
+                                                    .foregroundStyle(mode == coordinator.activeDisplayMode ? Color.accentColor : .secondary)
+                                            }
+                                        }
+                                    }
+                                    .frame(maxHeight: 140)
+                                }
+                            }
+                            .padding(.top, 6)
+                            .padding(.leading, 19)
+                        }
                     }
                 }
 
@@ -240,8 +334,56 @@ struct SenderRootView: View {
                     .foregroundStyle(.secondary)
                     .font(.system(.body, design: .monospaced))
 
+                Toggle(isOn: $useSideCursorOverlay) {
+                    HStack(spacing: 6) {
+                        Text("Use Side Cursor Overlay")
+                        Text("BETA")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(Color.orange.opacity(0.14))
+                            )
+                    }
+                }
+                    .onChange(of: useSideCursorOverlay) { _, newValue in
+                        UserDefaults.standard.set(newValue, forKey: Self.savedUseSideCursorOverlayKey)
+                        coordinator.setUseReceiverSideCursorOverlay(newValue)
+                        refreshFromCoordinator()
+                    }
+
+                Toggle("Mirror Cursor Shapes", isOn: $useDynamicCursorAppearanceMirroring)
+                    .disabled(!useSideCursorOverlay)
+                    .onChange(of: useDynamicCursorAppearanceMirroring) { _, newValue in
+                        UserDefaults.standard.set(newValue, forKey: Self.savedUseDynamicCursorAppearanceMirroringKey)
+                        coordinator.setUseDynamicCursorAppearanceMirroring(newValue)
+                        refreshFromCoordinator()
+                    }
+
+                Text(
+                    useSideCursorOverlay
+                        ? "Uses the receiver-side cursor overlay path. Native cursor capture is disabled in the video stream."
+                        : "Captures the macOS cursor directly inside the video stream and skips the side cursor path."
+                )
+                .foregroundStyle(.secondary)
+                .font(.callout)
+
+                Text(
+                    useSideCursorOverlay
+                        ? (
+                            useDynamicCursorAppearanceMirroring
+                                ? "Also mirrors cursor shapes like I-beam, resize arrows, and pointing hands."
+                                : "Cursor shape mirroring is off, so the receiver stays on the default arrow cursor."
+                        )
+                        : "Cursor shape mirroring only applies when Side Cursor Overlay is enabled."
+                )
+                .foregroundStyle(.secondary)
+                .font(.callout)
+
                 if isSessionActive {
-                    Text("Changes take effect the next time capture starts.")
+                    Text("Changes restart capture automatically while streaming.")
                         .foregroundStyle(.secondary)
                         .font(.callout)
                 }
@@ -258,15 +400,10 @@ struct SenderRootView: View {
                 }
                 .keyboardShortcut(.cancelAction)
             } else {
-                Button("Connect & Stream TCP") {
-                    connect(using: .tcp)
+                Button("Connect & Stream") {
+                    connect()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!canConnect)
-
-                Button("Connect & Stream UDP") {
-                    connect(using: .udp)
-                }
                 .disabled(!canConnect)
             }
         }
@@ -298,10 +435,30 @@ struct SenderRootView: View {
                         Text("Connection: \(connectionText)")
                         Text("Sent Frames: \(sentFrameCount)")
                         Text("Dropped Outbound Frames: \(droppedOutboundFrameCount)")
+                        Text("TCP Video Frames Sent: \(tcpVideoFramesSent)")
+                        Text("TCP Video Frames Dropped: \(tcpVideoFramesDropped)")
+                        Text("TCP Cursor Frames Sent: \(tcpCursorFramesSent)")
+                        Text("Cursor UDP Motion Packets Sent: \(cursorDatagramMotionPacketsSent)")
+                        Text("Cursor UDP Queued Packets Sent: \(cursorDatagramQueuedPacketsSent)")
+                        Text("Cursor UDP Queued Packets Dropped: \(cursorDatagramQueuedPacketsDropped)")
+                        Text("Cursor UDP Pending Packets: \(cursorDatagramPendingPackets)")
+                        Text("Cursor UDP Send Errors: \(cursorDatagramSendErrors)")
+                        Text("Cursor Refresh Driver Mode: \(cursorRefreshDriverModeText)")
+                        Text("Cursor Refresh Source Callbacks: \(cursorRefreshSourceCallbacksPerSecondText)")
+                        Text("Cursor Display-Link Callbacks: \(cursorDisplayLinkCallbacksPerSecondText)")
+                        Text("Cursor Main-Actor Refresh Ticks: \(cursorRefreshTicksPerSecondText)")
+                        Text("Cursor Poll Requests: \(cursorPollRequestsPerSecondText)")
+                        Text("Cursor Poll Executions: \(cursorPollExecutionsPerSecondText)")
+                        Text("Cursor Poll Coalesced: \(cursorPollCoalescedPerSecondText)")
+                        Text("Cursor Packets Suppressed: \(cursorPacketsSuppressedPerSecondText)")
+                        Text("Cursor Packets Sent Rate: \(cursorPacketsSentPerSecondText)")
                         Text("Send Rate: \(sentFramesPerSecondText)")
                         Text("Send Throughput: \(sentMegabitsPerSecondText)")
                         Text("Heartbeat RTT: \(heartbeatRoundTripText)")
                         Text("Est. Display Latency: \(estimatedDisplayLatencyText)")
+                        Text("Capture -> Encode: \(captureToEncodeLatencyText)")
+                        Text("Encode -> Receive: \(encodeToReceiveLatencyText)")
+                        Text("Receive -> Render: \(receiveToRenderLatencyText)")
                     }
                 }
 
@@ -312,6 +469,7 @@ struct SenderRootView: View {
                         Text("Video Transport: \(videoTransportText)")
                         Text("Display Resolution: \(displayResolutionSummaryText)")
                         Text("Streaming Pipeline: \(selectedStreamingPipelinePreference.label) -> \(resolvedStreamingPipelineText)")
+                        Text("Cursor Mode: \(cursorModeSummaryText)")
                         Text("Negotiated Display: \(negotiatedResolutionText)")
                         Text("Wired Path: \(wiredPathSummary)")
 
@@ -341,16 +499,25 @@ struct SenderRootView: View {
         resolvedConnectionTarget() != nil
     }
 
-    private func connect(using videoTransportMode: NetworkProtocol.VideoTransportMode) {
+    private func connect() {
         guard let target = resolvedConnectionTarget() else { return }
+        let alternateHosts: [String]
+        if let receiver = selectedReceiver() {
+            let primaryHost = selectedPath(for: receiver)?.host ?? receiver.host
+            alternateHosts = ([receiver.host] + receiver.pathOptions.map(\.host))
+                .filter { $0 != primaryHost }
+        } else {
+            alternateHosts = []
+        }
 
         UserDefaults.standard.set(target.host, forKey: Self.savedHostKey)
         UserDefaults.standard.set(String(target.port), forKey: Self.savedPortKey)
 
         coordinator.connect(
             receiverHost: target.host,
+            alternateReceiverHosts: alternateHosts,
             port: target.port,
-            videoTransportMode: videoTransportMode
+            videoTransportMode: .tcp
         )
         refreshFromCoordinator()
     }
@@ -361,7 +528,7 @@ struct SenderRootView: View {
     }
 
     private var selectedFixedDisplayPreset: VirtualDisplayPreset {
-        VirtualDisplayPreset.commonPresets.first(where: { $0.id == selectedFixedDisplayPresetID }) ?? .defaultFixed
+        VirtualDisplayPreset.preset(forID: selectedFixedDisplayPresetID) ?? .defaultFixed
     }
 
     private var displayResolutionSummaryText: String {
@@ -439,12 +606,35 @@ struct SenderRootView: View {
         droppedOutboundFrameCount = coordinator.droppedOutboundFrameCount
         lastErrorText = coordinator.lastErrorMessage ?? "-"
         sentFramesPerSecondText = formatRate(coordinator.sentFramesPerSecond, unit: "fps")
+        cursorPacketsSentPerSecondText = formatRate(coordinator.cursorPacketsSentPerSecond, unit: "fps")
         sentMegabitsPerSecondText = formatRate(coordinator.sentMegabitsPerSecond, unit: "Mbps")
         heartbeatRoundTripText = formatRate(coordinator.heartbeatRoundTripMilliseconds, unit: "ms")
         estimatedDisplayLatencyText = formatRate(coordinator.estimatedDisplayLatencyMilliseconds, unit: "ms")
+        captureToEncodeLatencyText = formatRate(coordinator.captureToEncodeLatencyMilliseconds, unit: "ms")
+        encodeToReceiveLatencyText = formatRate(coordinator.encodeToReceiveLatencyMilliseconds, unit: "ms")
+        receiveToRenderLatencyText = formatRate(coordinator.receiveToRenderLatencyMilliseconds, unit: "ms")
 
         endpointSummary = coordinator.configuredEndpointSummary
         videoTransportText = coordinator.negotiatedVideoTransportMode.rawValue.uppercased()
+        tcpVideoFramesSent = coordinator.tcpVideoFramesSent
+        tcpVideoFramesDropped = coordinator.tcpVideoFramesDropped
+        tcpCursorFramesSent = coordinator.tcpCursorFramesSent
+        cursorDatagramMotionPacketsSent = coordinator.cursorDatagramMotionPacketsSent
+        cursorDatagramQueuedPacketsSent = coordinator.cursorDatagramQueuedPacketsSent
+        cursorDatagramQueuedPacketsDropped = coordinator.cursorDatagramQueuedPacketsDropped
+        cursorDatagramPendingPackets = coordinator.cursorDatagramPendingPackets
+        cursorDatagramSendErrors = coordinator.cursorDatagramSendErrors
+        cursorRefreshDriverModeText = coordinator.cursorRefreshDriverMode
+        cursorRefreshSourceCallbacksPerSecondText = formatRate(
+            coordinator.cursorRefreshSourceCallbacksPerSecond,
+            unit: "fps"
+        )
+        cursorDisplayLinkCallbacksPerSecondText = formatRate(coordinator.cursorDisplayLinkCallbacksPerSecond, unit: "fps")
+        cursorRefreshTicksPerSecondText = formatRate(coordinator.cursorRefreshTicksPerSecond, unit: "fps")
+        cursorPollRequestsPerSecondText = formatRate(coordinator.cursorPollRequestsPerSecond, unit: "fps")
+        cursorPollExecutionsPerSecondText = formatRate(coordinator.cursorPollExecutionsPerSecond, unit: "fps")
+        cursorPollCoalescedPerSecondText = formatRate(coordinator.cursorPollCoalescedPerSecond, unit: "fps")
+        cursorPacketsSuppressedPerSecondText = formatRate(coordinator.cursorPacketsSuppressedPerSecond, unit: "fps")
         resolvedStreamingPipelineText = coordinator.resolvedStreamingPipelineMode.label
         if selectedDisplayResolutionPreference != coordinator.displayResolutionPreference {
             selectedDisplayResolutionPreference = coordinator.displayResolutionPreference
@@ -454,6 +644,12 @@ struct SenderRootView: View {
         }
         if selectedStreamingPipelinePreference != coordinator.streamingPipelinePreference {
             selectedStreamingPipelinePreference = coordinator.streamingPipelinePreference
+        }
+        if useSideCursorOverlay != coordinator.useReceiverSideCursorOverlay {
+            useSideCursorOverlay = coordinator.useReceiverSideCursorOverlay
+        }
+        if useDynamicCursorAppearanceMirroring != coordinator.useDynamicCursorAppearanceMirroring {
+            useDynamicCursorAppearanceMirroring = coordinator.useDynamicCursorAppearanceMirroring
         }
         negotiatedResolutionText = "\(coordinator.targetWidth)x\(coordinator.targetHeight)"
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
@@ -520,12 +716,23 @@ struct SenderRootView: View {
         switch coordinator.state {
         case .running, .connected, .waitingForAck, .connecting:
             let path = coordinator.wiredPathAvailable ? "Wired" : "Wireless"
-            return "\(path) via \(videoTransportText)"
+            let cursorPath = coordinator.useReceiverSideCursorOverlay ? " + Cursor UDP" : ""
+            return "\(path) via \(videoTransportText)\(cursorPath)"
         case .failed:
             return wiredPathSummary == "available" ? "Wired path available" : "Wireless or no wired path detected"
         case .idle:
             return wiredPathSummary == "available" ? "Ready on wired network" : "No wired path detected"
         }
+    }
+
+    private var cursorModeSummaryText: String {
+        if coordinator.useReceiverSideCursorOverlay {
+            return coordinator.useDynamicCursorAppearanceMirroring
+                ? "Side Cursor Overlay + Shape Mirroring"
+                : "Side Cursor Overlay + Arrow Cursor"
+        }
+
+        return "Native Cursor Capture"
     }
 }
 

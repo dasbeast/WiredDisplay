@@ -10,6 +10,7 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var lastErrorText = "-"
     @Published private(set) var receivedFramesPerSecondText = "-"
     @Published private(set) var receivedMegabitsPerSecondText = "-"
+    @Published private(set) var cursorPacketsReceivedPerSecondText = "-"
     @Published private(set) var isStreaming = false
     @Published private(set) var interfaceLines: [String] = []
     @Published private(set) var wiredPathSummary = "unknown"
@@ -17,6 +18,13 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var advertisementErrorText: String?
     @Published private(set) var isReceiverWindowVisible = false
     @Published private(set) var powerManagementErrorText: String?
+    @Published private(set) var cursorOverlayText = "-"
+    @Published private(set) var cursorOverlayNormalizedX: Double?
+    @Published private(set) var cursorOverlayNormalizedY: Double?
+    @Published private(set) var isCursorOverlayVisible = false
+    @Published private(set) var cursorOverlayImage: NSImage?
+    @Published private(set) var cursorOverlayHotSpot: CGPoint?
+    @Published private(set) var isReceiverWindowFullScreen = false
 
     let coordinator = ReceiverSessionCoordinator()
     let advertisementService = ReceiverAdvertisementService()
@@ -54,12 +62,34 @@ final class ReceiverAppController: ObservableObject {
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: NSWorkspace.willSleepNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.handleSystemWillSleep()
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: NSWorkspace.didWakeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.handleSystemDidWake()
+            }
+            .store(in: &cancellables)
+
         windowManager.onVisibilityChange = { [weak self] isVisible in
             guard let self else { return }
             Task { @MainActor in
                 self.isReceiverWindowVisible = isVisible
+                self.isReceiverWindowFullScreen = self.windowManager.isWindowFullScreen()
             }
         }
+
+        NotificationCenter.default.publisher(for: .receiverReopenMainWindow)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.presentReceiverWindow(fullScreen: false)
+            }
+            .store(in: &cancellables)
 
         start()
     }
@@ -72,14 +102,21 @@ final class ReceiverAppController: ObservableObject {
         )
         refreshAdvertisementState()
         refreshFromCoordinator()
+        // Defer past the SwiftUI @StateObject initialization cycle so that
+        // the onVisibilityChange @Published write doesn't land during a view update.
+        Task { @MainActor in
+            self.presentReceiverWindow(fullScreen: false)
+        }
     }
 
     func presentReceiverWindow(fullScreen: Bool) {
         windowManager.present(appController: self, enterFullScreen: fullScreen)
+        isReceiverWindowFullScreen = windowManager.isWindowFullScreen()
     }
 
     func hideReceiverWindow() {
         windowManager.hide()
+        isReceiverWindowFullScreen = false
     }
 
     func toggleReceiverWindow() {
@@ -88,6 +125,11 @@ final class ReceiverAppController: ObservableObject {
         } else {
             presentReceiverWindow(fullScreen: false)
         }
+    }
+
+    func leaveReceiverFullScreen() {
+        windowManager.leaveFullScreenIfNeeded()
+        isReceiverWindowFullScreen = windowManager.isWindowFullScreen()
     }
 
     func quitApplication() {
@@ -112,16 +154,24 @@ final class ReceiverAppController: ObservableObject {
         lastErrorText = coordinator.lastErrorMessage ?? "-"
         receivedFramesPerSecondText = formatRate(coordinator.receivedFramesPerSecond, unit: "fps")
         receivedMegabitsPerSecondText = formatRate(coordinator.receivedMegabitsPerSecond, unit: "Mbps")
+        cursorPacketsReceivedPerSecondText = formatRate(coordinator.cursorPacketsReceivedPerSecond, unit: "fps")
         wiredPathSummary = coordinator.wiredPathAvailable ? "available" : "not available"
         interfaceLines = coordinator.localInterfaceDescriptions
+        cursorOverlayText = coordinator.cursorOverlaySummary
+        cursorOverlayNormalizedX = coordinator.cursorOverlayNormalizedX
+        cursorOverlayNormalizedY = coordinator.cursorOverlayNormalizedY
+        isCursorOverlayVisible = coordinator.isCursorOverlayVisible
+        cursorOverlayImage = coordinator.cursorOverlayImage
+        cursorOverlayHotSpot = coordinator.cursorOverlayHotSpot
 
-        if newStreaming && !wasStreaming {
-            powerManagementService.startPreventingSleep()
-            presentReceiverWindow(fullScreen: true)
-        } else if !newStreaming && wasStreaming {
+        if newStreaming {
+            if !powerManagementService.isPreventingSleep {
+                powerManagementService.startPreventingSleep()
+            }
+        } else if wasStreaming {
             powerManagementService.stopPreventingSleep()
-            hideReceiverWindow()
         }
+        isReceiverWindowFullScreen = windowManager.isWindowFullScreen()
     }
 
     private func statusText(for state: ReceiverSessionCoordinator.SessionState) -> String {
@@ -140,5 +190,14 @@ final class ReceiverAppController: ObservableObject {
     private func formatRate(_ value: Double?, unit: String) -> String {
         guard let value else { return "-" }
         return String(format: "%.2f %@", value, unit)
+    }
+
+    private func handleSystemWillSleep() {
+        guard powerManagementService.isPreventingSleep else { return }
+        powerManagementService.stopPreventingSleep()
+    }
+
+    private func handleSystemDidWake() {
+        refreshFromCoordinator()
     }
 }

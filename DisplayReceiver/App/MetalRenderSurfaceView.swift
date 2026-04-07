@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import MetalKit
 import MetalFX
@@ -12,23 +13,1062 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         Coordinator()
     }
 
-    func makeNSView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
-        view.enableSetNeedsDisplay = false
-        view.isPaused = false
-        view.preferredFramesPerSecond = 60
-        view.clearColor = MTLClearColor(red: 0.08, green: 0.10, blue: 0.14, alpha: 1.0)
-        view.colorPixelFormat = .bgra8Unorm
-        view.framebufferOnly = false
-        view.delegate = context.coordinator
-
-        context.coordinator.attach(to: view)
+    func makeNSView(context: Context) -> ReceiverRenderContainerView {
+        let view = ReceiverRenderContainerView(device: MTLCreateSystemDefaultDevice())
+        view.metalView.delegate = context.coordinator
+        context.coordinator.attach(to: view.metalView)
+        view.refreshCursorOverlayConfiguration()
         return view
     }
 
-    func updateNSView(_ nsView: MTKView, context: Context) {
+    func updateNSView(_ nsView: ReceiverRenderContainerView, context: Context) {
+        nsView.refreshCursorOverlayConfiguration()
         _ = nsView
         _ = context
+    }
+
+    final class ReceiverRenderContainerView: NSView {
+        let metalView: MTKView
+        private let cursorOverlayView = ReceiverCursorOverlayHostView()
+        private var renderFrameObserver: NSObjectProtocol?
+        private var isFramePresentationQueued = false
+
+        init(device: MTLDevice?) {
+            metalView = MTKView(frame: .zero, device: device)
+            super.init(frame: .zero)
+
+            wantsLayer = true
+            layer?.backgroundColor = NSColor.black.cgColor
+
+            metalView.enableSetNeedsDisplay = false
+            metalView.isPaused = true
+            metalView.preferredFramesPerSecond = 60
+            metalView.clearColor = MTLClearColor(red: 0.08, green: 0.10, blue: 0.14, alpha: 1.0)
+            metalView.colorPixelFormat = .bgra8Unorm
+            metalView.framebufferOnly = false
+            metalView.autoresizingMask = [.width, .height]
+            metalView.frame = bounds
+            addSubview(metalView)
+
+            cursorOverlayView.autoresizingMask = [.width, .height]
+            cursorOverlayView.frame = bounds
+            addSubview(cursorOverlayView)
+
+            // Video frame notifications trigger immediate Metal draws for low latency.
+            // Cursor presentation is driven solely by the CVDisplayLink inside
+            // ReceiverCursorOverlayHostView — adding a second notification-driven path
+            // here would double the CGWarpMouseCursorPosition call rate with no visual
+            // benefit, since the screen cannot update faster than the display link anyway.
+            renderFrameObserver = NotificationCenter.default.addObserver(
+                forName: .wiredDisplayRenderFrameUpdated,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.requestFramePresentation()
+            }
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        deinit {
+            if let renderFrameObserver {
+                NotificationCenter.default.removeObserver(renderFrameObserver)
+            }
+        }
+
+        override var acceptsFirstResponder: Bool {
+            false
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+
+        override func layout() {
+            super.layout()
+            metalView.frame = bounds
+            cursorOverlayView.frame = bounds
+            cursorOverlayView.refreshPresentationIfNeeded()
+        }
+
+        func refreshCursorOverlayConfiguration() {
+            cursorOverlayView.refreshConfiguration()
+        }
+
+        private func requestFramePresentation() {
+            guard !isFramePresentationQueued else { return }
+            isFramePresentationQueued = true
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isFramePresentationQueued = false
+                guard self.window != nil, !self.isHidden else { return }
+                guard self.metalView.device != nil else { return }
+                self.metalView.draw()
+            }
+        }
+    }
+
+    final class ReceiverCursorOverlayHostView: NSView {
+        private static let transparentCursorImage: NSImage = {
+            let image = NSImage(size: NSSize(width: 16, height: 16))
+            image.lockFocus()
+            NSColor.clear.setFill()
+            NSBezierPath(rect: NSRect(origin: .zero, size: image.size)).fill()
+            image.unlockFocus()
+            return image
+        }()
+
+        private static let displayLinkCallback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userData in
+            guard let userData else { return kCVReturnError }
+            let view = Unmanaged<ReceiverCursorOverlayHostView>.fromOpaque(userData).takeUnretainedValue()
+            view.scheduleDisplayLinkedRefresh()
+            return kCVReturnSuccess
+        }
+
+        override var isFlipped: Bool { true }
+
+        private let cursorImageView = NSImageView(frame: .zero)
+        private var refreshTimer: DispatchSourceTimer?
+        private var displayLink: CVDisplayLink?
+        private var displayLinkDisplayID: CGDirectDisplayID?
+        private let displayLinkStateLock = NSLock()
+        private var displayLinkRefreshScheduled = false
+        private var displayedAppearanceSignature: UInt64?
+        private var displayedCursorSize: CGSize = .zero
+        private var displayedHotSpot: CGPoint = .zero
+        private var systemCursor: NSCursor = NSCursor.arrow
+        private var systemCursorSignature: UInt64?
+        private var lastWarpedScreenPoint: CGPoint?
+        private var cursorHiddenSinceNanoseconds: UInt64?
+        private var needsCursorReassertion = false
+        private var prefersOverlayFallback = false
+        /// How many consecutive drift checks in a row have exceeded the threshold.
+        /// Requires multiple detections before activating fallback to avoid false
+        /// positives from WindowServer event-queue lag.
+        private var consecutiveDriftCount = 0
+        /// Timestamp of the last drift check. Drift is sampled at most every
+        /// 150 ms to avoid saturating the WindowServer IPC path.
+        private var lastDriftCheckNanoseconds: UInt64 = 0
+        /// Timestamp of the most recent warp cycle that passed the drift check
+        /// cleanly. Used to recover from fallback after stable operation.
+        private var lastStableWarpNanoseconds: UInt64 = 0
+        private var lastPresentedOwnershipIntent: CursorOwnershipIntent?
+        private var trackingArea: NSTrackingArea?
+        private var lastLoggedCursorPresentationMode: String?
+        private var lastLoggedCursorVisibility: Bool?
+        private var lastLoggedCursorVisibilityDetail: String?
+        private var lastCursorPacketAgeLogNanoseconds: UInt64 = 0
+        private var consecutiveStaleCursorPresentationCount = 0
+        private var lastCursorPresentationRecoveryNanoseconds: UInt64 = 0
+
+        /// Stop extrapolating once a cursor sample is old enough that prediction becomes visibly wrong.
+        private let cursorPredictionStopAgeNanoseconds: UInt64 = 75_000_000
+        /// Keep the predictor focused on the most recent motion so it does not lean on stale
+        /// movement vectors after the sender briefly stalls.
+        private let cursorPredictionHistoryWindowNanoseconds: UInt64 = 75_000_000
+        /// Disable linear prediction when successive motion vectors diverge too far.
+        private let cursorPredictionTurnCosineThreshold: Double = 0.70
+        /// If the latest cursor sample stays older than this for multiple refreshes in a row,
+        /// assume the presentation driver has fallen behind and restart it.
+        private let cursorPresentationRecoveryPacketAgeNanoseconds: UInt64 = 120_000_000
+        private let cursorPresentationRecoveryConsecutiveThreshold = 8
+        private let cursorPresentationRecoveryCooldownNanoseconds: UInt64 = 2_000_000_000
+        /// Keep the hidden local cursor slightly inset so Universal Control does not
+        /// steal it when the visible mirrored cursor reaches a physical screen edge.
+        private let hiddenCursorEdgeInsetNormalized: CGFloat = 0.004
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+
+            wantsLayer = true
+            layer?.masksToBounds = false
+
+            cursorImageView.imageAlignment = .alignTopLeft
+            cursorImageView.imageScaling = .scaleProportionallyUpOrDown
+            cursorImageView.isHidden = true
+            cursorImageView.autoresizingMask = []
+            addSubview(cursorImageView)
+            cursorImageView.wantsLayer = true
+
+            installTrackingArea()
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        deinit {
+            stopDisplayLink()
+            stopRefreshTimer()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+
+        override func resetCursorRects() {
+            super.resetCursorRects()
+            guard managesSystemCursorAppearance else { return }
+            addCursorRect(bounds, cursor: systemCursor)
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            installTrackingArea()
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            super.mouseEntered(with: event)
+            needsCursorReassertion = true
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            super.mouseExited(with: event)
+            needsCursorReassertion = true
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            installTrackingArea()
+            syncPresentationDriverState()
+        }
+
+        func refreshConfiguration() {
+            isHidden = !(NetworkProtocol.enableReceiverSideCursorOverlay && !NetworkProtocol.useSwiftUIReceiverCursorOverlay)
+            if isHidden {
+                cursorImageView.isHidden = true
+            }
+            if usesSystemCursorMirror {
+                cursorImageView.isHidden = true
+            }
+            if managesSystemCursorAppearance {
+                window?.invalidateCursorRects(for: self)
+            }
+            syncPresentationDriverState()
+            refreshPresentationIfNeeded()
+        }
+
+        func refreshPresentationIfNeeded() {
+            guard !isHidden else { return }
+            refreshCursorPresentation()
+        }
+
+        // MARK: - Tracking area
+
+        private func installTrackingArea() {
+            if let old = trackingArea {
+                removeTrackingArea(old)
+            }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(area)
+            trackingArea = area
+        }
+
+        // MARK: - Presentation drivers
+
+        private func syncPresentationDriverState() {
+            guard window != nil, !isHidden else {
+                stopDisplayLink()
+                stopRefreshTimer()
+                return
+            }
+
+            guard !startDisplayLinkIfPossible() else {
+                stopRefreshTimer()
+                return
+            }
+
+            syncRefreshTimerState()
+        }
+
+        private func syncRefreshTimerState() {
+            guard refreshTimer == nil else { return }
+
+            let intervalNanoseconds = Int(1_000_000_000 / max(1, NetworkProtocol.cursorOverlayFramesPerSecond))
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(
+                deadline: .now(),
+                repeating: .nanoseconds(intervalNanoseconds),
+                leeway: .microseconds(250)
+            )
+            timer.setEventHandler { [weak self] in
+                self?.refreshCursorPresentation()
+            }
+            timer.activate()
+            refreshTimer = timer
+        }
+
+        private func startDisplayLinkIfPossible() -> Bool {
+            if displayLink == nil {
+                var createdDisplayLink: CVDisplayLink?
+                guard CVDisplayLinkCreateWithActiveCGDisplays(&createdDisplayLink) == kCVReturnSuccess,
+                      let createdDisplayLink else {
+                    return false
+                }
+
+                let callbackStatus = CVDisplayLinkSetOutputCallback(
+                    createdDisplayLink,
+                    Self.displayLinkCallback,
+                    Unmanaged.passUnretained(self).toOpaque()
+                )
+                guard callbackStatus == kCVReturnSuccess else {
+                    return false
+                }
+
+                displayLink = createdDisplayLink
+            }
+
+            guard let displayLink else { return false }
+            updateDisplayLinkDisplayIfNeeded(displayLink)
+
+            if !CVDisplayLinkIsRunning(displayLink) {
+                guard CVDisplayLinkStart(displayLink) == kCVReturnSuccess else {
+                    stopDisplayLink()
+                    return false
+                }
+            }
+
+            return true
+        }
+
+        private func updateDisplayLinkDisplayIfNeeded(_ displayLink: CVDisplayLink) {
+            guard let screenNumber = window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return
+            }
+
+            let displayID = CGDirectDisplayID(screenNumber.uint32Value)
+            guard displayLinkDisplayID != displayID else { return }
+            if CVDisplayLinkSetCurrentCGDisplay(displayLink, displayID) == kCVReturnSuccess {
+                displayLinkDisplayID = displayID
+            }
+        }
+
+        private func scheduleDisplayLinkedRefresh() {
+            displayLinkStateLock.lock()
+            if displayLinkRefreshScheduled {
+                displayLinkStateLock.unlock()
+                return
+            }
+            displayLinkRefreshScheduled = true
+            displayLinkStateLock.unlock()
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.displayLinkStateLock.lock()
+                self.displayLinkRefreshScheduled = false
+                self.displayLinkStateLock.unlock()
+                self.refreshCursorPresentation()
+            }
+        }
+
+        private func stopDisplayLink() {
+            if let displayLink, CVDisplayLinkIsRunning(displayLink) {
+                CVDisplayLinkStop(displayLink)
+            }
+            displayLink = nil
+            displayLinkDisplayID = nil
+        }
+
+        private func stopRefreshTimer() {
+            refreshTimer?.setEventHandler {}
+            refreshTimer?.cancel()
+            refreshTimer = nil
+        }
+
+        // MARK: - Cursor presentation (main thread)
+
+        private func refreshCursorPresentation() {
+            guard bounds.width > 0, bounds.height > 0 else {
+                cursorImageView.isHidden = true
+                return
+            }
+
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard let cursorState = ReceiverCursorStore.shared.snapshot() else {
+                logCursorVisibilityIfNeeded(false, detail: "no visible cursor snapshot")
+                lastPresentedOwnershipIntent = .hidden
+                if managesSystemCursorAppearance {
+                    if cursorHiddenSinceNanoseconds == nil {
+                        cursorHiddenSinceNanoseconds = now
+                    }
+                    let hiddenDuration = now - (cursorHiddenSinceNanoseconds ?? now)
+                    if hiddenDuration >= 120_000_000 {
+                        logCursorDebug("installing transparent cursor after hidden grace period")
+                        ensureSystemCursorHidden()
+                    }
+                }
+                cursorImageView.isHidden = true
+                return
+            }
+
+            if cursorState.ownershipIntent == .localHandoff {
+                presentLocalCursorHandoff()
+                return
+            }
+
+            guard cursorState.ownershipIntent == .remote, cursorState.isVisible else {
+                logCursorVisibilityIfNeeded(false, detail: cursorState.ownershipIntent.rawValue)
+                lastPresentedOwnershipIntent = cursorState.ownershipIntent
+                if managesSystemCursorAppearance {
+                    if cursorHiddenSinceNanoseconds == nil {
+                        cursorHiddenSinceNanoseconds = now
+                    }
+                    let hiddenDuration = now - (cursorHiddenSinceNanoseconds ?? now)
+                    if hiddenDuration >= 120_000_000 {
+                        logCursorDebug("installing transparent cursor after hidden grace period")
+                        ensureSystemCursorHidden()
+                    }
+                }
+                cursorImageView.isHidden = true
+                return
+            }
+            cursorHiddenSinceNanoseconds = nil
+            logStaleCursorPacketIfNeeded(nowNanoseconds: now)
+            recoverCursorPresentationIfNeeded(cursorState: cursorState, nowNanoseconds: now)
+
+            if lastPresentedOwnershipIntent == .localHandoff {
+                logCursorDebug("reacquiring remote cursor after local handoff")
+                prefersOverlayFallback = false
+                lastWarpedScreenPoint = nil
+                needsCursorReassertion = true
+            }
+            lastPresentedOwnershipIntent = .remote
+
+            let normalizedPosition: CGPoint
+            if NetworkProtocol.enableCursorPrediction {
+                normalizedPosition = predictedCursorPosition(at: now) ?? CGPoint(
+                    x: cursorState.normalizedX,
+                    y: cursorState.normalizedY
+                )
+            } else {
+                normalizedPosition = CGPoint(
+                    x: cursorState.normalizedX,
+                    y: cursorState.normalizedY
+                )
+            }
+            let usingSystemCursorMirror = usesSystemCursorMirror
+            logCursorVisibilityIfNeeded(true, detail: usingSystemCursorMirror ? "system-mirror" : "overlay-fallback")
+            let cursorPoint = CGPoint(
+                x: normalizedPosition.x * bounds.width,
+                y: (1.0 - normalizedPosition.y) * bounds.height
+            )
+            let hiddenCursorNormalizedPosition = clampedHiddenCursorPosition(for: normalizedPosition)
+            let hiddenCursorPoint = CGPoint(
+                x: hiddenCursorNormalizedPosition.x * bounds.width,
+                y: (1.0 - hiddenCursorNormalizedPosition.y) * bounds.height
+            )
+
+            let presentationMode = usingSystemCursorMirror ? "system-mirror" : "overlay-fallback"
+            if lastLoggedCursorPresentationMode != presentationMode {
+                lastLoggedCursorPresentationMode = presentationMode
+                logCursorDebug("presentation mode -> \(presentationMode)")
+            }
+
+            // Bug 1 recovery: if the cursor was previously hidden (systemCursorSignature
+            // was cleared by ensureSystemCursorHidden) but the cursor is now visible again,
+            // force the appearance update to re-establish the non-transparent cursor rect.
+            if usingSystemCursorMirror, systemCursorSignature == nil {
+                displayedAppearanceSignature = nil
+                needsCursorReassertion = true
+            }
+
+            if !updateCursorAppearanceIfNeeded(from: cursorState.appearance) {
+                cursorImageView.isHidden = true
+                return
+            }
+
+            if usingSystemCursorMirror {
+                if systemCursorSignature != nil {
+                    if needsCursorReassertion {
+                        window?.invalidateCursorRects(for: self)
+                    }
+                    systemCursor.set()
+                }
+
+                applySystemCursorPosition(
+                    cursorPoint,
+                    normalizedPosition: normalizedPosition,
+                    forceReassertion: needsCursorReassertion
+                )
+                cursorImageView.isHidden = true
+                return
+            }
+
+            if managesSystemCursorAppearance {
+                installTransparentSystemCursorIfNeeded()
+                applySystemCursorPosition(
+                    hiddenCursorPoint,
+                    normalizedPosition: hiddenCursorNormalizedPosition,
+                    forceReassertion: needsCursorReassertion
+                )
+            }
+
+            let cursorOrigin = CGPoint(
+                x: cursorPoint.x - displayedHotSpot.x,
+                y: cursorPoint.y - displayedHotSpot.y
+            )
+
+            let cursorFrame = CGRect(origin: cursorOrigin, size: displayedCursorSize)
+            cursorImageView.frame = cursorFrame
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            cursorImageView.layer?.frame = cursorFrame
+            CATransaction.commit()
+            cursorImageView.isHidden = false
+        }
+
+        private func recoverCursorPresentationIfNeeded(
+            cursorState: ReceiverCursorState,
+            nowNanoseconds: UInt64
+        ) {
+            guard cursorState.receiverTimestampNanoseconds <= nowNanoseconds else {
+                consecutiveStaleCursorPresentationCount = 0
+                return
+            }
+
+            let packetAgeNanoseconds = nowNanoseconds - cursorState.receiverTimestampNanoseconds
+            guard packetAgeNanoseconds >= cursorPresentationRecoveryPacketAgeNanoseconds else {
+                consecutiveStaleCursorPresentationCount = 0
+                return
+            }
+
+            consecutiveStaleCursorPresentationCount += 1
+            guard consecutiveStaleCursorPresentationCount >= cursorPresentationRecoveryConsecutiveThreshold else {
+                return
+            }
+            guard lastCursorPresentationRecoveryNanoseconds == 0 ||
+                nowNanoseconds >= lastCursorPresentationRecoveryNanoseconds + cursorPresentationRecoveryCooldownNanoseconds else {
+                return
+            }
+
+            lastCursorPresentationRecoveryNanoseconds = nowNanoseconds
+            consecutiveStaleCursorPresentationCount = 0
+            displayLinkRefreshScheduled = false
+            needsCursorReassertion = true
+            logCursorDebug(
+                "recovering cursor presentation after stale packet age " +
+                "\(packetAgeNanoseconds / 1_000_000) ms"
+            )
+            stopDisplayLink()
+            stopRefreshTimer()
+            syncPresentationDriverState()
+        }
+
+        private func presentLocalCursorHandoff() {
+            cursorHiddenSinceNanoseconds = nil
+            if lastPresentedOwnershipIntent != .localHandoff {
+                logCursorDebug("entering local handoff mode")
+                prefersOverlayFallback = false
+                lastWarpedScreenPoint = nil
+                needsCursorReassertion = true
+                lastPresentedOwnershipIntent = .localHandoff
+                postLocalCursorWakeEvent()
+            }
+            logCursorVisibilityIfNeeded(false, detail: "local-handoff")
+            restoreVisibleSystemCursorIfNeeded(forceArrow: true)
+            cursorImageView.isHidden = true
+        }
+
+        // MARK: - Cursor prediction
+
+        private func predictedCursorPosition(at nowNanoseconds: UInt64) -> CGPoint? {
+            let history = contiguousPredictableCursorHistory()
+            guard let latest = history.last, latest.isVisible else { return nil }
+
+            let latestAgeNanoseconds = nowNanoseconds >= latest.receiverTimestampNanoseconds
+                ? nowNanoseconds - latest.receiverTimestampNanoseconds
+                : 0
+            if latestAgeNanoseconds > cursorPredictionStopAgeNanoseconds {
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
+
+            guard history.count >= 2 else {
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
+
+            let oldest = history[0]
+            let previous = history[history.count - 2]
+            let senderWindowNanoseconds = latest.senderTimestampNanoseconds - oldest.senderTimestampNanoseconds
+            guard senderWindowNanoseconds > 0 else {
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
+
+            let receiverDeltaNanoseconds = latest.receiverTimestampNanoseconds - previous.receiverTimestampNanoseconds
+
+            // Use a short sender-time window rather than a single packet delta so
+            // packet timing jitter does not become visible spatial jitter.
+            let windowDeltaX = latest.normalizedX - oldest.normalizedX
+            let windowDeltaY = latest.normalizedY - oldest.normalizedY
+            let windowVelocityX = windowDeltaX / Double(senderWindowNanoseconds)
+            let windowVelocityY = windowDeltaY / Double(senderWindowNanoseconds)
+
+            // Treat sub-pixel motion as stationary so residual velocity does not create
+            // bounce when the sender is effectively holding still.
+            let positionDeltaThreshold = 0.00005
+            if abs(windowDeltaX) < positionDeltaThreshold && abs(windowDeltaY) < positionDeltaThreshold {
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
+
+            let recentSenderDeltaNanoseconds = latest.senderTimestampNanoseconds - previous.senderTimestampNanoseconds
+            let recentVelocityX: Double
+            let recentVelocityY: Double
+            if recentSenderDeltaNanoseconds > 0 {
+                recentVelocityX = (latest.normalizedX - previous.normalizedX) / Double(recentSenderDeltaNanoseconds)
+                recentVelocityY = (latest.normalizedY - previous.normalizedY) / Double(recentSenderDeltaNanoseconds)
+            } else {
+                recentVelocityX = windowVelocityX
+                recentVelocityY = windowVelocityY
+            }
+
+            let turnAttenuation: Double
+            let windowSpeed = hypot(windowVelocityX, windowVelocityY)
+            let recentSpeed = hypot(recentVelocityX, recentVelocityY)
+            if windowSpeed > 0, recentSpeed > 0 {
+                let cosine = max(
+                    -1.0,
+                    min(
+                        1.0,
+                        ((windowVelocityX * recentVelocityX) + (windowVelocityY * recentVelocityY)) /
+                            (windowSpeed * recentSpeed)
+                    )
+                )
+                turnAttenuation = max(
+                    0.0,
+                    min(
+                        1.0,
+                        (cosine - cursorPredictionTurnCosineThreshold) /
+                            (1.0 - cursorPredictionTurnCosineThreshold)
+                    )
+                )
+            } else {
+                turnAttenuation = 1.0
+            }
+
+            // Scale prediction down when decelerating to prevent overshoot bounce on stop.
+            // When the most recent segment is slower than the history-window trend,
+            // reduce prediction proportionally so the cursor settles cleanly on stop.
+            let decelerationAttenuation: Double
+            if windowSpeed > 0 {
+                let speedRatio = min(1.0, recentSpeed / windowSpeed)
+                decelerationAttenuation = speedRatio * speedRatio
+            } else {
+                decelerationAttenuation = 1.0
+            }
+
+            let elapsedSinceLatestNanoseconds = nowNanoseconds >= latest.receiverTimestampNanoseconds
+                ? nowNanoseconds - latest.receiverTimestampNanoseconds
+                : 0
+            let targetPredictionLeadNanoseconds = min(
+                NetworkProtocol.cursorMaximumPredictionLeadNanoseconds,
+                max(
+                    NetworkProtocol.cursorPredictionLeadNanoseconds,
+                    max(senderWindowNanoseconds / UInt64(history.count - 1), receiverDeltaNanoseconds)
+                )
+            )
+            let predictionLeadNanoseconds = min(
+                elapsedSinceLatestNanoseconds,
+                targetPredictionLeadNanoseconds
+            )
+            let baseLeadAttenuation = min(turnAttenuation, decelerationAttenuation)
+            let predictionStrength = NetworkProtocol.cursorPredictionStrength
+            let adjustedPredictionLeadNanoseconds = UInt64(
+                Double(predictionLeadNanoseconds) * baseLeadAttenuation * predictionStrength
+            )
+
+            if adjustedPredictionLeadNanoseconds == 0 {
+                return CGPoint(x: latest.normalizedX, y: latest.normalizedY)
+            }
+
+            // Blend recent (last-segment) and window-average velocity so the prediction
+            // tracks the current cursor speed rather than the lagging history average.
+            // 65 % recent gives responsiveness during acceleration/deceleration;
+            // 35 % window average smooths out packet-timing jitter.
+            let blendedVelocityX = recentVelocityX * 0.65 + windowVelocityX * 0.35
+            let blendedVelocityY = recentVelocityY * 0.65 + windowVelocityY * 0.35
+            let predictedX = latest.normalizedX + blendedVelocityX * Double(adjustedPredictionLeadNanoseconds)
+            let predictedY = latest.normalizedY + blendedVelocityY * Double(adjustedPredictionLeadNanoseconds)
+
+            return CGPoint(
+                x: max(0, min(1, predictedX)),
+                y: max(0, min(1, predictedY))
+            )
+        }
+
+        private func contiguousPredictableCursorHistory() -> [ReceiverCursorState] {
+            let history = ReceiverCursorStore.shared.snapshotHistory()
+            guard let latest = history.last else { return [] }
+
+            var collected: [ReceiverCursorState] = []
+            collected.reserveCapacity(history.count)
+
+            for state in history.reversed() {
+                guard state.isVisible,
+                      state.ownershipIntent == .remote,
+                      state.senderTimestampNanoseconds <= latest.senderTimestampNanoseconds,
+                      state.receiverTimestampNanoseconds <= latest.receiverTimestampNanoseconds else {
+                    break
+                }
+
+                let senderAgeNanoseconds = latest.senderTimestampNanoseconds - state.senderTimestampNanoseconds
+                if senderAgeNanoseconds > cursorPredictionHistoryWindowNanoseconds {
+                    break
+                }
+
+                if let newer = collected.last,
+                   state.senderTimestampNanoseconds >= newer.senderTimestampNanoseconds ||
+                   state.receiverTimestampNanoseconds > newer.receiverTimestampNanoseconds {
+                    break
+                }
+
+                collected.append(state)
+            }
+
+            return collected.reversed()
+        }
+
+        private func logStaleCursorPacketIfNeeded(nowNanoseconds: UInt64) {
+            guard NetworkProtocol.enableCursorDebugLogging else { return }
+
+            let snapshot = ReceiverCursorStore.shared.snapshotPair()
+            guard let latest = snapshot.latest else { return }
+            guard latest.receiverTimestampNanoseconds <= nowNanoseconds else { return }
+
+            let packetAgeNanoseconds = nowNanoseconds - latest.receiverTimestampNanoseconds
+            let staleThresholdNanoseconds: UInt64 = 40_000_000
+            guard packetAgeNanoseconds >= staleThresholdNanoseconds else { return }
+            guard lastCursorPacketAgeLogNanoseconds == 0 ||
+                nowNanoseconds >= (lastCursorPacketAgeLogNanoseconds + 1_000_000_000) else {
+                return
+            }
+
+            lastCursorPacketAgeLogNanoseconds = nowNanoseconds
+            let senderDeltaNanoseconds: UInt64
+            let receiverDeltaNanoseconds: UInt64
+            if let previous = snapshot.previous,
+               latest.senderTimestampNanoseconds > previous.senderTimestampNanoseconds,
+               latest.receiverTimestampNanoseconds >= previous.receiverTimestampNanoseconds {
+                senderDeltaNanoseconds = latest.senderTimestampNanoseconds - previous.senderTimestampNanoseconds
+                receiverDeltaNanoseconds = latest.receiverTimestampNanoseconds - previous.receiverTimestampNanoseconds
+            } else {
+                senderDeltaNanoseconds = 0
+                receiverDeltaNanoseconds = 0
+            }
+
+            logCursorDebug(
+                "stale cursor packet age=\(packetAgeNanoseconds / 1_000_000) ms " +
+                "senderDelta=\(senderDeltaNanoseconds / 1_000_000) ms " +
+                "receiverDelta=\(receiverDeltaNanoseconds / 1_000_000) ms"
+            )
+        }
+
+        // MARK: - Cursor appearance
+
+        private func updateCursorAppearanceIfNeeded(from appearance: CursorAppearancePayload?) -> Bool {
+            let usingSystemCursorMirror = usesSystemCursorMirror
+            if NetworkProtocol.useDebugCursorOverlayMarker {
+                if displayedAppearanceSignature != UInt64.max {
+                    cursorImageView.image = makeDebugCursorImage()
+                    displayedAppearanceSignature = UInt64.max
+                    displayedCursorSize = CGSize(width: 28, height: 28)
+                    displayedHotSpot = CGPoint(x: 14, y: 14)
+                    if usingSystemCursorMirror {
+                        systemCursor = NSCursor(image: makeDebugCursorImage(), hotSpot: displayedHotSpot)
+                        systemCursorSignature = UInt64.max
+                        window?.invalidateCursorRects(for: self)
+                    }
+                }
+                return true
+            }
+
+            let resolvedAppearance = appearance ?? defaultArrowAppearance()
+            if displayedAppearanceSignature == resolvedAppearance.signature,
+               (!usingSystemCursorMirror || systemCursorSignature == resolvedAppearance.signature) {
+                return true
+            }
+            guard let image = NSImage(data: resolvedAppearance.pngData) else { return false }
+
+            image.size = CGSize(
+                width: resolvedAppearance.widthPoints,
+                height: resolvedAppearance.heightPoints
+            )
+            cursorImageView.image = image
+            displayedAppearanceSignature = resolvedAppearance.signature
+            displayedCursorSize = image.size
+            displayedHotSpot = CGPoint(
+                x: resolvedAppearance.hotSpotX,
+                y: resolvedAppearance.hotSpotY
+            )
+            if usingSystemCursorMirror {
+                systemCursor = NSCursor(image: image, hotSpot: displayedHotSpot)
+                systemCursorSignature = resolvedAppearance.signature
+                window?.invalidateCursorRects(for: self)
+            }
+            return true
+        }
+
+        // MARK: - System cursor warp
+
+        private func applySystemCursorPosition(
+            _ localPoint: CGPoint,
+            normalizedPosition: CGPoint? = nil,
+            forceReassertion: Bool = false
+        ) {
+            guard let window else { return }
+
+            let windowPoint = convert(localPoint, to: nil)
+            let appKitScreenPoint = window.convertPoint(toScreen: windowPoint)
+            let screenPoint: CGPoint
+            if let screen = window.screen {
+                screenPoint = CGPoint(
+                    x: appKitScreenPoint.x,
+                    y: screen.frame.minY + screen.frame.maxY - appKitScreenPoint.y
+                )
+            } else {
+                screenPoint = appKitScreenPoint
+            }
+
+            // Drift detection: sample WindowServer's view of cursor position at most
+            // every 150 ms rather than every frame. CGEvent(source: nil) is a
+            // synchronous IPC call; calling it at 120–180 fps saturates the WindowServer
+            // event queue and creates the stale-read false-positives that were causing
+            // premature fallback activation.
+            //
+            // Require 3 consecutive detections above the 8 px threshold before
+            // activating fallback so that a single queue-delayed read doesn't latch us.
+            //
+            // After 2 s of clean drift checks, reset prefersOverlayFallback so normal
+            // operation recovers automatically without needing a reconnect.
+            let now = DispatchTime.now().uptimeNanoseconds
+            let driftCheckIntervalNanoseconds: UInt64 = 150_000_000   // 150 ms
+            let driftThreshold: CGFloat                = 8.0           // px — real local movement is far larger
+            let driftConsecutiveRequired               = 3
+            let fallbackRecoveryNanoseconds: UInt64    = 2_000_000_000 // 2 s
+
+            let shouldCheckDrift = lastWarpedScreenPoint != nil &&
+                (lastDriftCheckNanoseconds == 0 ||
+                 now >= lastDriftCheckNanoseconds + driftCheckIntervalNanoseconds)
+
+            if shouldCheckDrift {
+                lastDriftCheckNanoseconds = now
+                if let lastWarpedScreenPoint,
+                   let currentSystemCursorPoint = CGEvent(source: nil)?.location,
+                   abs(currentSystemCursorPoint.x - lastWarpedScreenPoint.x) > driftThreshold ||
+                   abs(currentSystemCursorPoint.y - lastWarpedScreenPoint.y) > driftThreshold {
+                    consecutiveDriftCount += 1
+                    logCursorDebug(
+                        String(
+                            format: "drift sample %d/%d current=(%.1f, %.1f) lastWarped=(%.1f, %.1f)",
+                            consecutiveDriftCount, driftConsecutiveRequired,
+                            currentSystemCursorPoint.x, currentSystemCursorPoint.y,
+                            lastWarpedScreenPoint.x, lastWarpedScreenPoint.y
+                        )
+                    )
+                    if consecutiveDriftCount >= driftConsecutiveRequired {
+                        activateOverlayCursorFallback()
+                        consecutiveDriftCount = 0
+                        self.lastWarpedScreenPoint = currentSystemCursorPoint
+                        needsCursorReassertion = true
+                    }
+                } else {
+                    consecutiveDriftCount = 0
+                    let previousStableWarpNanoseconds = lastStableWarpNanoseconds
+                    // Recover from overlay fallback once warping has been stable for 2 s.
+                    if prefersOverlayFallback,
+                       previousStableWarpNanoseconds > 0,
+                       now >= previousStableWarpNanoseconds + fallbackRecoveryNanoseconds {
+                        prefersOverlayFallback = false
+                        logCursorDebug("recovered from overlay fallback after stable warp period")
+                        needsCursorReassertion = true
+                    }
+                    lastStableWarpNanoseconds = now
+                }
+            }
+
+            // Skip warp if the cursor is already at the target — compare only against
+            // lastWarpedScreenPoint so we avoid an extra CGEvent IPC read every frame.
+            if let lastWarpedScreenPoint,
+               abs(lastWarpedScreenPoint.x - screenPoint.x) < 0.5,
+               abs(lastWarpedScreenPoint.y - screenPoint.y) < 0.5,
+               !forceReassertion {
+                return
+            }
+
+            CGWarpMouseCursorPosition(screenPoint)
+            lastWarpedScreenPoint = screenPoint
+            needsCursorReassertion = false
+        }
+
+        private var usesSystemCursorMirror: Bool {
+            NetworkProtocol.useReceiverSystemCursorMirror && !prefersOverlayFallback
+        }
+
+        private var managesSystemCursorAppearance: Bool {
+            NetworkProtocol.useReceiverSystemCursorMirror
+        }
+
+        private func activateOverlayCursorFallback() {
+            guard NetworkProtocol.useReceiverSystemCursorMirror, !prefersOverlayFallback else { return }
+            prefersOverlayFallback = true
+            consecutiveDriftCount = 0
+            lastStableWarpNanoseconds = 0
+            logCursorDebug("activated overlay fallback after local cursor interference")
+            installTransparentSystemCursorIfNeeded()
+        }
+
+        private func clampedHiddenCursorPosition(for normalizedPosition: CGPoint) -> CGPoint {
+            let inset = hiddenCursorEdgeInsetNormalized
+            return CGPoint(
+                x: min(max(normalizedPosition.x, inset), 1.0 - inset),
+                y: min(max(normalizedPosition.y, inset), 1.0 - inset)
+            )
+        }
+
+        private func installTransparentSystemCursorIfNeeded() {
+            guard managesSystemCursorAppearance else { return }
+            if systemCursorSignature != nil {
+                logCursorDebug("installing transparent cursor")
+            }
+            systemCursor = NSCursor(image: Self.transparentCursorImage, hotSpot: .zero)
+            systemCursorSignature = nil
+            window?.invalidateCursorRects(for: self)
+        }
+
+        private func restoreVisibleSystemCursorIfNeeded(forceArrow: Bool = false) {
+            guard managesSystemCursorAppearance else { return }
+            guard forceArrow || systemCursorSignature == nil else { return }
+            systemCursor = NSCursor.arrow
+            systemCursorSignature = UInt64.max - 1
+            // Apply the visible cursor immediately; invalidating cursor rects alone
+            // waits for the next local event, which is exactly the "needs local mouse
+            // or keyboard input before UC wakes up" failure mode we are seeing.
+            systemCursor.set()
+            window?.invalidateCursorRects(for: self)
+        }
+
+        private func postLocalCursorWakeEvent() {
+            guard let currentLocation = CGEvent(source: nil)?.location,
+                  let wakeEvent = CGEvent(
+                      mouseEventSource: nil,
+                      mouseType: .mouseMoved,
+                      mouseCursorPosition: currentLocation,
+                      mouseButton: .left
+                  ) else {
+                return
+            }
+
+            wakeEvent.post(tap: .cghidEventTap)
+            logCursorDebug(
+                String(
+                    format: "posted local cursor wake event at %.1f, %.1f",
+                    currentLocation.x,
+                    currentLocation.y
+                )
+            )
+        }
+
+        private func logCursorDebug(_ message: String) {
+            guard NetworkProtocol.enableCursorDebugLogging else { return }
+            print("[Receiver][CursorHost] \(message)")
+        }
+
+        private func logCursorVisibilityIfNeeded(_ isVisible: Bool, detail: String) {
+            guard NetworkProtocol.enableCursorDebugLogging else { return }
+            guard lastLoggedCursorVisibility != isVisible || lastLoggedCursorVisibilityDetail != detail else { return }
+            lastLoggedCursorVisibility = isVisible
+            lastLoggedCursorVisibilityDetail = detail
+            print("[Receiver][CursorHost] visibility -> \(isVisible ? "visible" : "hidden") (\(detail))")
+        }
+
+        /// Returns the window's frame in CG screen coordinates (origin at top-left
+        /// of the main display), or nil if unavailable.
+        private func windowScreenRect() -> CGRect? {
+            guard let window, let screen = window.screen else { return nil }
+            let wf = window.frame
+            return CGRect(
+                x: wf.origin.x,
+                y: screen.frame.minY + screen.frame.maxY - wf.maxY,
+                width: wf.width,
+                height: wf.height
+            )
+        }
+
+        private func ensureSystemCursorHidden() {
+            guard managesSystemCursorAppearance else { return }
+
+            // If there is already a visible cursor state waiting, don't install
+            // the transparent cursor — it will just be immediately replaced on the
+            // next refresh cycle, and the brief transparent flash is the root cause
+            // of the "cursor disappears" bug.
+            if let pending = ReceiverCursorStore.shared.snapshot(),
+               pending.ownershipIntent != .hidden {
+                return
+            }
+
+            lastWarpedScreenPoint = nil
+            installTransparentSystemCursorIfNeeded()
+        }
+
+        private func defaultArrowAppearance() -> CursorAppearancePayload {
+            let image = NSCursor.arrow.image
+            var proposedRect = CGRect(origin: .zero, size: image.size)
+            let pngData: Data
+            if let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) {
+                let bitmap = NSBitmapImageRep(cgImage: cgImage)
+                pngData = bitmap.representation(using: .png, properties: [:]) ?? Data()
+            } else {
+                pngData = Data()
+            }
+
+            let hotSpot = NSCursor.arrow.hotSpot
+            return CursorAppearancePayload(
+                signature: 0,
+                pngData: pngData,
+                widthPoints: image.size.width,
+                heightPoints: image.size.height,
+                hotSpotX: hotSpot.x,
+                hotSpotY: hotSpot.y
+            )
+        }
+
+        private func makeDebugCursorImage() -> NSImage {
+            let size = NSSize(width: 28, height: 28)
+            let image = NSImage(size: size)
+            image.lockFocus()
+            defer { image.unlockFocus() }
+
+            let circleRect = NSRect(x: 2, y: 2, width: 24, height: 24)
+            NSColor.systemRed.withAlphaComponent(0.90).setFill()
+            NSBezierPath(ovalIn: circleRect).fill()
+
+            NSColor.white.withAlphaComponent(0.95).setStroke()
+            let border = NSBezierPath(ovalIn: circleRect.insetBy(dx: 1, dy: 1))
+            border.lineWidth = 2
+            border.stroke()
+
+            let vertical = NSBezierPath()
+            vertical.move(to: NSPoint(x: 14, y: 6))
+            vertical.line(to: NSPoint(x: 14, y: 22))
+            vertical.lineWidth = 2
+            vertical.stroke()
+
+            let horizontal = NSBezierPath()
+            horizontal.move(to: NSPoint(x: 6, y: 14))
+            horizontal.line(to: NSPoint(x: 22, y: 14))
+            horizontal.lineWidth = 2
+            horizontal.stroke()
+
+            return image
+        }
     }
 
     final class Coordinator: NSObject, MTKViewDelegate {
@@ -43,6 +1083,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
         struct Uniforms {
             float2 scale;
+            float2 offset;
         };
 
         struct VertexOut {
@@ -55,7 +1096,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             constant Uniforms &uniforms [[buffer(1)]]
         ) {
             VertexOut out;
-            out.position = float4(in.position * uniforms.scale, 0.0, 1.0);
+            out.position = float4((in.position * uniforms.scale) + uniforms.offset, 0.0, 1.0);
             out.textureCoordinate = in.textureCoordinate;
             return out;
         }
@@ -84,18 +1125,32 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             return float4(clamp(rec709 * yuv, 0.0, 1.0), 1.0);
         }
+
+        fragment float4 bgraQuadFragment(
+            VertexOut in [[stage_in]],
+            texture2d<float> colorTexture [[texture(0)]],
+            sampler sourceSampler [[sampler(0)]]
+        ) {
+            return colorTexture.sample(sourceSampler, in.textureCoordinate);
+        }
         """
 
         private var commandQueue: MTLCommandQueue?
-        private var pipelineState: MTLRenderPipelineState?
+        private var ycbcrPipelineState: MTLRenderPipelineState?
+        private var bgraPipelineState: MTLRenderPipelineState?
         private var vertexBuffer: MTLBuffer?
         private var samplerState: MTLSamplerState?
         private var textureCache: CVMetalTextureCache?
+        private var cursorTexture: MTLTexture?
+        private var cursorHotSpotFromTop = CGPoint.zero
+        private let cursorOverlayMaxAgeNanoseconds: UInt64 = 250_000_000
 
         // Retain both planes per slot to prevent premature CVMetalTexture deallocation.
         private var retainedYTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
         private var retainedCbCrTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
         private var retainedPixelBufferTextureSlot = 0
+        private var retainedBGRATextures: [MTLTexture?] = Array(repeating: nil, count: 3)
+        private var retainedBGRATextureSlot = 0
 
         // Triple-buffering semaphore: limits CPU-ahead GPU submissions to 3 frames,
         // preventing the render loop from starving WindowServer during high-motion content.
@@ -116,7 +1171,20 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             commandQueue = device.makeCommandQueue()
             vertexBuffer = makeVertexBuffer(device: device)
             samplerState = makeSamplerState(device: device)
-            pipelineState = makePipelineState(device: device, colorPixelFormat: .bgra8Unorm)
+            ycbcrPipelineState = makePipelineState(
+                device: device,
+                colorPixelFormat: .bgra8Unorm,
+                fragmentFunctionName: "texturedQuadFragment"
+            )
+            bgraPipelineState = makePipelineState(
+                device: device,
+                colorPixelFormat: .bgra8Unorm,
+                fragmentFunctionName: "bgraQuadFragment"
+            )
+            if let cursorAsset = makeCursorTexture(device: device) {
+                cursorTexture = cursorAsset.texture
+                cursorHotSpotFromTop = cursorAsset.hotSpotFromTop
+            }
 
             var newTextureCache: CVMetalTextureCache?
             let cacheStatus = CVMetalTextureCacheCreate(
@@ -140,11 +1208,14 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         func draw(in view: MTKView) {
-            _ = inFlightSemaphore.wait(timeout: .distantFuture)
+            guard inFlightSemaphore.wait(timeout: .now()) == .success else {
+                return
+            }
 
             guard let device = view.device,
                   let commandQueue,
-                  let pipelineState,
+                  let ycbcrPipelineState,
+                  let bgraPipelineState,
                   let vertexBuffer,
                   let samplerState,
                   let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -158,9 +1229,9 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             let frame = RenderFrameStore.shared.snapshot()
-            let textures = frame.flatMap { makeYCbCrTextures(from: $0) }
+            let renderInput = frame.flatMap { makeRenderInput(from: $0, device: device) }
 
-            guard let textures else {
+            guard let renderInput else {
                 // No frame available — present a cleared drawable.
                 guard let clearPass = view.currentRenderPassDescriptor else {
                     commandBuffer.commit()
@@ -176,17 +1247,19 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 return
             }
 
-            let inputWidth  = textures.y.width
-            let inputHeight = textures.y.height
+            let inputWidth  = renderInput.width
+            let inputHeight = renderInput.height
             let outputWidth  = Int(view.drawableSize.width)
             let outputHeight = Int(view.drawableSize.height)
 
-            let shouldUseSpatialUpscale = shouldUseSpatialUpscale(
-                inputWidth: inputWidth,
-                inputHeight: inputHeight,
-                outputWidth: outputWidth,
-                outputHeight: outputHeight
-            )
+            let shouldUseSpatialUpscale =
+                renderInput.supportsSpatialUpscale &&
+                shouldUseSpatialUpscale(
+                    inputWidth: inputWidth,
+                    inputHeight: inputHeight,
+                    outputWidth: outputWidth,
+                    outputHeight: outputHeight
+                )
 
             guard shouldUseSpatialUpscale else {
                 releaseScalerResources()
@@ -194,10 +1267,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     view: view,
                     commandBuffer: commandBuffer,
                     drawable: drawable,
-                    pipelineState: pipelineState,
+                    ycbcrPipelineState: ycbcrPipelineState,
+                    bgraPipelineState: bgraPipelineState,
                     vertexBuffer: vertexBuffer,
                     samplerState: samplerState,
-                    textures: textures
+                    renderInput: renderInput
                 )
                 return
             }
@@ -223,10 +1297,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     view: view,
                     commandBuffer: commandBuffer,
                     drawable: drawable,
-                    pipelineState: pipelineState,
+                    ycbcrPipelineState: ycbcrPipelineState,
+                    bgraPipelineState: bgraPipelineState,
                     vertexBuffer: vertexBuffer,
                     samplerState: samplerState,
-                    textures: textures
+                    renderInput: renderInput
                 )
                 return
             }
@@ -245,15 +1320,17 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             // For Pass 1, the intermediate texture matches the input resolution exactly —
             // no aspect-fit scaling needed; fill the entire intermediate surface.
-            var uniforms = RenderUniforms(scale: SIMD2<Float>(1.0, 1.0))
+            var uniforms = RenderUniforms(scale: SIMD2<Float>(1.0, 1.0), offset: SIMD2<Float>(0, 0))
 
-            offscreenEncoder.setRenderPipelineState(pipelineState)
-            offscreenEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-            offscreenEncoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
-            offscreenEncoder.setFragmentTexture(textures.y, index: 0)
-            offscreenEncoder.setFragmentTexture(textures.cbcr, index: 1)
-            offscreenEncoder.setFragmentSamplerState(samplerState, index: 0)
-            offscreenEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            encodeRenderInput(
+                renderInput,
+                encoder: offscreenEncoder,
+                ycbcrPipelineState: ycbcrPipelineState,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                uniforms: &uniforms
+            )
             offscreenEncoder.endEncoding()
 
             // --- Pass 2: MetalFX Spatial Upscale → private upscaled texture ---
@@ -263,10 +1340,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     view: view,
                     commandBuffer: commandBuffer,
                     drawable: drawable,
-                    pipelineState: pipelineState,
+                    ycbcrPipelineState: ycbcrPipelineState,
+                    bgraPipelineState: bgraPipelineState,
                     vertexBuffer: vertexBuffer,
                     samplerState: samplerState,
-                    textures: textures
+                    renderInput: renderInput
                 )
                 return
             }
@@ -283,6 +1361,17 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
             blitEncoder.copy(from: upscaledTexture, to: drawable.texture)
             blitEncoder.endEncoding()
+
+            drawCursorOverlayIfNeeded(
+                view: view,
+                commandBuffer: commandBuffer,
+                drawable: drawable,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                contentWidth: inputWidth,
+                contentHeight: inputHeight
+            )
 
             commandBuffer.present(drawable)
             commandBuffer.commit()
@@ -406,10 +1495,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             view: MTKView,
             commandBuffer: MTLCommandBuffer,
             drawable: CAMetalDrawable,
-            pipelineState: MTLRenderPipelineState,
+            ycbcrPipelineState: MTLRenderPipelineState,
+            bgraPipelineState: MTLRenderPipelineState,
             vertexBuffer: MTLBuffer,
             samplerState: MTLSamplerState,
-            textures: (y: MTLTexture, cbcr: MTLTexture)
+            renderInput: RenderInput
         ) {
             guard let renderPassDescriptor = view.currentRenderPassDescriptor else {
                 commandBuffer.present(drawable)
@@ -425,22 +1515,149 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
 
             var uniforms = RenderUniforms(
                 scale: makeAspectFitScale(
-                    contentWidth: textures.y.width,
-                    contentHeight: textures.y.height,
+                    contentWidth: renderInput.width,
+                    contentHeight: renderInput.height,
                     drawableSize: view.drawableSize
-                )
+                ),
+                offset: SIMD2<Float>(0, 0)
             )
 
-            encoder.setRenderPipelineState(pipelineState)
-            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-            encoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
-            encoder.setFragmentTexture(textures.y, index: 0)
-            encoder.setFragmentTexture(textures.cbcr, index: 1)
-            encoder.setFragmentSamplerState(samplerState, index: 0)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            encodeRenderInput(
+                renderInput,
+                encoder: encoder,
+                ycbcrPipelineState: ycbcrPipelineState,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                uniforms: &uniforms
+            )
+            encodeCursorOverlayIfNeeded(
+                view: view,
+                encoder: encoder,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                contentWidth: renderInput.width,
+                contentHeight: renderInput.height
+            )
             encoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
+        }
+
+        private func drawCursorOverlayIfNeeded(
+            view: MTKView,
+            commandBuffer: MTLCommandBuffer,
+            drawable: CAMetalDrawable,
+            bgraPipelineState: MTLRenderPipelineState,
+            vertexBuffer: MTLBuffer,
+            samplerState: MTLSamplerState,
+            contentWidth: Int,
+            contentHeight: Int
+        ) {
+            guard let renderPassDescriptor = view.currentRenderPassDescriptor else { return }
+            renderPassDescriptor.colorAttachments[0].loadAction = .load
+            renderPassDescriptor.colorAttachments[0].storeAction = .store
+            renderPassDescriptor.colorAttachments[0].texture = drawable.texture
+
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+                return
+            }
+
+            encodeCursorOverlayIfNeeded(
+                view: view,
+                encoder: encoder,
+                bgraPipelineState: bgraPipelineState,
+                vertexBuffer: vertexBuffer,
+                samplerState: samplerState,
+                contentWidth: contentWidth,
+                contentHeight: contentHeight
+            )
+            encoder.endEncoding()
+        }
+
+        private func encodeCursorOverlayIfNeeded(
+            view: MTKView,
+            encoder: MTLRenderCommandEncoder,
+            bgraPipelineState: MTLRenderPipelineState,
+            vertexBuffer: MTLBuffer,
+            samplerState: MTLSamplerState,
+            contentWidth: Int,
+            contentHeight: Int
+        ) {
+            guard let cursorTexture else { return }
+            guard let cursorState = ReceiverCursorStore.shared.snapshot(maxAgeNanoseconds: cursorOverlayMaxAgeNanoseconds),
+                  cursorState.isVisible else {
+                return
+            }
+
+            guard var uniforms = makeCursorUniforms(
+                cursorState: cursorState,
+                cursorTexture: cursorTexture,
+                drawableSize: view.drawableSize,
+                contentWidth: contentWidth,
+                contentHeight: contentHeight
+            ) else {
+                return
+            }
+
+            encoder.setRenderPipelineState(bgraPipelineState)
+            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
+            encoder.setFragmentTexture(cursorTexture, index: 0)
+            encoder.setFragmentTexture(nil, index: 1)
+            encoder.setFragmentSamplerState(samplerState, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+
+        private func makeCursorUniforms(
+            cursorState: ReceiverCursorState,
+            cursorTexture: MTLTexture,
+            drawableSize: CGSize,
+            contentWidth: Int,
+            contentHeight: Int
+        ) -> RenderUniforms? {
+            guard drawableSize.width > 0,
+                  drawableSize.height > 0,
+                  contentWidth > 0,
+                  contentHeight > 0 else {
+                return nil
+            }
+
+            let contentScale = makeAspectFitScale(
+                contentWidth: contentWidth,
+                contentHeight: contentHeight,
+                drawableSize: drawableSize
+            )
+
+            let contentMinX = -contentScale.x
+            let contentMinY = -contentScale.y
+            let contentMaxY = contentScale.y
+            let hotspotClipX = contentMinX + Float(cursorState.normalizedX) * (contentScale.x * 2.0)
+            let hotspotClipY = contentMinY + Float(cursorState.normalizedY) * (contentScale.y * 2.0)
+
+            let drawableWidth = Float(drawableSize.width)
+            let drawableHeight = Float(drawableSize.height)
+            let cursorWidth = Float(cursorTexture.width)
+            let cursorHeight = Float(cursorTexture.height)
+            guard cursorWidth > 0, cursorHeight > 0 else { return nil }
+
+            let hotSpotX = Float(max(0, min(CGFloat(cursorTexture.width), cursorHotSpotFromTop.x)))
+            let hotSpotYFromTop = Float(max(0, min(CGFloat(cursorTexture.height), cursorHotSpotFromTop.y)))
+
+            let offsetX = ((cursorWidth * 0.5) - hotSpotX) * 2.0 / drawableWidth
+            let offsetY = -(((cursorHeight * 0.5) - hotSpotYFromTop) * 2.0 / drawableHeight)
+
+            return RenderUniforms(
+                scale: SIMD2<Float>(
+                    cursorWidth / drawableWidth,
+                    cursorHeight / drawableHeight
+                ),
+                offset: SIMD2<Float>(
+                    hotspotClipX + offsetX,
+                    hotspotClipY + offsetY
+                )
+            )
         }
 
         private func makeVertexBuffer(device: MTLDevice) -> MTLBuffer? {
@@ -467,14 +1684,170 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             return device.makeSamplerState(descriptor: descriptor)
         }
 
-        private func makePipelineState(device: MTLDevice, colorPixelFormat: MTLPixelFormat) -> MTLRenderPipelineState? {
+        private func makeCursorTexture(device: MTLDevice) -> (texture: MTLTexture, hotSpotFromTop: CGPoint)? {
+            guard !NetworkProtocol.enableReceiverSideCursorOverlay else {
+                return nil
+            }
+
+            if NetworkProtocol.useDebugCursorOverlayMarker {
+                return makeDebugCursorTexture(device: device)
+            }
+
+            let image = NSCursor.arrow.image
+            var proposedRect = CGRect(origin: .zero, size: image.size)
+            guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
+                return nil
+            }
+
+            let width = cgImage.width
+            let height = cgImage.height
+            guard width > 0, height > 0 else { return nil }
+
+            let bytesPerRow = width * 4
+            var pixelData = Data(count: bytesPerRow * height)
+            let bitmapInfo = CGBitmapInfo.byteOrder32Little.union(.init(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue))
+
+            let didDraw = pixelData.withUnsafeMutableBytes { bytes -> Bool in
+                guard let baseAddress = bytes.baseAddress else { return false }
+                guard let context = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: bitmapInfo.rawValue
+                ) else {
+                    return false
+                }
+
+                context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+                context.translateBy(x: 0, y: CGFloat(height))
+                context.scaleBy(x: 1, y: -1)
+                context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+                return true
+            }
+
+            guard didDraw else { return nil }
+
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .managed
+
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                return nil
+            }
+
+            pixelData.withUnsafeBytes { bytes in
+                guard let baseAddress = bytes.baseAddress else { return }
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, width, height),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: bytesPerRow
+                )
+            }
+
+            let pixelScale = image.size.width > 0 ? CGFloat(width) / image.size.width : 1.0
+            let hotSpot = NSCursor.arrow.hotSpot
+            let hotSpotFromTop = CGPoint(
+                x: hotSpot.x * pixelScale,
+                y: hotSpot.y * pixelScale
+            )
+
+            return (texture, hotSpotFromTop)
+        }
+
+        private func makeDebugCursorTexture(device: MTLDevice) -> (texture: MTLTexture, hotSpotFromTop: CGPoint)? {
+            let width = 28
+            let height = 28
+            let bytesPerRow = width * 4
+            var pixelData = Data(count: bytesPerRow * height)
+            let bitmapInfo = CGBitmapInfo.byteOrder32Little.union(.init(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue))
+
+            let didDraw = pixelData.withUnsafeMutableBytes { bytes -> Bool in
+                guard let baseAddress = bytes.baseAddress else { return false }
+                guard let context = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: bitmapInfo.rawValue
+                ) else {
+                    return false
+                }
+
+                context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+
+                context.setFillColor(NSColor.systemRed.withAlphaComponent(0.90).cgColor)
+                context.fillEllipse(in: CGRect(x: 2, y: 2, width: width - 4, height: height - 4))
+
+                context.setStrokeColor(NSColor.white.withAlphaComponent(0.95).cgColor)
+                context.setLineWidth(2)
+                context.strokeEllipse(in: CGRect(x: 3, y: 3, width: width - 6, height: height - 6))
+
+                context.move(to: CGPoint(x: width / 2, y: 6))
+                context.addLine(to: CGPoint(x: width / 2, y: height - 6))
+                context.move(to: CGPoint(x: 6, y: height / 2))
+                context.addLine(to: CGPoint(x: width - 6, y: height / 2))
+                context.strokePath()
+                return true
+            }
+
+            guard didDraw else { return nil }
+
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .managed
+
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                return nil
+            }
+
+            pixelData.withUnsafeBytes { bytes in
+                guard let baseAddress = bytes.baseAddress else { return }
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, width, height),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: bytesPerRow
+                )
+            }
+
+            return (texture, CGPoint(x: CGFloat(width) / 2.0, y: CGFloat(height) / 2.0))
+        }
+
+        private func makePipelineState(
+            device: MTLDevice,
+            colorPixelFormat: MTLPixelFormat,
+            fragmentFunctionName: String
+        ) -> MTLRenderPipelineState? {
             do {
                 let library = try device.makeLibrary(source: shaderSource, options: nil)
                 let descriptor = MTLRenderPipelineDescriptor()
                 descriptor.vertexFunction = library.makeFunction(name: "texturedQuadVertex")
-                descriptor.fragmentFunction = library.makeFunction(name: "texturedQuadFragment")
+                descriptor.fragmentFunction = library.makeFunction(name: fragmentFunctionName)
                 descriptor.vertexDescriptor = makeVertexDescriptor()
                 descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+                descriptor.colorAttachments[0].isBlendingEnabled = true
+                descriptor.colorAttachments[0].rgbBlendOperation = .add
+                descriptor.colorAttachments[0].alphaBlendOperation = .add
+                descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+                descriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+                descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+                descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
                 return try device.makeRenderPipelineState(descriptor: descriptor)
             } catch {
                 print("[MetalRenderSurfaceView] Failed to build render pipeline: \(error)")
@@ -549,6 +1922,84 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             return (y: textureY, cbcr: textureCbCr)
         }
 
+        private func makeRenderInput(from frame: DecodedFrame, device: MTLDevice) -> RenderInput? {
+            if let textures = makeYCbCrTextures(from: frame) {
+                return .ycbcr(y: textures.y, cbcr: textures.cbcr)
+            }
+
+            return makeBGRATexture(from: frame, device: device).map(RenderInput.bgra)
+        }
+
+        private func makeBGRATexture(from frame: DecodedFrame, device: MTLDevice) -> MTLTexture? {
+            guard frame.pixelFormat == .bgra8,
+                  let pixelData = frame.pixelData,
+                  frame.metadata.width > 0,
+                  frame.metadata.height > 0,
+                  frame.bytesPerRow >= frame.metadata.width * 4 else {
+                return nil
+            }
+
+            let requiredBytes = frame.bytesPerRow * frame.metadata.height
+            guard requiredBytes > 0, pixelData.count >= requiredBytes else {
+                return nil
+            }
+
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: frame.metadata.width,
+                height: frame.metadata.height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .managed
+
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                print("[MetalRenderSurfaceView] Failed to create BGRA texture")
+                return nil
+            }
+
+            pixelData.withUnsafeBytes { bytes in
+                guard let baseAddress = bytes.baseAddress else { return }
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, frame.metadata.width, frame.metadata.height),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: frame.bytesPerRow
+                )
+            }
+
+            let slot = retainedBGRATextureSlot
+            retainedBGRATextureSlot = (slot + 1) % retainedBGRATextures.count
+            retainedBGRATextures[slot] = texture
+            return texture
+        }
+
+        private func encodeRenderInput(
+            _ renderInput: RenderInput,
+            encoder: MTLRenderCommandEncoder,
+            ycbcrPipelineState: MTLRenderPipelineState,
+            bgraPipelineState: MTLRenderPipelineState,
+            vertexBuffer: MTLBuffer,
+            samplerState: MTLSamplerState,
+            uniforms: inout RenderUniforms
+        ) {
+            switch renderInput {
+            case .ycbcr(let y, let cbcr):
+                encoder.setRenderPipelineState(ycbcrPipelineState)
+                encoder.setFragmentTexture(y, index: 0)
+                encoder.setFragmentTexture(cbcr, index: 1)
+            case .bgra(let texture):
+                encoder.setRenderPipelineState(bgraPipelineState)
+                encoder.setFragmentTexture(texture, index: 0)
+                encoder.setFragmentTexture(nil, index: 1)
+            }
+
+            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
+            encoder.setFragmentSamplerState(samplerState, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+
         private func makeAspectFitScale(contentWidth: Int, contentHeight: Int, drawableSize: CGSize) -> SIMD2<Float> {
             guard contentWidth > 0,
                   contentHeight > 0,
@@ -576,4 +2027,37 @@ private struct RenderVertex {
 
 private struct RenderUniforms {
     var scale: SIMD2<Float>
+    var offset: SIMD2<Float>
+}
+
+private enum RenderInput {
+    case ycbcr(y: MTLTexture, cbcr: MTLTexture)
+    case bgra(MTLTexture)
+
+    var width: Int {
+        switch self {
+        case .ycbcr(let y, _):
+            return y.width
+        case .bgra(let texture):
+            return texture.width
+        }
+    }
+
+    var height: Int {
+        switch self {
+        case .ycbcr(let y, _):
+            return y.height
+        case .bgra(let texture):
+            return texture.height
+        }
+    }
+
+    var supportsSpatialUpscale: Bool {
+        switch self {
+        case .ycbcr:
+            return true
+        case .bgra:
+            return false
+        }
+    }
 }

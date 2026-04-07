@@ -1,5 +1,10 @@
 import Foundation
 
+extension Notification.Name {
+    static let wiredDisplayRenderFrameUpdated = Notification.Name("wiredDisplayRenderFrameUpdated")
+    static let wiredDisplayCursorStateUpdated = Notification.Name("wiredDisplayCursorStateUpdated")
+}
+
 /// Metal-backed renderer service placeholder for fullscreen presentation.
 final class RenderService {
     private(set) var isPrepared = false
@@ -15,6 +20,7 @@ final class RenderService {
         lastRenderedFrameMetadata = frame.metadata
         lastRenderedBytesPerRow = frame.bytesPerRow
         RenderFrameStore.shared.update(frame: frame)
+        NotificationCenter.default.post(name: .wiredDisplayRenderFrameUpdated, object: nil)
     }
 
     // Backward-compatible placeholder signature used by older call sites.

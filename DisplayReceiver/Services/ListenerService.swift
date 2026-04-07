@@ -11,6 +11,10 @@ final class ListenerService {
     private var listener: NWListener?
     private var activeConnection: NWConnection?
     private var receiveBuffer = Data()
+    /// Logical start of unconsumed data within receiveBuffer.
+    /// Avoids O(n) memmove on every consumed frame; the buffer is compacted
+    /// periodically once the consumed prefix exceeds a threshold.
+    private var receiveBufferReadOffset = 0
 
     var onStateChange: ((Bool) -> Void)?
     var onConnectionClosed: (() -> Void)?
@@ -64,6 +68,7 @@ final class ListenerService {
         activeConnection?.cancel()
         activeConnection = nil
         receiveBuffer.removeAll(keepingCapacity: false)
+        receiveBufferReadOffset = 0
 
         listener?.cancel()
         listener = nil
@@ -100,6 +105,8 @@ final class ListenerService {
         receiveTimestampNanoseconds: UInt64,
         renderedFrameIndex: UInt64?,
         renderedFrameSenderTimestampNanoseconds: UInt64?,
+        renderedFrameSenderEncodeTimestampNanoseconds: UInt64?,
+        renderedFrameReceiverArrivalTimestampNanoseconds: UInt64?,
         renderedFrameReceiverTimestampNanoseconds: UInt64?
     ) {
         let payload = HeartbeatPayload(
@@ -108,6 +115,8 @@ final class ListenerService {
             receiveTimestampNanoseconds: receiveTimestampNanoseconds,
             renderedFrameIndex: renderedFrameIndex,
             renderedFrameSenderTimestampNanoseconds: renderedFrameSenderTimestampNanoseconds,
+            renderedFrameSenderEncodeTimestampNanoseconds: renderedFrameSenderEncodeTimestampNanoseconds,
+            renderedFrameReceiverArrivalTimestampNanoseconds: renderedFrameReceiverArrivalTimestampNanoseconds,
             renderedFrameReceiverTimestampNanoseconds: renderedFrameReceiverTimestampNanoseconds
         )
 
@@ -138,6 +147,7 @@ final class ListenerService {
         activeConnection?.cancel()
         activeConnection = connection
         receiveBuffer.removeAll(keepingCapacity: false)
+        receiveBufferReadOffset = 0
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -169,6 +179,7 @@ final class ListenerService {
                 connection.cancel()
                 self.activeConnection = nil
                 self.receiveBuffer.removeAll(keepingCapacity: false)
+                self.receiveBufferReadOffset = 0
                 self.onConnectionClosed?()
                 return
             }
@@ -196,20 +207,39 @@ final class ListenerService {
     }
 
     private func drainBufferedEnvelopes() {
+        // Use receiveBufferReadOffset to avoid O(n) memmove on every consumed frame.
+        // The buffer is only physically compacted once the unconsumed prefix reaches
+        // 4 MB, amortising the shift cost across thousands of frames instead of
+        // paying it on every single consume.
+        let compactThreshold = 4 * 1024 * 1024
+
         while true {
-            guard receiveBuffer.count >= 4 else { return }
-            let length = Int(readLengthPrefix(from: receiveBuffer))
+            let available = receiveBuffer.count - receiveBufferReadOffset
+            guard available >= 4 else { return }
+
+            let length = Int(
+                NetworkProtocol.readUInt32BigEndian(from: receiveBuffer, atOffset: receiveBufferReadOffset) ?? 0
+            )
             guard length <= NetworkProtocol.maximumMessageBytes else {
                 receiveBuffer.removeAll(keepingCapacity: false)
+                receiveBufferReadOffset = 0
                 onError?(ListenerServiceError.messageTooLarge)
                 return
             }
 
             let totalLength = 4 + length
-            guard receiveBuffer.count >= totalLength else { return }
+            guard available >= totalLength else { return }
 
-            let payload = receiveBuffer[4..<totalLength]
-            receiveBuffer.removeSubrange(0..<totalLength)
+            let payloadStart = receiveBufferReadOffset + 4
+            let payloadEnd   = receiveBufferReadOffset + totalLength
+            let payload = receiveBuffer[payloadStart..<payloadEnd]
+            receiveBufferReadOffset += totalLength
+
+            // Compact the backing buffer once enough prefix has been consumed.
+            if receiveBufferReadOffset >= compactThreshold {
+                receiveBuffer.removeSubrange(0..<receiveBufferReadOffset)
+                receiveBufferReadOffset = 0
+            }
 
             // Check if this is a binary video frame (starts with magic bytes)
             if payload.count >= 4 {
@@ -273,13 +303,20 @@ final class VideoDatagramListenerService {
 
     private(set) var isListening = false
     private(set) var listeningPort: UInt16 = NetworkProtocol.defaultPort
-    var canAcceptDatagrams: Bool { listener != nil }
+    /// Only advertise UDP once the listener is actually ready on the socket.
+    var canAcceptDatagrams: Bool { isListening }
 
     private var listener: NWListener?
-    private var activeConnection: NWConnection?
+    private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
+    private var receivedCursorPacketCount: UInt64 = 0
+    private var receivedVideoDatagramCount: UInt64 = 0
+    private var assembledVideoFrameCount: UInt64 = 0
+    private var rejectedDatagramCount: UInt64 = 0
+    private var lastTelemetryLogNanoseconds: UInt64 = 0
 
     var onStateChange: ((Bool) -> Void)?
     var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data?, Data) -> Void)?
+    var onCursorState: ((CursorStatePayload) -> Void)?
     var onError: ((Error) -> Void)?
 
     func startListening(port: UInt16 = NetworkProtocol.defaultPort) {
@@ -324,24 +361,32 @@ final class VideoDatagramListenerService {
     }
 
     func stopListening() {
-        activeConnection?.cancel()
-        activeConnection = nil
+        for connection in activeConnections.values {
+            connection.cancel()
+        }
+        activeConnections.removeAll(keepingCapacity: false)
         listener?.cancel()
         listener = nil
         reassembler.reset()
+        receivedCursorPacketCount = 0
+        receivedVideoDatagramCount = 0
+        assembledVideoFrameCount = 0
+        rejectedDatagramCount = 0
+        lastTelemetryLogNanoseconds = 0
         isListening = false
         onStateChange?(false)
     }
 
     private func activate(connection: NWConnection) {
-        activeConnection?.cancel()
-        activeConnection = connection
-        reassembler.reset()
+        let connectionID = ObjectIdentifier(connection)
+        activeConnections[connectionID] = connection
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             if case .failed(let error) = state {
                 self.onError?(error)
+            } else if case .cancelled = state {
+                self.activeConnections.removeValue(forKey: connectionID)
             }
         }
 
@@ -367,26 +412,71 @@ final class VideoDatagramListenerService {
     }
 
     private func handle(datagram: Data) {
-        guard let chunk = VideoDatagramWire.deserialize(datagram: datagram) else {
+        if let cursorState = BinaryCursorWire.deserialize(data: datagram) {
+            receivedCursorPacketCount += 1
+            logTelemetryIfNeeded()
+            onCursorState?(cursorState)
             return
         }
+
+        if let chunk = VideoDatagramWire.deserialize(datagram: datagram) {
+            receivedVideoDatagramCount += 1
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard let frameData = reassembler.insert(
+                frameIndex: chunk.frameIndex,
+                chunkIndex: chunk.chunkIndex,
+                chunkCount: chunk.chunkCount,
+                payload: chunk.payload,
+                arrivalNanoseconds: now
+            ) else {
+                return
+            }
+
+            guard let result = BinaryFrameWire.deserialize(data: frameData) else {
+                rejectedDatagramCount += 1
+                logTelemetryIfNeeded()
+                return
+            }
+
+            assembledVideoFrameCount += 1
+            logTelemetryIfNeeded()
+            onBinaryVideoFrame?(result.header, result.vps, result.sps, result.pps, result.payload)
+            return
+        }
+
+        guard let envelope = try? JSONDecoder().decode(NetworkEnvelope.self, from: datagram) else {
+            return
+        }
+        guard envelope.type == .cursorState else { return }
+
+        do {
+            let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
+            receivedCursorPacketCount += 1
+            logTelemetryIfNeeded()
+            onCursorState?(cursorState)
+        } catch {
+            rejectedDatagramCount += 1
+            logTelemetryIfNeeded()
+            onError?(error)
+        }
+    }
+
+    private func logTelemetryIfNeeded() {
+        guard NetworkProtocol.enableTransportDebugLogging else { return }
 
         let now = DispatchTime.now().uptimeNanoseconds
-        guard let frameData = reassembler.insert(
-            frameIndex: chunk.frameIndex,
-            chunkIndex: chunk.chunkIndex,
-            chunkCount: chunk.chunkCount,
-            payload: chunk.payload,
-            arrivalNanoseconds: now
-        ) else {
+        if lastTelemetryLogNanoseconds != 0,
+           now < (lastTelemetryLogNanoseconds + NetworkProtocol.transportTelemetryLogIntervalNanoseconds) {
             return
         }
 
-        guard let result = BinaryFrameWire.deserialize(data: frameData) else {
-            return
-        }
-
-        onBinaryVideoFrame?(result.header, result.vps, result.sps, result.pps, result.payload)
+        print(
+            "[Receiver][UDP] cursorPackets=\(receivedCursorPacketCount) " +
+            "videoDatagrams=\(receivedVideoDatagramCount) " +
+            "assembledFrames=\(assembledVideoFrameCount) " +
+            "rejected=\(rejectedDatagramCount)"
+        )
+        lastTelemetryLogNanoseconds = now
     }
 }
 

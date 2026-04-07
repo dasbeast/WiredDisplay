@@ -4,8 +4,19 @@ import SwiftUI
 
 final class DisplayReceiverAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
         ApplicationInstallPrompter.promptToMoveToApplicationsIfNeeded(appName: "DisplayReceiver")
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            NotificationCenter.default.post(name: .receiverReopenMainWindow, object: nil)
+        }
+        return true
     }
 }
 
@@ -27,6 +38,10 @@ struct DisplayReceiverApp: App {
             )
         }
     }
+}
+
+extension Notification.Name {
+    static let receiverReopenMainWindow = Notification.Name("receiverReopenMainWindow")
 }
 
 private enum ApplicationInstallPrompter {
