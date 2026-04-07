@@ -171,7 +171,10 @@ struct VirtualDisplayMode: Identifiable, Equatable, Hashable {
     let scale: Double
     let refreshRateHz: Double
 
-    var id: String { "\(logicalWidth)x\(logicalHeight)-\(pixelWidth)x\(pixelHeight)-\(String(format: "%.2f", scale))" }
+    var id: String {
+        "\(logicalWidth)x\(logicalHeight)-\(pixelWidth)x\(pixelHeight)-" +
+        "\(String(format: "%.2f", scale))-\(String(format: "%.2f", refreshRateHz))"
+    }
 
     var isRetina: Bool { scale >= 1.5 }
 
@@ -275,10 +278,14 @@ final class VirtualDisplayService {
             logicalWidth: UInt32(mode.logicalWidth),
             logicalHeight: UInt32(mode.logicalHeight),
             pixelWidth: UInt32(mode.pixelWidth),
-            pixelHeight: UInt32(mode.pixelHeight)
+            pixelHeight: UInt32(mode.pixelHeight),
+            refreshRate: mode.refreshRateHz
         )
         if !success {
-            print("[VirtualDisplayService] Failed to apply mode \(mode.pixelWidth)×\(mode.pixelHeight)")
+            print(
+                "[VirtualDisplayService] Failed to apply mode " +
+                "\(mode.pixelWidth)×\(mode.pixelHeight) @ \(String(format: "%.2f", mode.refreshRateHz))Hz"
+            )
         }
         return success
     }

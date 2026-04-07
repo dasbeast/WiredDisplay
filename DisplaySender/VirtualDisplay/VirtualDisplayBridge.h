@@ -44,7 +44,8 @@ NS_ASSUME_NONNULL_BEGIN
               logicalHeight:(unsigned int)logicalHeight
                  pixelWidth:(unsigned int)pixelWidth
                 pixelHeight:(unsigned int)pixelHeight
-NS_SWIFT_NAME(applyMode(forDisplay:logicalWidth:logicalHeight:pixelWidth:pixelHeight:));
+                refreshRate:(double)refreshRate
+NS_SWIFT_NAME(applyMode(forDisplay:logicalWidth:logicalHeight:pixelWidth:pixelHeight:refreshRate:));
 
 @end
 

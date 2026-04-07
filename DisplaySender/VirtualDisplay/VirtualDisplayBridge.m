@@ -201,8 +201,7 @@ static void scheduleRetiredDisplayPurge(NSNumber *displayKey, int64_t delayNanos
     CFArrayRef modes = CGDisplayCopyAllDisplayModes(displayID, (__bridge CFDictionaryRef)options);
     if (!modes) return @[];
 
-    // Key: "logicalWxlogicalH-pixelWxpixelH-scaleBucket" to preserve both non-HiDPI
-    // and Retina variants for the same pixel size in the advanced picker.
+    // Key includes refresh bucket so 30/60/120 Hz variants are preserved separately.
     NSMutableDictionary<NSString *, NSDictionary *> *uniqueModes = [NSMutableDictionary dictionary];
 
     CFIndex count = CFArrayGetCount(modes);
@@ -220,8 +219,9 @@ static void scheduleRetiredDisplayPurge(NSNumber *displayKey, int64_t delayNanos
         double scale = (double)pixelWidth / (double)logicalWidth;
 
         int scaleBucket = (int)llround(scale * 100.0);
-        NSString *key = [NSString stringWithFormat:@"%zux%zu-%zux%zu-%d",
-                         logicalWidth, logicalHeight, pixelWidth, pixelHeight, scaleBucket];
+        int refreshBucket = (int)llround(refreshRate * 100.0);
+        NSString *key = [NSString stringWithFormat:@"%zux%zu-%zux%zu-%d-%d",
+                         logicalWidth, logicalHeight, pixelWidth, pixelHeight, scaleBucket, refreshBucket];
         uniqueModes[key] = @{
             @"logicalWidth":  @(logicalWidth),
             @"logicalHeight": @(logicalHeight),
@@ -236,12 +236,16 @@ static void scheduleRetiredDisplayPurge(NSNumber *displayKey, int64_t delayNanos
 
     NSMutableArray *result = [NSMutableArray arrayWithArray:uniqueModes.allValues];
 
-    // Sort by pixel area descending, then by higher scale first for identical pixel sizes.
+    // Sort by pixel area descending, then by higher refresh rate, then by higher scale.
     [result sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         NSUInteger areaA = [a[@"pixelWidth"] unsignedIntegerValue] * [a[@"pixelHeight"] unsignedIntegerValue];
         NSUInteger areaB = [b[@"pixelWidth"] unsignedIntegerValue] * [b[@"pixelHeight"] unsignedIntegerValue];
         if (areaA > areaB) return NSOrderedAscending;
         if (areaA < areaB) return NSOrderedDescending;
+        double refreshA = [a[@"refreshRate"] doubleValue];
+        double refreshB = [b[@"refreshRate"] doubleValue];
+        if (refreshA > refreshB) return NSOrderedAscending;
+        if (refreshA < refreshB) return NSOrderedDescending;
         double scaleA = [a[@"scale"] doubleValue];
         double scaleB = [b[@"scale"] doubleValue];
         if (scaleA > scaleB) return NSOrderedAscending;
@@ -278,7 +282,8 @@ static void scheduleRetiredDisplayPurge(NSNumber *displayKey, int64_t delayNanos
                logicalWidth:(unsigned int)logicalWidth
               logicalHeight:(unsigned int)logicalHeight
                 pixelWidth:(unsigned int)pixelWidth
-               pixelHeight:(unsigned int)pixelHeight {
+               pixelHeight:(unsigned int)pixelHeight
+               refreshRate:(double)refreshRate {
     // Include HiDPI duplicate modes so callers can select a specific logical+pixel mode,
     // not just "whatever scale is highest for this pixel size".
     NSDictionary *options = @{(__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES};
@@ -292,9 +297,23 @@ static void scheduleRetiredDisplayPurge(NSNumber *displayKey, int64_t delayNanos
         if (CGDisplayModeGetPixelWidth(mode) == pixelWidth &&
             CGDisplayModeGetPixelHeight(mode) == pixelHeight &&
             CGDisplayModeGetWidth(mode) == logicalWidth &&
-            CGDisplayModeGetHeight(mode) == logicalHeight) {
+            CGDisplayModeGetHeight(mode) == logicalHeight &&
+            fabs(CGDisplayModeGetRefreshRate(mode) - refreshRate) < 0.01) {
             targetMode = mode;
             break;
+        }
+    }
+
+    if (!targetMode) {
+        for (CFIndex i = 0; i < count; i++) {
+            CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(allModes, i);
+            if (CGDisplayModeGetPixelWidth(mode) == pixelWidth &&
+                CGDisplayModeGetPixelHeight(mode) == pixelHeight &&
+                CGDisplayModeGetWidth(mode) == logicalWidth &&
+                CGDisplayModeGetHeight(mode) == logicalHeight) {
+                targetMode = mode;
+                break;
+            }
         }
     }
 

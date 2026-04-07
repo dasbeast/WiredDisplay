@@ -57,6 +57,14 @@ struct SenderRootView: View {
     @State private var cursorDatagramQueuedPacketsDropped: UInt64 = 0
     @State private var cursorDatagramPendingPackets: Int = 0
     @State private var cursorDatagramSendErrors: UInt64 = 0
+    @State private var cursorRefreshDriverModeText = "-"
+    @State private var cursorRefreshSourceCallbacksPerSecondText = "-"
+    @State private var cursorDisplayLinkCallbacksPerSecondText = "-"
+    @State private var cursorRefreshTicksPerSecondText = "-"
+    @State private var cursorPollRequestsPerSecondText = "-"
+    @State private var cursorPollExecutionsPerSecondText = "-"
+    @State private var cursorPollCoalescedPerSecondText = "-"
+    @State private var cursorPacketsSuppressedPerSecondText = "-"
     @State private var cursorPacketsSentPerSecondText = "-"
     @State private var resolvedStreamingPipelineText = "-"
     @State private var wiredPathSummary = "unknown"
@@ -423,6 +431,14 @@ struct SenderRootView: View {
                         Text("Cursor UDP Queued Packets Dropped: \(cursorDatagramQueuedPacketsDropped)")
                         Text("Cursor UDP Pending Packets: \(cursorDatagramPendingPackets)")
                         Text("Cursor UDP Send Errors: \(cursorDatagramSendErrors)")
+                        Text("Cursor Refresh Driver Mode: \(cursorRefreshDriverModeText)")
+                        Text("Cursor Refresh Source Callbacks: \(cursorRefreshSourceCallbacksPerSecondText)")
+                        Text("Cursor Display-Link Callbacks: \(cursorDisplayLinkCallbacksPerSecondText)")
+                        Text("Cursor Main-Actor Refresh Ticks: \(cursorRefreshTicksPerSecondText)")
+                        Text("Cursor Poll Requests: \(cursorPollRequestsPerSecondText)")
+                        Text("Cursor Poll Executions: \(cursorPollExecutionsPerSecondText)")
+                        Text("Cursor Poll Coalesced: \(cursorPollCoalescedPerSecondText)")
+                        Text("Cursor Packets Suppressed: \(cursorPacketsSuppressedPerSecondText)")
                         Text("Cursor Packets Sent Rate: \(cursorPacketsSentPerSecondText)")
                         Text("Send Rate: \(sentFramesPerSecondText)")
                         Text("Send Throughput: \(sentMegabitsPerSecondText)")
@@ -596,6 +612,17 @@ struct SenderRootView: View {
         cursorDatagramQueuedPacketsDropped = coordinator.cursorDatagramQueuedPacketsDropped
         cursorDatagramPendingPackets = coordinator.cursorDatagramPendingPackets
         cursorDatagramSendErrors = coordinator.cursorDatagramSendErrors
+        cursorRefreshDriverModeText = coordinator.cursorRefreshDriverMode
+        cursorRefreshSourceCallbacksPerSecondText = formatRate(
+            coordinator.cursorRefreshSourceCallbacksPerSecond,
+            unit: "fps"
+        )
+        cursorDisplayLinkCallbacksPerSecondText = formatRate(coordinator.cursorDisplayLinkCallbacksPerSecond, unit: "fps")
+        cursorRefreshTicksPerSecondText = formatRate(coordinator.cursorRefreshTicksPerSecond, unit: "fps")
+        cursorPollRequestsPerSecondText = formatRate(coordinator.cursorPollRequestsPerSecond, unit: "fps")
+        cursorPollExecutionsPerSecondText = formatRate(coordinator.cursorPollExecutionsPerSecond, unit: "fps")
+        cursorPollCoalescedPerSecondText = formatRate(coordinator.cursorPollCoalescedPerSecond, unit: "fps")
+        cursorPacketsSuppressedPerSecondText = formatRate(coordinator.cursorPacketsSuppressedPerSecond, unit: "fps")
         resolvedStreamingPipelineText = coordinator.resolvedStreamingPipelineMode.label
         if selectedDisplayResolutionPreference != coordinator.displayResolutionPreference {
             selectedDisplayResolutionPreference = coordinator.displayResolutionPreference
