@@ -26,6 +26,11 @@ final class SenderSessionCoordinator {
         static let holdProgressLogIntervalNanoseconds: UInt64 = 1_000_000_000
     }
 
+    private enum CaptureRefreshPolicy {
+        static let cursorHandoffRefreshCooldownNanoseconds: UInt64 = 15_000_000_000
+        static let cursorHandoffRefreshDelayNanoseconds: UInt64 = 150_000_000
+    }
+
     enum SessionState: Equatable {
         case idle
         case connecting
@@ -205,6 +210,9 @@ final class SenderSessionCoordinator {
     private var cursorAppearancePacketSentCountTotal: UInt64 = 0
     private var lastCursorTelemetryLogNanoseconds: UInt64 = 0
     private var lastTransportTelemetryLogNanoseconds: UInt64 = 0
+    private var captureRefreshScheduled = false
+    private var lastCursorHandoffCaptureRefreshNanoseconds: UInt64 = 0
+    private var capturePipelineRefreshCount: UInt64 = 0
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -234,6 +242,11 @@ final class SenderSessionCoordinator {
         cursorRefreshDriver.onDriverModeChange = { [weak self] mode in
             Task { @MainActor [weak self] in
                 self?.cursorRefreshDriverMode = mode.rawValue
+            }
+        }
+        cursorMotionSampler.onCursorLeftVirtualDisplay = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.scheduleCaptureRefreshForCursorHandoff()
             }
         }
 
@@ -654,6 +667,9 @@ final class SenderSessionCoordinator {
         outboundWindowPayloadBytes = 0
         availableDisplayModes = []
         activeDisplayMode = nil
+        captureRefreshScheduled = false
+        lastCursorHandoffCaptureRefreshNanoseconds = 0
+        capturePipelineRefreshCount = 0
     }
 
     /// Sends one manual synthetic frame for pipeline smoke testing.
@@ -1215,6 +1231,8 @@ final class SenderSessionCoordinator {
         cursorAppearancePacketSentCountTotal = 0
         resetCursorRateWindows()
         lastCursorTelemetryLogNanoseconds = 0
+        captureRefreshScheduled = false
+        lastCursorHandoffCaptureRefreshNanoseconds = 0
         logCursorDebug("tracking started for display \(displayID)")
         if !useDynamicCursorAppearanceMirroring {
             logCursorDebug("dynamic cursor appearance mirroring disabled; sender will use arrow cursor")
@@ -1281,6 +1299,51 @@ final class SenderSessionCoordinator {
         cursorAppearancePacketSentCountTotal = 0
         resetCursorRateWindows()
         lastCursorTelemetryLogNanoseconds = 0
+        captureRefreshScheduled = false
+    }
+
+    private func scheduleCaptureRefreshForCursorHandoff() {
+        guard state == .running else { return }
+        guard !captureRefreshScheduled else { return }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        if lastCursorHandoffCaptureRefreshNanoseconds > 0,
+           now < (lastCursorHandoffCaptureRefreshNanoseconds +
+                CaptureRefreshPolicy.cursorHandoffRefreshCooldownNanoseconds) {
+            return
+        }
+
+        captureRefreshScheduled = true
+        lastCursorHandoffCaptureRefreshNanoseconds = now
+        logCursorDebug("scheduling capture refresh after cursor left virtual display")
+
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .nanoseconds(Int(CaptureRefreshPolicy.cursorHandoffRefreshDelayNanoseconds))
+        ) { [weak self] in
+            guard let self else { return }
+            self.captureRefreshScheduled = false
+            self.refreshCapturePipelineAfterCursorHandoff()
+        }
+    }
+
+    private func refreshCapturePipelineAfterCursorHandoff() {
+        guard state == .running else { return }
+
+        let liveMode = activeDisplayMode ?? virtualDisplayService.activeMode()
+        let captureWidth = liveMode?.pixelWidth ?? effectiveCaptureWidth()
+        let captureHeight = liveMode?.pixelHeight ?? effectiveCaptureHeight()
+        capturePipelineRefreshCount += 1
+        print(
+            "[Sender] Capture pipeline refresh #\(capturePipelineRefreshCount) " +
+            "reason=cursor-handoff display=\(virtualDisplayService.displayID)"
+        )
+        captureService.startCapture(
+            width: captureWidth,
+            height: captureHeight,
+            framesPerSecond: NetworkProtocol.captureFramesPerSecond,
+            streamingPipelineMode: resolvedStreamingPipelineMode,
+            showsCursor: shouldShowSenderCursorInCapture
+        )
     }
 
     private func startInputEventLogging(for displayID: CGDirectDisplayID) {
@@ -2367,6 +2430,7 @@ private final class SenderCursorMotionSampler {
     private let queue = DispatchQueue(label: "wireddisplay.sender.cursorMotionSampler", qos: .userInteractive)
     private let transportService: TransportService
     private let cursorDatagramTransportService: CursorDatagramTransportService
+    var onCursorLeftVirtualDisplay: (() -> Void)?
 
     private var isRunning = false
     private var displayID: CGDirectDisplayID = 0
@@ -2498,6 +2562,13 @@ private final class SenderCursorMotionSampler {
 
         let nextState = currentCursorState()
         latestStateSnapshotStorage = nextState
+        let didLeaveVirtualDisplay =
+            lastSentCursorState?.ownershipIntent == .remote &&
+            nextState.ownershipIntent == .localHandoff
+
+        if didLeaveVirtualDisplay {
+            onCursorLeftVirtualDisplay?()
+        }
 
         guard shouldSendCursorState(nextState) else {
             suppressedPacketCount += 1

@@ -80,6 +80,7 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         window.isMovableByWindowBackground = true
         window.acceptsMouseMovedEvents = true
         window.collectionBehavior = [.fullScreenPrimary, .fullScreenDisallowsTiling, .managed]
+        window.toolbar = NSToolbar()
         window.contentViewController = hostingController
         window.delegate = self
         window.center()
