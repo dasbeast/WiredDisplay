@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 
 @MainActor
-private enum SenderRuntime {
+enum SenderRuntime {
     static let coordinator = SenderSessionCoordinator()
     static let discoveryService = ReceiverDiscoveryService()
 }
@@ -90,7 +90,6 @@ struct SenderRootView: View {
                 streamingPipelineSection
                 actionSection
                 statusSection
-                nerdStatsSection
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
@@ -335,7 +334,20 @@ struct SenderRootView: View {
                     .foregroundStyle(.secondary)
                     .font(.system(.body, design: .monospaced))
 
-                Toggle("Use Side Cursor Overlay", isOn: $useSideCursorOverlay)
+                Toggle(isOn: $useSideCursorOverlay) {
+                    HStack(spacing: 6) {
+                        Text("Use Side Cursor Overlay")
+                        Text("BETA")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(Color.orange.opacity(0.14))
+                            )
+                    }
+                }
                     .onChange(of: useSideCursorOverlay) { _, newValue in
                         UserDefaults.standard.set(newValue, forKey: Self.savedUseSideCursorOverlayKey)
                         coordinator.setUseReceiverSideCursorOverlay(newValue)

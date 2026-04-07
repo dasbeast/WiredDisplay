@@ -120,6 +120,8 @@ final class SenderSessionCoordinator {
     private(set) var availableDisplayModes: [VirtualDisplayMode] = [] { didSet { onChange?() } }
     /// The mode macOS actually has active on the virtual display (read back after creation/change).
     private(set) var activeDisplayMode: VirtualDisplayMode? { didSet { onChange?() } }
+
+    var activeVirtualDisplayID: CGDirectDisplayID { virtualDisplayService.displayID }
     var canStartSession: Bool { state == .connected }
     var isSessionActive: Bool {
         switch state {

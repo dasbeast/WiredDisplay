@@ -20,13 +20,13 @@ struct DisplaySenderApp: App {
         }
         .defaultSize(width: 900, height: 720)
         .commands {
-            CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") {
-                    updater.updater?.checkForUpdates()
-                }
-                .disabled(updater.updater == nil || !(updater.updater?.canCheckForUpdates ?? false))
-            }
+            DisplaySenderCommands(updater: updater)
         }
+
+        Window("Stats for Nerds", id: "sender-stats") {
+            SenderStatsWindowView()
+        }
+        .defaultSize(width: 460, height: 720)
 
         MenuBarExtra("DisplaySender", systemImage: "display.2") {
             DisplaySenderMenuBarView(updater: updater)
@@ -34,6 +34,30 @@ struct DisplaySenderApp: App {
 
         Settings {
             UpdaterSettingsView(updater: updater.updater, configurationError: updater.configurationError)
+        }
+    }
+}
+
+private struct DisplaySenderCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    let updater: DisplaySenderUpdater
+
+    var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…") {
+                updater.updater?.checkForUpdates()
+            }
+            .disabled(updater.updater == nil || !(updater.updater?.canCheckForUpdates ?? false))
+        }
+
+        CommandGroup(after: .toolbar) {
+            Divider()
+
+            Button("Stats for Nerds") {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "sender-stats")
+            }
         }
     }
 }
