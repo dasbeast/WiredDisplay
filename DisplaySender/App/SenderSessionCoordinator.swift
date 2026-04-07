@@ -26,9 +26,11 @@ final class SenderSessionCoordinator {
         static let holdProgressLogIntervalNanoseconds: UInt64 = 1_000_000_000
     }
 
-    private enum CaptureRefreshPolicy {
-        static let cursorHandoffRefreshCooldownNanoseconds: UInt64 = 15_000_000_000
-        static let cursorHandoffRefreshDelayNanoseconds: UInt64 = 150_000_000
+    private enum CursorPipelineRefreshPolicy {
+        static let periodicRefreshIntervalSeconds: TimeInterval = 120
+        static let pollStallThresholdNanoseconds: UInt64 = 1_000_000_000
+        static let metricRefreshCooldownNanoseconds: UInt64 = 30_000_000_000
+        static let metricRefreshDelayNanoseconds: UInt64 = 150_000_000
     }
 
     enum SessionState: Equatable {
@@ -139,6 +141,7 @@ final class SenderSessionCoordinator {
     private var heartbeatTimer: Timer?
     private var heartbeatTimeoutTimer: Timer?
     private var transportTelemetryTimer: Timer?
+    private var cursorPipelineRefreshTimer: Timer?
     private var lastInboundHeartbeatAt: Date?
     private var estimatedReceiverClockOffsetNanoseconds: Int64?
     private var lastRecoveryKeyFrameRequestAt: Date?
@@ -210,9 +213,9 @@ final class SenderSessionCoordinator {
     private var cursorAppearancePacketSentCountTotal: UInt64 = 0
     private var lastCursorTelemetryLogNanoseconds: UInt64 = 0
     private var lastTransportTelemetryLogNanoseconds: UInt64 = 0
-    private var captureRefreshScheduled = false
-    private var lastCursorHandoffCaptureRefreshNanoseconds: UInt64 = 0
-    private var capturePipelineRefreshCount: UInt64 = 0
+    private var cursorPipelineRefreshScheduled = false
+    private var lastCursorMetricRefreshNanoseconds: UInt64 = 0
+    private var cursorPipelineRefreshCount: UInt64 = 0
 
     init(
         captureService: CaptureService = CaptureService(),
@@ -242,11 +245,6 @@ final class SenderSessionCoordinator {
         cursorRefreshDriver.onDriverModeChange = { [weak self] mode in
             Task { @MainActor [weak self] in
                 self?.cursorRefreshDriverMode = mode.rawValue
-            }
-        }
-        cursorMotionSampler.onCursorLeftVirtualDisplay = { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.scheduleCaptureRefreshForCursorHandoff()
             }
         }
 
@@ -553,6 +551,7 @@ final class SenderSessionCoordinator {
         } else {
             stopCursorTracking(sendHiddenState: true)
         }
+        updatePeriodicCursorPipelineRefreshTimer()
 
         // Stage 1 (0.25s): CGDisplayCopyAllDisplayModes needs a moment after virtual display
         // creation before it returns the advertised modes. Query modes here and apply the
@@ -639,6 +638,7 @@ final class SenderSessionCoordinator {
         currentDesiredHostIndex = 0
         currentHostCompletedHandshake = false
         stopHeartbeatTimers()
+        stopPeriodicCursorPipelineRefreshTimer()
         stopCursorTracking(sendHiddenState: true)
         stopInputEventLogging()
         captureService.stopCapture()
@@ -667,9 +667,9 @@ final class SenderSessionCoordinator {
         outboundWindowPayloadBytes = 0
         availableDisplayModes = []
         activeDisplayMode = nil
-        captureRefreshScheduled = false
-        lastCursorHandoffCaptureRefreshNanoseconds = 0
-        capturePipelineRefreshCount = 0
+        cursorPipelineRefreshScheduled = false
+        lastCursorMetricRefreshNanoseconds = 0
+        cursorPipelineRefreshCount = 0
     }
 
     /// Sends one manual synthetic frame for pipeline smoke testing.
@@ -770,6 +770,7 @@ final class SenderSessionCoordinator {
                 } else {
                     state = .failed(ack.reason ?? "receiver rejected handshake")
                     shouldMaintainConnection = false
+                    stopPeriodicCursorPipelineRefreshTimer()
                     captureService.stopCapture()
                     videoDatagramTransportService.disconnect()
                     transportService.disconnect()
@@ -846,6 +847,7 @@ final class SenderSessionCoordinator {
         availableDisplayModes = []
         activeDisplayMode = nil
         stopHeartbeatTimers()
+        stopPeriodicCursorPipelineRefreshTimer()
         stopCursorTracking(sendHiddenState: false)
         stopInputEventLogging()
         captureService.stopCapture()
@@ -1175,6 +1177,7 @@ final class SenderSessionCoordinator {
         } else {
             stopCursorTracking(sendHiddenState: true)
         }
+        updatePeriodicCursorPipelineRefreshTimer()
 
         captureService.stopCapture()
 
@@ -1231,8 +1234,7 @@ final class SenderSessionCoordinator {
         cursorAppearancePacketSentCountTotal = 0
         resetCursorRateWindows()
         lastCursorTelemetryLogNanoseconds = 0
-        captureRefreshScheduled = false
-        lastCursorHandoffCaptureRefreshNanoseconds = 0
+        cursorPipelineRefreshScheduled = false
         logCursorDebug("tracking started for display \(displayID)")
         if !useDynamicCursorAppearanceMirroring {
             logCursorDebug("dynamic cursor appearance mirroring disabled; sender will use arrow cursor")
@@ -1299,51 +1301,100 @@ final class SenderSessionCoordinator {
         cursorAppearancePacketSentCountTotal = 0
         resetCursorRateWindows()
         lastCursorTelemetryLogNanoseconds = 0
-        captureRefreshScheduled = false
+        cursorPipelineRefreshScheduled = false
+        updatePeriodicCursorPipelineRefreshTimer()
     }
 
-    private func scheduleCaptureRefreshForCursorHandoff() {
-        guard state == .running else { return }
-        guard !captureRefreshScheduled else { return }
-
+    private func scheduleCursorPipelineRefreshForPollStall(_ stallNanoseconds: UInt64) {
         let now = DispatchTime.now().uptimeNanoseconds
-        if lastCursorHandoffCaptureRefreshNanoseconds > 0,
-           now < (lastCursorHandoffCaptureRefreshNanoseconds +
-                CaptureRefreshPolicy.cursorHandoffRefreshCooldownNanoseconds) {
+        scheduleCursorPipelineRefresh(
+            reason: "poll-stall",
+            earliestTimestampNanoseconds: lastCursorMetricRefreshNanoseconds,
+            cooldownNanoseconds: CursorPipelineRefreshPolicy.metricRefreshCooldownNanoseconds,
+            delayNanoseconds: CursorPipelineRefreshPolicy.metricRefreshDelayNanoseconds,
+            nowNanoseconds: now
+        ) { [weak self] scheduledAt in
+            self?.lastCursorMetricRefreshNanoseconds = scheduledAt
+            print(
+                "[Sender] Scheduling cursor pipeline refresh for " +
+                "poll stall \(String(format: "%.1f", Double(stallNanoseconds) / 1_000_000.0)) ms"
+            )
+        }
+    }
+
+    private func schedulePeriodicCursorPipelineRefresh() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        scheduleCursorPipelineRefresh(
+            reason: "periodic",
+            earliestTimestampNanoseconds: 0,
+            cooldownNanoseconds: 0,
+            delayNanoseconds: 0,
+            nowNanoseconds: now,
+            onScheduled: nil
+        )
+    }
+
+    private func scheduleCursorPipelineRefresh(
+        reason: String,
+        earliestTimestampNanoseconds: UInt64,
+        cooldownNanoseconds: UInt64,
+        delayNanoseconds: UInt64,
+        nowNanoseconds: UInt64,
+        onScheduled: ((UInt64) -> Void)?
+    ) {
+        guard state == .running, useReceiverSideCursorOverlay else { return }
+        guard !cursorPipelineRefreshScheduled else { return }
+        if cooldownNanoseconds > 0,
+           earliestTimestampNanoseconds > 0,
+           nowNanoseconds < (earliestTimestampNanoseconds + cooldownNanoseconds) {
             return
         }
 
-        captureRefreshScheduled = true
-        lastCursorHandoffCaptureRefreshNanoseconds = now
-        logCursorDebug("scheduling capture refresh after cursor left virtual display")
+        cursorPipelineRefreshScheduled = true
+        onScheduled?(nowNanoseconds)
 
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + .nanoseconds(Int(CaptureRefreshPolicy.cursorHandoffRefreshDelayNanoseconds))
-        ) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + .nanoseconds(Int(delayNanoseconds))) { [weak self] in
             guard let self else { return }
-            self.captureRefreshScheduled = false
-            self.refreshCapturePipelineAfterCursorHandoff()
+            self.cursorPipelineRefreshScheduled = false
+            self.refreshCursorPipeline(reason: reason)
         }
     }
 
-    private func refreshCapturePipelineAfterCursorHandoff() {
-        guard state == .running else { return }
+    private func refreshCursorPipeline(reason: String) {
+        guard state == .running, useReceiverSideCursorOverlay else { return }
 
-        let liveMode = activeDisplayMode ?? virtualDisplayService.activeMode()
-        let captureWidth = liveMode?.pixelWidth ?? effectiveCaptureWidth()
-        let captureHeight = liveMode?.pixelHeight ?? effectiveCaptureHeight()
-        capturePipelineRefreshCount += 1
+        let displayID = virtualDisplayService.displayID
+        guard displayID != 0 else { return }
+
+        startCursorTracking(for: displayID)
+
+        cursorPipelineRefreshCount += 1
         print(
-            "[Sender] Capture pipeline refresh #\(capturePipelineRefreshCount) " +
-            "reason=cursor-handoff display=\(virtualDisplayService.displayID)"
+            "[Sender] Cursor pipeline refresh #\(cursorPipelineRefreshCount) " +
+            "reason=\(reason) display=\(displayID)"
         )
-        captureService.startCapture(
-            width: captureWidth,
-            height: captureHeight,
-            framesPerSecond: NetworkProtocol.captureFramesPerSecond,
-            streamingPipelineMode: resolvedStreamingPipelineMode,
-            showsCursor: shouldShowSenderCursorInCapture
-        )
+    }
+
+    private func updatePeriodicCursorPipelineRefreshTimer() {
+        guard state == .running, useReceiverSideCursorOverlay else {
+            stopPeriodicCursorPipelineRefreshTimer()
+            return
+        }
+
+        guard cursorPipelineRefreshTimer == nil else { return }
+        cursorPipelineRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: CursorPipelineRefreshPolicy.periodicRefreshIntervalSeconds,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.schedulePeriodicCursorPipelineRefresh()
+            }
+        }
+    }
+
+    private func stopPeriodicCursorPipelineRefreshTimer() {
+        cursorPipelineRefreshTimer?.invalidate()
+        cursorPipelineRefreshTimer = nil
     }
 
     private func startInputEventLogging(for displayID: CGDirectDisplayID) {
@@ -2248,8 +2299,7 @@ final class SenderSessionCoordinator {
         lastCursorPacketSentCountSnapshot = 0
     }
 
-    private func updateCursorRates() {
-        let motionSnapshot = cursorMotionSampler.debugSnapshot()
+    private func updateCursorRates(using motionSnapshot: SenderCursorMotionSampler.DebugSnapshot) {
         if let rate = computeRate(
             totalCount: cursorRefreshDriver.rawCallbackCount,
             windowStartNanoseconds: &cursorDisplayLinkCallbackWindowStartNanoseconds,
@@ -2340,6 +2390,7 @@ final class SenderSessionCoordinator {
     private func refreshTransportTelemetry() {
         let tcpSnapshot = transportService.debugSnapshot()
         let cursorSnapshot = cursorDatagramTransportService.debugSnapshot()
+        let motionSnapshot = cursorMotionSampler.debugSnapshot()
 
         if tcpVideoFramesSent != tcpSnapshot.sentVideoFrames {
             tcpVideoFramesSent = tcpSnapshot.sentVideoFrames
@@ -2366,7 +2417,8 @@ final class SenderSessionCoordinator {
             cursorDatagramSendErrors = cursorSnapshot.sendErrors
         }
 
-        updateCursorRates()
+        updateCursorRates(using: motionSnapshot)
+        evaluateCursorPipelineHealth(using: motionSnapshot)
 
         guard NetworkProtocol.enableTransportDebugLogging else { return }
 
@@ -2388,6 +2440,22 @@ final class SenderSessionCoordinator {
         )
 
         lastTransportTelemetryLogNanoseconds = now
+    }
+
+    private func evaluateCursorPipelineHealth(using motionSnapshot: SenderCursorMotionSampler.DebugSnapshot) {
+        guard state == .running, useReceiverSideCursorOverlay else { return }
+        guard motionSnapshot.lastExecutedPollTimestampNanoseconds > 0 else { return }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now >= (
+            motionSnapshot.lastExecutedPollTimestampNanoseconds +
+            CursorPipelineRefreshPolicy.pollStallThresholdNanoseconds
+        ) else {
+            return
+        }
+
+        let stallNanoseconds = now - motionSnapshot.lastExecutedPollTimestampNanoseconds
+        scheduleCursorPipelineRefreshForPollStall(stallNanoseconds)
     }
 
     private func updateCursorSendRate(packetCount: UInt64) {
@@ -2418,6 +2486,9 @@ private final class SenderCursorMotionSampler {
         let executedPolls: UInt64
         let sentPackets: UInt64
         let suppressedPackets: UInt64
+        let lastRequestedPollTimestampNanoseconds: UInt64
+        let lastExecutedPollTimestampNanoseconds: UInt64
+        let pollPending: Bool
     }
 
     private enum CursorHandoffEdge {
@@ -2430,8 +2501,6 @@ private final class SenderCursorMotionSampler {
     private let queue = DispatchQueue(label: "wireddisplay.sender.cursorMotionSampler", qos: .userInteractive)
     private let transportService: TransportService
     private let cursorDatagramTransportService: CursorDatagramTransportService
-    var onCursorLeftVirtualDisplay: (() -> Void)?
-
     private var isRunning = false
     private var displayID: CGDirectDisplayID = 0
     private var minimumIntervalNanoseconds: UInt64 = 0
@@ -2439,6 +2508,8 @@ private final class SenderCursorMotionSampler {
     private var pendingPoll = false
     private var pendingWorkItem: DispatchWorkItem?
     private var lastPollTimestampNanoseconds: UInt64 = 0
+    private var lastRequestedPollTimestampNanoseconds: UInt64 = 0
+    private var lastExecutedPollTimestampNanoseconds: UInt64 = 0
     private var lastSentCursorState: CursorStatePayload?
     private var latestStateSnapshotStorage: CursorStatePayload?
     private var lastVisibleCursorNormalizedPosition: CGPoint?
@@ -2472,6 +2543,8 @@ private final class SenderCursorMotionSampler {
             self.pendingWorkItem?.cancel()
             self.pendingWorkItem = nil
             self.lastPollTimestampNanoseconds = 0
+            self.lastRequestedPollTimestampNanoseconds = 0
+            self.lastExecutedPollTimestampNanoseconds = 0
             self.lastSentCursorState = nil
             self.latestStateSnapshotStorage = nil
             self.lastVisibleCursorNormalizedPosition = nil
@@ -2494,6 +2567,8 @@ private final class SenderCursorMotionSampler {
             self.displayID = 0
             self.minimumIntervalNanoseconds = 0
             self.lastPollTimestampNanoseconds = 0
+            self.lastRequestedPollTimestampNanoseconds = 0
+            self.lastExecutedPollTimestampNanoseconds = 0
             self.lastSentCursorState = nil
             self.latestStateSnapshotStorage = nil
             self.lastVisibleCursorNormalizedPosition = nil
@@ -2510,6 +2585,8 @@ private final class SenderCursorMotionSampler {
     func requestPoll() {
         queue.async {
             guard self.isRunning, self.displayID != 0 else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            self.lastRequestedPollTimestampNanoseconds = now
             self.requestedPollCount += 1
 
             if self.pendingPoll {
@@ -2517,7 +2594,6 @@ private final class SenderCursorMotionSampler {
                 return
             }
 
-            let now = DispatchTime.now().uptimeNanoseconds
             let delayNanoseconds: UInt64
             if self.lastPollTimestampNanoseconds == 0 ||
                 now >= (self.lastPollTimestampNanoseconds + self.minimumIntervalNanoseconds) {
@@ -2543,7 +2619,10 @@ private final class SenderCursorMotionSampler {
                 coalescedPolls: coalescedPollCount,
                 executedPolls: executedPollCount,
                 sentPackets: sentPacketCount,
-                suppressedPackets: suppressedPacketCount
+                suppressedPackets: suppressedPacketCount,
+                lastRequestedPollTimestampNanoseconds: lastRequestedPollTimestampNanoseconds,
+                lastExecutedPollTimestampNanoseconds: lastExecutedPollTimestampNanoseconds,
+                pollPending: pendingPoll
             )
         }
     }
@@ -2557,19 +2636,13 @@ private final class SenderCursorMotionSampler {
 
         pendingPoll = false
         pendingWorkItem = nil
-        lastPollTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+        let now = DispatchTime.now().uptimeNanoseconds
+        lastPollTimestampNanoseconds = now
+        lastExecutedPollTimestampNanoseconds = now
         executedPollCount += 1
 
         let nextState = currentCursorState()
         latestStateSnapshotStorage = nextState
-        let didLeaveVirtualDisplay =
-            lastSentCursorState?.ownershipIntent == .remote &&
-            nextState.ownershipIntent == .localHandoff
-
-        if didLeaveVirtualDisplay {
-            onCursorLeftVirtualDisplay?()
-        }
-
         guard shouldSendCursorState(nextState) else {
             suppressedPacketCount += 1
             return

@@ -10,6 +10,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     private enum ProcessingBacklog {
         static let maxPendingScreenSamples = 2
         static let lagWarningNanoseconds: UInt64 = 20_000_000
+        static let frameGapWarningNanoseconds: UInt64 = 500_000_000
         static let logIntervalNanoseconds: UInt64 = 30_000_000_000
     }
 
@@ -246,7 +247,7 @@ final class CaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
             if let lastScreenFrameTimestampNanoseconds,
                frameTimestampNanoseconds > lastScreenFrameTimestampNanoseconds {
                 let gapNanoseconds = frameTimestampNanoseconds - lastScreenFrameTimestampNanoseconds
-                if gapNanoseconds >= 500_000_000 {
+                if gapNanoseconds >= ProcessingBacklog.frameGapWarningNanoseconds {
                     let shouldLogGapWarning: Bool
                     if let lastScreenFrameGapWarningTimestampNanoseconds {
                         shouldLogGapWarning =
