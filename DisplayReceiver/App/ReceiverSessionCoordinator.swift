@@ -203,6 +203,10 @@ final class ReceiverSessionCoordinator {
             )
         }
 
+        videoDatagramListenerService.onCursorState = { cursorState in
+            cursorPacketRelay.handle(cursorState)
+        }
+
         listenerService.onError = { [weak self] error in
             guard let self else { return }
             Task { @MainActor in
@@ -316,7 +320,8 @@ final class ReceiverSessionCoordinator {
                     renderedFrameReceiverTimestampNanoseconds: lastRenderedFrameTelemetry?.receiverRenderTimestampNanoseconds
                 )
             case .cursorState:
-                break
+                let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
+                cursorPacketRelay.handle(cursorState)
             case .videoFrame:
                 break
             case .requestKeyFrame:

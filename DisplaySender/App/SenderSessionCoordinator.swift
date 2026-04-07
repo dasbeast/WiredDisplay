@@ -54,6 +54,7 @@ final class SenderSessionCoordinator {
     private let encoderService: EncoderService
     private let transportService: TransportService
     private let videoDatagramTransportService: VideoDatagramTransportService
+    private let cursorDatagramTransportService: CursorDatagramTransportService
     private let virtualDisplayService = VirtualDisplayService()
     private let wiredPathMonitor = WiredPathStatusMonitor()
 
@@ -163,12 +164,14 @@ final class SenderSessionCoordinator {
         captureService: CaptureService = CaptureService(),
         encoderService: EncoderService = EncoderService(),
         transportService: TransportService = TransportService(),
-        videoDatagramTransportService: VideoDatagramTransportService = VideoDatagramTransportService()
+        videoDatagramTransportService: VideoDatagramTransportService = VideoDatagramTransportService(),
+        cursorDatagramTransportService: CursorDatagramTransportService = CursorDatagramTransportService()
     ) {
         self.captureService = captureService
         self.encoderService = encoderService
         self.transportService = transportService
         self.videoDatagramTransportService = videoDatagramTransportService
+        self.cursorDatagramTransportService = cursorDatagramTransportService
 
         localInterfaceDescriptions = NetworkDiagnostics.localIPv4Descriptions()
 
@@ -340,6 +343,13 @@ final class SenderSessionCoordinator {
                 self.droppedOutboundFrameCount = count
             }
         }
+
+        cursorDatagramTransportService.onError = { [weak self] error in
+            guard let self else { return }
+            Task { @MainActor in
+                self.logCursorDebug("cursor UDP transport error: \(error.localizedDescription)")
+            }
+        }
     }
 
     deinit {
@@ -400,6 +410,7 @@ final class SenderSessionCoordinator {
         // Pre-connecting here can fail before the handshake finishes and strand the sender
         // in a connected-but-never-starting state.
         videoDatagramTransportService.disconnect()
+        cursorDatagramTransportService.disconnect()
         beginConnectionAttempt()
     }
 
@@ -548,6 +559,7 @@ final class SenderSessionCoordinator {
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
         videoDatagramTransportService.disconnect()
+        cursorDatagramTransportService.disconnect()
         transportService.disconnect()
         state = .idle
         sentFramesPerSecond = nil
@@ -749,6 +761,7 @@ final class SenderSessionCoordinator {
         captureService.stopCapture()
         virtualDisplayService.destroyDisplay()
         videoDatagramTransportService.disconnect()
+        cursorDatagramTransportService.disconnect()
         transportService.disconnect()
 
         let shouldRotateHost = !currentHostCompletedHandshake
@@ -1080,6 +1093,10 @@ final class SenderSessionCoordinator {
         stopCursorTracking(sendHiddenState: false)
         guard displayID != 0 else { return }
 
+        if let host = currentDesiredHost ?? (receiverHost.isEmpty ? nil : receiverHost) {
+            cursorDatagramTransportService.connect(host: host, port: desiredPort)
+        }
+
         lastSentCursorState = nil
         lastSentCursorAppearanceSignature = nil
         prevSentCursorAppearanceSignature = nil
@@ -1120,18 +1137,22 @@ final class SenderSessionCoordinator {
 
         if sendHiddenState,
            state == .running || state == .connected {
-            logCursorDebug("sending hidden cursor state while stopping tracking")
-            transportService.sendCursorState(
-                CursorStatePayload(
-                    timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
-                    normalizedX: 0,
-                    normalizedY: 0,
-                    isVisible: false,
-                    ownershipIntent: .hidden,
-                    appearance: nil
-                )
+            let hiddenState = CursorStatePayload(
+                timestampNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                normalizedX: 0,
+                normalizedY: 0,
+                isVisible: false,
+                ownershipIntent: .hidden,
+                appearance: nil
             )
+            logCursorDebug("sending hidden cursor state while stopping tracking")
+            if NetworkProtocol.useReceiverCursorDatagramTransport {
+                cursorDatagramTransportService.sendCursorState(hiddenState)
+            }
+            transportService.sendCursorState(hiddenState)
         }
+
+        cursorDatagramTransportService.disconnect()
 
         lastSentCursorState = nil
         lastSentCursorAppearanceSignature = nil
@@ -1399,11 +1420,24 @@ final class SenderSessionCoordinator {
         guard virtualDisplayService.displayID == displayID else { return }
 
         let nextState = currentCursorState(for: displayID)
-        guard shouldSendCursorState(nextState) else {
+        let motionState = CursorStatePayload(
+            timestampNanoseconds: nextState.timestampNanoseconds,
+            normalizedX: nextState.normalizedX,
+            normalizedY: nextState.normalizedY,
+            isVisible: nextState.isVisible,
+            ownershipIntent: nextState.ownershipIntent,
+            appearance: nil
+        )
+
+        let shouldSendMotion = shouldSendCursorState(motionState)
+        let shouldSendAppearance = nextState.appearance != nil && shouldSendCursorState(nextState)
+
+        guard shouldSendMotion || shouldSendAppearance else {
             cursorPacketSuppressedCount += 1
             emitCursorTelemetryIfNeeded(for: displayID)
             return
         }
+
         if let lastSentCursorState {
             if lastSentCursorState.ownershipIntent != nextState.ownershipIntent ||
                 lastSentCursorState.isVisible != nextState.isVisible {
@@ -1428,20 +1462,29 @@ final class SenderSessionCoordinator {
                 )
             )
         }
-        if let appearance = nextState.appearance {
+
+        if shouldSendMotion {
+            if NetworkProtocol.useReceiverCursorDatagramTransport, cursorDatagramTransportService.isConnected {
+                cursorDatagramTransportService.sendCursorState(motionState)
+            } else {
+                transportService.sendCursorState(nextState)
+            }
+            lastSentCursorState = motionState
+            cursorPacketSentCount += 1
+        }
+
+        if let appearance = nextState.appearance, shouldSendAppearance {
             logCursorDebug(
                 "sending cursor appearance signature \(appearance.signature) " +
                 "size=\(Int(appearance.widthPoints))x\(Int(appearance.heightPoints))"
             )
-        }
-        lastSentCursorState = nextState
-        if let appearance = nextState.appearance {
+            transportService.sendCursorState(nextState)
+            lastSentCursorState = nextState
             prevSentCursorAppearanceSignature = lastSentCursorAppearanceSignature
             lastSentCursorAppearanceSignature = appearance.signature
             lastSentCursorAppearanceNanoseconds = DispatchTime.now().uptimeNanoseconds
+            cursorPacketSentCount += 1
         }
-        cursorPacketSentCount += 1
-        transportService.sendCursorState(nextState)
         emitCursorTelemetryIfNeeded(for: displayID)
     }
 

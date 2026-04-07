@@ -509,7 +509,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 applySystemCursorPosition(
                     hiddenCursorPoint,
                     normalizedPosition: hiddenCursorNormalizedPosition,
-                    forceReassertion: true
+                    forceReassertion: needsCursorReassertion
                 )
             }
 

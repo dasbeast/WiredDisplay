@@ -311,6 +311,7 @@ final class VideoDatagramListenerService {
 
     var onStateChange: ((Bool) -> Void)?
     var onBinaryVideoFrame: ((BinaryFrameHeader, Data?, Data?, Data?, Data) -> Void)?
+    var onCursorState: ((CursorStatePayload) -> Void)?
     var onError: ((Error) -> Void)?
 
     func startListening(port: UInt16 = NetworkProtocol.defaultPort) {
@@ -398,26 +399,37 @@ final class VideoDatagramListenerService {
     }
 
     private func handle(datagram: Data) {
-        guard let chunk = VideoDatagramWire.deserialize(datagram: datagram) else {
+        if let chunk = VideoDatagramWire.deserialize(datagram: datagram) {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard let frameData = reassembler.insert(
+                frameIndex: chunk.frameIndex,
+                chunkIndex: chunk.chunkIndex,
+                chunkCount: chunk.chunkCount,
+                payload: chunk.payload,
+                arrivalNanoseconds: now
+            ) else {
+                return
+            }
+
+            guard let result = BinaryFrameWire.deserialize(data: frameData) else {
+                return
+            }
+
+            onBinaryVideoFrame?(result.header, result.vps, result.sps, result.pps, result.payload)
             return
         }
 
-        let now = DispatchTime.now().uptimeNanoseconds
-        guard let frameData = reassembler.insert(
-            frameIndex: chunk.frameIndex,
-            chunkIndex: chunk.chunkIndex,
-            chunkCount: chunk.chunkCount,
-            payload: chunk.payload,
-            arrivalNanoseconds: now
-        ) else {
+        guard let envelope = try? JSONDecoder().decode(NetworkEnvelope.self, from: datagram) else {
             return
         }
+        guard envelope.type == .cursorState else { return }
 
-        guard let result = BinaryFrameWire.deserialize(data: frameData) else {
-            return
+        do {
+            let cursorState = try envelope.decodePayload(as: CursorStatePayload.self)
+            onCursorState?(cursorState)
+        } catch {
+            onError?(error)
         }
-
-        onBinaryVideoFrame?(result.header, result.vps, result.sps, result.pps, result.payload)
     }
 }
 

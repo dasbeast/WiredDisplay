@@ -719,3 +719,132 @@ final class VideoDatagramTransportService {
         }
     }
 }
+
+/// UDP transport for low-latency cursor motion delivery.
+final class CursorDatagramTransportService {
+    private let queue = DispatchQueue(label: "wireddisplay.sender.cursorDatagram")
+
+    private(set) var isConnected = false
+
+    private var connection: NWConnection?
+    private var connectedHost: String?
+    private var connectedPort: UInt16?
+    private var pendingPackets: [Data] = []
+    private var networkInFlightCount = 0
+    private let maxNetworkInFlight = 4
+    private let maxPendingPackets = 4
+
+    var onStateChange: ((Bool) -> Void)?
+    var onError: ((Error) -> Void)?
+
+    func connect(host: String, port: UInt16 = NetworkProtocol.defaultPort) {
+        if connection != nil, connectedHost == host, connectedPort == port {
+            return
+        }
+
+        disconnect()
+
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            onError?(TransportServiceError.invalidEndpoint)
+            return
+        }
+
+        let parameters = NetworkDiagnostics.lowLatencyUDPParameters()
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
+        self.connection = connection
+        connectedHost = host
+        connectedPort = port
+
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.isConnected = true
+                self.onStateChange?(true)
+                self.flushPendingPacketIfPossible()
+            case .failed(let error):
+                self.isConnected = false
+                self.onStateChange?(false)
+                self.onError?(error)
+            case .cancelled:
+                self.isConnected = false
+                self.onStateChange?(false)
+            default:
+                break
+            }
+        }
+
+        connection.start(queue: queue)
+    }
+
+    func disconnect() {
+        connection?.cancel()
+        connection = nil
+        connectedHost = nil
+        connectedPort = nil
+        isConnected = false
+        pendingPackets.removeAll(keepingCapacity: false)
+        networkInFlightCount = 0
+        onStateChange?(false)
+    }
+
+    func sendCursorState(_ cursorState: CursorStatePayload) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.enqueueCursorPacket(cursorState)
+            self.flushPendingPacketIfPossible()
+        }
+    }
+
+    private func enqueueCursorPacket(_ cursorState: CursorStatePayload) {
+        let motionState = CursorStatePayload(
+            timestampNanoseconds: cursorState.timestampNanoseconds,
+            normalizedX: cursorState.normalizedX,
+            normalizedY: cursorState.normalizedY,
+            isVisible: cursorState.isVisible,
+            ownershipIntent: cursorState.ownershipIntent,
+            appearance: nil
+        )
+
+        do {
+            let envelope = try NetworkEnvelope.make(
+                type: .cursorState,
+                sequenceNumber: 0,
+                payload: motionState
+            )
+            let encoded = try JSONEncoder().encode(envelope)
+            guard encoded.count <= NetworkProtocol.maximumEnvelopeBytes else {
+                onError?(TransportServiceError.messageTooLarge)
+                return
+            }
+
+            while pendingPackets.count >= maxPendingPackets {
+                pendingPackets.removeFirst()
+            }
+
+            pendingPackets.append(encoded)
+        } catch {
+            onError?(error)
+        }
+    }
+
+    private func flushPendingPacketIfPossible() {
+        guard isConnected, let connection else { return }
+        guard !pendingPackets.isEmpty else { return }
+
+        while !pendingPackets.isEmpty && networkInFlightCount < maxNetworkInFlight {
+            let packet = pendingPackets.removeFirst()
+            networkInFlightCount += 1
+            connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+                guard let self else { return }
+                self.queue.async {
+                    self.networkInFlightCount -= 1
+                    if let error {
+                        self.onError?(error)
+                    }
+                    self.flushPendingPacketIfPossible()
+                }
+            })
+        }
+    }
+}
