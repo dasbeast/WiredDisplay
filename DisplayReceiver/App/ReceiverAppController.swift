@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Combine
 import Foundation
 
@@ -25,6 +26,13 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var cursorOverlayImage: NSImage?
     @Published private(set) var cursorOverlayHotSpot: CGPoint?
     @Published private(set) var isReceiverWindowFullScreen = false
+    @Published private(set) var availableCaptureDevices: [AVCaptureDevice] = []
+    @Published private(set) var captureDeviceName: String?
+    @Published private(set) var selectedCaptureResolution: CaptureCardResolution?
+    @Published private(set) var isCaptureCardMode = false
+    @Published private(set) var cameraPermissionDenied = false
+    @Published private(set) var captureCardHasAudio = false
+    @Published private(set) var captureCardAudioMuted = false
 
     let coordinator = ReceiverSessionCoordinator()
     let advertisementService = ReceiverAdvertisementService()
@@ -137,6 +145,42 @@ final class ReceiverAppController: ObservableObject {
         NSApplication.shared.terminate(nil)
     }
 
+    func captureResolutions(for device: AVCaptureDevice) -> [CaptureCardResolution] {
+        CaptureCardService.availableResolutions(for: device)
+    }
+
+    func preferredCaptureResolution(for device: AVCaptureDevice) -> CaptureCardResolution? {
+        if let selectedCaptureResolution,
+           captureDeviceName == device.localizedName,
+           captureResolutions(for: device).contains(selectedCaptureResolution) {
+            return selectedCaptureResolution
+        }
+        return captureResolutions(for: device).first
+    }
+
+    func startCaptureCard(device: AVCaptureDevice, resolution: CaptureCardResolution? = nil) {
+        coordinator.startCaptureCard(
+            device: device,
+            preferredResolution: resolution ?? preferredCaptureResolution(for: device)
+        )
+        refreshFromCoordinator()
+    }
+
+    func setCaptureResolution(_ resolution: CaptureCardResolution, for device: AVCaptureDevice) {
+        coordinator.startCaptureCard(device: device, preferredResolution: resolution)
+        refreshFromCoordinator()
+    }
+
+    func switchToNetworkStream() {
+        coordinator.switchToNetworkStream()
+        refreshFromCoordinator()
+    }
+
+    func toggleCaptureCardAudioMute() {
+        coordinator.toggleCaptureCardAudioMute()
+        refreshFromCoordinator()
+    }
+
     private func refreshAdvertisementState() {
         discoverableName = advertisementService.advertisedName ?? Host.current().localizedName ?? "DisplayReceiver"
         advertisementErrorText = advertisementService.lastErrorMessage
@@ -163,6 +207,17 @@ final class ReceiverAppController: ObservableObject {
         isCursorOverlayVisible = coordinator.isCursorOverlayVisible
         cursorOverlayImage = coordinator.cursorOverlayImage
         cursorOverlayHotSpot = coordinator.cursorOverlayHotSpot
+        availableCaptureDevices = coordinator.availableCaptureDevices
+        captureDeviceName = coordinator.captureDeviceName
+        selectedCaptureResolution = coordinator.selectedCaptureResolution
+        cameraPermissionDenied = coordinator.cameraPermissionDenied
+        captureCardHasAudio = coordinator.captureCardHasAudio
+        captureCardAudioMuted = coordinator.captureCardAudioMuted
+        if case .captureCard = coordinator.inputMode {
+            isCaptureCardMode = true
+        } else {
+            isCaptureCardMode = false
+        }
 
         if newStreaming {
             if !powerManagementService.isPreventingSleep {

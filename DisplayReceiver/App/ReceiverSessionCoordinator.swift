@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 
 /// Coordinates receiver-side listener, decode, and render lifecycle.
@@ -11,6 +12,11 @@ final class ReceiverSessionCoordinator {
         case failed(String)
     }
 
+    enum InputMode {
+        case networkStream
+        case captureCard(AVCaptureDevice)
+    }
+
     private let listenerService: ListenerService
     private let videoDatagramListenerService: VideoDatagramListenerService
     private let decoderService: DecoderService
@@ -19,6 +25,15 @@ final class ReceiverSessionCoordinator {
     private let frameDecodePipeline: ReceiverFrameDecodePipeline
     private let wiredPathMonitor = WiredPathStatusMonitor()
     private let cursorPacketRelay = ReceiverCursorPacketRelay()
+    private let captureCardService = CaptureCardService()
+
+    private(set) var inputMode: InputMode = .networkStream { didSet { onChange?() } }
+    private(set) var availableCaptureDevices: [AVCaptureDevice] = [] { didSet { onChange?() } }
+    private(set) var captureDeviceName: String? { didSet { onChange?() } }
+    private(set) var selectedCaptureResolution: CaptureCardResolution? { didSet { onChange?() } }
+    private(set) var cameraPermissionDenied = false { didSet { onChange?() } }
+    private(set) var captureCardHasAudio = false { didSet { onChange?() } }
+    private(set) var captureCardAudioMuted = false { didSet { onChange?() } }
 
     private(set) var state: SessionState = .idle { didSet { onChange?() } }
     private(set) var listeningPort: UInt16 = NetworkProtocol.defaultPort { didSet { onChange?() } }
@@ -52,6 +67,7 @@ final class ReceiverSessionCoordinator {
     private var inboundWindowStartNanoseconds: UInt64?
     private var inboundWindowFrameCount: UInt64 = 0
     private var inboundWindowPayloadBytes: UInt64 = 0
+    private var lastDirectFrameTelemetryIndex: UInt64?
     private var cursorInboundWindowStartNanoseconds: UInt64?
     private var cursorInboundPacketCount: UInt64 = 0
     private var lastRenderedFrameTelemetry: ReceiverRenderedFrameTelemetry?
@@ -112,6 +128,8 @@ final class ReceiverSessionCoordinator {
         listenerService.onStateChange = { [weak self] isListening in
             guard let self else { return }
             Task { @MainActor in
+                // Capture card mode owns the state machine — ignore listener callbacks.
+                if case .captureCard = self.inputMode { return }
                 if isListening {
                     if case .idle = self.state {
                         self.state = .listening
@@ -126,6 +144,7 @@ final class ReceiverSessionCoordinator {
         listenerService.onConnectionClosed = { [weak self] in
             guard let self else { return }
             Task { @MainActor in
+                if case .captureCard = self.inputMode { return }
                 self.audioPlaybackService.stop()
                 self.frameDecodePipeline.reset()
                 RenderFrameStore.shared.reset()
@@ -218,6 +237,7 @@ final class ReceiverSessionCoordinator {
         listenerService.onError = { [weak self] error in
             guard let self else { return }
             Task { @MainActor in
+                if case .captureCard = self.inputMode { return }
                 self.lastErrorMessage = error.localizedDescription
                 self.state = .failed(error.localizedDescription)
             }
@@ -227,6 +247,44 @@ final class ReceiverSessionCoordinator {
             guard let self else { return }
             Task { @MainActor in
                 self.lastErrorMessage = "UDP video listener: \(error.localizedDescription)"
+            }
+        }
+
+        captureCardService.onDevicesChanged = { [weak self] devices in
+            Task { @MainActor [weak self] in
+                self?.availableCaptureDevices = devices
+            }
+        }
+
+        // Populate device list immediately — AVFoundation enumerates devices even
+        // before the user has granted camera permission (notDetermined status).
+        // We do NOT pre-request permission here; the dialog is shown only when the
+        // user explicitly selects a capture device, so it has context and focus.
+        availableCaptureDevices = CaptureCardService.availableDevices()
+
+        captureCardService.onFrame = { [weak self] pixelBuffer, metadata, pixelFormat in
+            guard let self else { return }
+            let frame = DecodedFrame(
+                metadata: metadata,
+                pixelBuffer: pixelBuffer,
+                pixelData: nil,
+                bytesPerRow: 0,
+                pixelFormat: pixelFormat
+            )
+            self.renderService.render(frame: frame)
+            let arrivalNanoseconds = metadata.timestampNanoseconds
+            if metadata.frameIndex < 5 || metadata.frameIndex % 6 == 0 {
+                Task { @MainActor [weak self] in
+                    self?.applyDirectFrame(metadata: metadata, arrivalNanoseconds: arrivalNanoseconds)
+                }
+            }
+        }
+
+        captureCardService.onError = { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.lastErrorMessage = error.localizedDescription
+                self.state = .failed(error.localizedDescription)
             }
         }
     }
@@ -288,6 +346,96 @@ final class ReceiverSessionCoordinator {
         listenerService.stopListening()
         videoDatagramListenerService.stopListening()
         state = .idle
+    }
+
+    // MARK: - Capture card input
+
+    /// Switches to capture-card input mode and starts capturing from the given device.
+    /// Permission is requested first; if denied, falls back to network stream mode.
+    func startCaptureCard(device: AVCaptureDevice, preferredResolution: CaptureCardResolution? = nil) {
+        // Stop any active network session first.
+        if case .networkStream = inputMode {
+            listenerService.stopListening()
+            videoDatagramListenerService.stopListening()
+        }
+        captureCardService.stop()
+        RenderFrameStore.shared.reset()
+        frameDecodePipeline.reset()
+        receivedFrameCount = 0
+        lastErrorMessage = nil
+        lastFrameArrivalNanoseconds = nil
+        smoothedIntervalMilliseconds = nil
+        smoothedJitterMilliseconds = nil
+        inboundWindowStartNanoseconds = nil
+        inboundWindowFrameCount = 0
+        inboundWindowPayloadBytes = 0
+        lastDirectFrameTelemetryIndex = nil
+        renderSourceDescription = "capture_card"
+        captureDeviceName = device.localizedName
+        selectedCaptureResolution = preferredResolution
+        inputMode = .captureCard(device)
+
+        // Attempt to open the device directly. On macOS 26+, UVC capture cards
+        // bypass TCC camera gating entirely — just try and surface any real error.
+        do {
+            renderService.prepareRenderer()
+            try captureCardService.start(device: device, preferredResolution: preferredResolution)
+            cameraPermissionDenied = false
+            captureCardHasAudio = captureCardService.hasAudio
+            captureCardAudioMuted = false
+            state = .running
+        } catch {
+            let msg = error.localizedDescription
+            print("[Receiver] Capture card start failed: \(msg)")
+            lastErrorMessage = msg
+            state = .failed(msg)
+            inputMode = .networkStream
+            captureDeviceName = nil
+            selectedCaptureResolution = nil
+            captureCardHasAudio = false
+        }
+    }
+
+    /// Toggles mute on the capture card audio preview.
+    func toggleCaptureCardAudioMute() {
+        captureCardAudioMuted.toggle()
+        captureCardService.audioVolume = captureCardAudioMuted ? 0.0 : 1.0
+    }
+
+    /// Switches back to network stream input mode.
+    func switchToNetworkStream() {
+        captureCardService.stop()
+        captureDeviceName = nil
+        selectedCaptureResolution = nil
+        captureCardHasAudio = false
+        captureCardAudioMuted = false
+        inputMode = .networkStream
+        RenderFrameStore.shared.reset()
+        startListening(port: listeningPort)
+    }
+
+    private func applyDirectFrame(metadata: FrameMetadata, arrivalNanoseconds: UInt64) {
+        updateFrameTimingMetrics(from: metadata, arrivalNanoseconds: arrivalNanoseconds)
+        updateInboundMetrics(
+            payloadByteCount: estimatedCapturePayloadByteCount(metadata: metadata),
+            frameCount: directFrameDelta(for: metadata),
+            atNanoseconds: arrivalNanoseconds
+        )
+        receivedFrameCount = metadata.frameIndex &+ 1
+        replacedBeforeRenderCount = RenderFrameStore.shared.replacedFramesCount()
+    }
+
+    private func directFrameDelta(for metadata: FrameMetadata) -> UInt64 {
+        defer { lastDirectFrameTelemetryIndex = metadata.frameIndex }
+        guard let lastDirectFrameTelemetryIndex,
+              metadata.frameIndex > lastDirectFrameTelemetryIndex else {
+            return 1
+        }
+        return metadata.frameIndex - lastDirectFrameTelemetryIndex
+    }
+
+    private func estimatedCapturePayloadByteCount(metadata: FrameMetadata) -> Int {
+        max(0, metadata.width * metadata.height * 4)
     }
 
     private func handle(envelope: NetworkEnvelope) {
@@ -474,13 +622,17 @@ final class ReceiverSessionCoordinator {
         estimatedJitterMilliseconds = timingSnapshot.estimatedJitterMilliseconds
     }
 
-    private func updateInboundMetrics(payloadByteCount: Int, atNanoseconds now: UInt64) {
+    private func updateInboundMetrics(
+        payloadByteCount: Int,
+        frameCount: UInt64 = 1,
+        atNanoseconds now: UInt64
+    ) {
         if inboundWindowStartNanoseconds == nil {
             inboundWindowStartNanoseconds = now
         }
 
-        inboundWindowFrameCount += 1
-        inboundWindowPayloadBytes += UInt64(max(0, payloadByteCount))
+        inboundWindowFrameCount += frameCount
+        inboundWindowPayloadBytes += UInt64(max(0, payloadByteCount)) * frameCount
 
         guard let windowStart = inboundWindowStartNanoseconds, now >= windowStart else { return }
         let elapsedNanoseconds = now - windowStart
