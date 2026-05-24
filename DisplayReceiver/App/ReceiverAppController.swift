@@ -362,6 +362,7 @@ final class ReceiverDiagnosticsStore: ObservableObject {
 
     @Published private(set) var capturePacingText = "Waiting for capture frames"
     @Published private(set) var drawPacingText = "Waiting for display draws"
+    @Published private(set) var audioStatusText = "Waiting for audio setup"
     @Published private(set) var latestFrameText = "No frame yet"
     @Published private(set) var recentLogLines: [String] = []
     @Published private(set) var lastUpdated = Date()
@@ -397,11 +398,17 @@ final class ReceiverDiagnosticsStore: ObservableObject {
         recordLog(text)
     }
 
+    func recordAudioStatus(_ text: String) {
+        audioStatusText = text
+        recordLog(text)
+    }
+
     var exportText: String {
         var lines: [String] = [
             "DisplayReceiver Stats for Nerds",
             "Capture: \(capturePacingText)",
             "Display: \(drawPacingText)",
+            "Audio: \(audioStatusText)",
             "Latest Frame: \(latestFrameText)",
             "",
             "Recent Logs:"

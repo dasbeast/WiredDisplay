@@ -151,12 +151,13 @@ final class CaptureCardService: NSObject {
 
     private func requestAudioAccessIfNeeded(completion: @escaping () -> Void) {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        logAudioStatus("[CaptureCard][Audio] microphone authorization status: \(authorizationStatusDescription(status))")
         switch status {
         case .authorized, .denied, .restricted:
             completion()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { granted in
-                print("[CaptureCard] microphone access granted=\(granted)")
+                self.logAudioStatus("[CaptureCard][Audio] microphone access granted=\(granted)")
                 DispatchQueue.main.async {
                     completion()
                 }
@@ -248,19 +249,25 @@ final class CaptureCardService: NSObject {
         // The Elgato (and most capture cards) expose an audio device with the
         // same display name as the video device.  We look for an exact name
         // match so the HDMI audio follows the right card.
+        logAudioStatus(
+            "[CaptureCard][Audio] start authorization status: " +
+            authorizationStatusDescription(AVCaptureDevice.authorizationStatus(for: .audio))
+        )
         if let audioDevice = findAudioDevice(matchingVideoDevice: device) {
             do {
                 let audioInput = try AVCaptureDeviceInput(device: audioDevice)
                 if captureSession.canAddInput(audioInput) {
                     captureSession.addInput(audioInput)
-                    print("[CaptureCard] audio input: '\(audioDevice.localizedName)'")
+                    logAudioStatus("[CaptureCard][Audio] input: '\(audioDevice.localizedName)'")
                     hasAudio = true
+                } else {
+                    logAudioStatus("[CaptureCard][Audio] canAddInput returned false for '\(audioDevice.localizedName)'")
                 }
             } catch {
-                print("[CaptureCard] audio input unavailable: \(error.localizedDescription)")
+                logAudioStatus("[CaptureCard][Audio] input unavailable: \(error.localizedDescription)")
             }
         } else {
-            print("[CaptureCard] no matching audio device found for '\(device.localizedName)'")
+            logAudioStatus("[CaptureCard][Audio] no matching audio device found for '\(device.localizedName)'")
         }
 
         // ── Video output ───────────────────────────────────────────────────────
@@ -305,11 +312,13 @@ final class CaptureCardService: NSObject {
             if captureSession.canAddOutput(preview) {
                 captureSession.addOutput(preview)
                 audioPreviewOutput = preview
-                print("[CaptureCard] audio preview output added (volume=\(audioVolume))")
+                logAudioStatus("[CaptureCard][Audio] preview output added (volume=\(audioVolume))")
             } else {
-                print("[CaptureCard] canAddOutput(audioPreview) returned false")
+                logAudioStatus("[CaptureCard][Audio] canAddOutput(audioPreview) returned false")
                 hasAudio = false
             }
+        } else {
+            logAudioStatus("[CaptureCard][Audio] preview output skipped because no audio input is active")
         }
 
         captureSession.commitConfiguration()
@@ -583,9 +592,44 @@ final class CaptureCardService: NSObject {
     /// Finds the audio device whose display name matches the given video device.
     /// Capture cards typically expose a companion audio device with the same name.
     private func findAudioDevice(matchingVideoDevice video: AVCaptureDevice) -> AVCaptureDevice? {
+        let devices = availableAudioDevices()
+        let deviceNames = devices.map { "'\($0.localizedName)'" }.joined(separator: ", ")
+        if deviceNames.isEmpty {
+            logAudioStatus("[CaptureCard][Audio] available audio devices: none")
+        } else {
+            logAudioStatus("[CaptureCard][Audio] available audio devices: \(deviceNames)")
+        }
+        // Exact match first; partial match as fallback for devices whose audio
+        // name has a suffix (e.g. "Elgato HD60 X Audio").
+        if let match = devices.first(where: { $0.localizedName == video.localizedName })
+            ?? devices.first(where: {
+                $0.localizedName.localizedCaseInsensitiveContains(video.localizedName)
+                || video.localizedName.localizedCaseInsensitiveContains($0.localizedName)
+            }) {
+            return match
+        }
+
+        // Some capture cards expose their audio input under a generic or driver
+        // name. If there is only one external audio source, it is almost
+        // certainly the companion device for the selected capture card.
+        let externalDevices = devices.filter { device in
+            if #available(macOS 14.0, *) {
+                return device.deviceType == .external
+            }
+            return device.deviceType == .externalUnknown
+        }
+        if externalDevices.count == 1, let fallback = externalDevices.first {
+            logAudioStatus("[CaptureCard][Audio] using only external audio device: '\(fallback.localizedName)'")
+            return fallback
+        }
+
+        return nil
+    }
+
+    private func availableAudioDevices() -> [AVCaptureDevice] {
         let types: [AVCaptureDevice.DeviceType]
         if #available(macOS 14.0, *) {
-            types = [.external, .builtInMicrophone]
+            types = [.external, .microphone]
         } else {
             types = [.externalUnknown, .builtInMicrophone]
         }
@@ -594,16 +638,32 @@ final class CaptureCardService: NSObject {
             mediaType: .audio,
             position: .unspecified
         )
-        // Exact match first; partial match as fallback for devices whose audio
-        // name has a suffix (e.g. "Elgato HD60 X Audio").
-        return discovery.devices.first { $0.localizedName == video.localizedName }
-            ?? discovery.devices.first {
-                $0.localizedName.localizedCaseInsensitiveContains(video.localizedName)
-                || video.localizedName.localizedCaseInsensitiveContains($0.localizedName)
-            }
+        return discovery.devices
     }
 
     var isRunning: Bool { session?.isRunning == true }
+
+    private func authorizationStatusDescription(_ status: AVAuthorizationStatus) -> String {
+        switch status {
+        case .authorized:
+            return "authorized"
+        case .denied:
+            return "denied"
+        case .notDetermined:
+            return "notDetermined"
+        case .restricted:
+            return "restricted"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private func logAudioStatus(_ message: String) {
+        print(message)
+        Task { @MainActor in
+            ReceiverDiagnosticsStore.shared.recordAudioStatus(message)
+        }
+    }
 
     // MARK: - FourCC helper
 

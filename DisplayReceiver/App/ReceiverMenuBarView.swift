@@ -158,6 +158,7 @@ struct ReceiverStatsWindowView: View {
                     .font(.headline)
                 DiagnosticLine(title: "Capture", value: diagnostics.capturePacingText)
                 DiagnosticLine(title: "Display", value: diagnostics.drawPacingText)
+                DiagnosticLine(title: "Audio", value: diagnostics.audioStatusText)
                 if !appController.isCaptureCardMode {
                     DiagnosticLine(title: "Cursor", value: appController.cursorPacketsReceivedPerSecondText)
                 }
