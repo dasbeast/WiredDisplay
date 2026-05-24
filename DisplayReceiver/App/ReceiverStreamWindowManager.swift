@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor
 final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
     var onVisibilityChange: ((Bool) -> Void)?
+    var onCloseRequest: (() -> Void)?
 
     private weak var window: NSWindow?
     private var hostingController: NSHostingController<ReceiverRootView>?
@@ -53,6 +54,11 @@ final class ReceiverStreamWindowManager: NSObject, NSWindowDelegate {
         wantsFullScreenPresentation = false
         setCursorHidden(false)
         onVisibilityChange?(false)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        onCloseRequest?()
+        return false
     }
 
     func windowDidBecomeKey(_ notification: Notification) {

@@ -25,6 +25,16 @@ struct ReceiverRootView: View {
                     HStack {
                         Spacer()
                         HStack(spacing: 8) {
+                            Button {
+                                appController.switchToNetworkStream()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.75))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Back to input chooser")
+
                             Text(name)
                                 .font(.caption)
                                 .foregroundStyle(.white.opacity(0.6))

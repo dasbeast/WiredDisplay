@@ -163,7 +163,7 @@ private struct InputSourceSection: View {
                     .buttonStyle(.plain)
 
                     ForEach(appController.captureResolutions(for: device)) { resolution in
-                        let isSelected = isActive && appController.selectedCaptureResolution == resolution
+                        let isSelected = appController.preferredCaptureResolution(for: device) == resolution
                         Button {
                             appController.setCaptureResolution(resolution, for: device)
                         } label: {

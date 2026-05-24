@@ -287,10 +287,10 @@
         and streams a virtual display to it.
       </p>
       <div class="cta-row">
-        <a class="button" href="./DisplayReceiver-1.0.4.zip">Download DisplayReceiver</a>
-        <a class="button-secondary" href="./DisplaySender-1.0.4.zip">Download DisplaySender</a>
+        <a class="button" href="./DisplayReceiver-1.0.5.1.zip">Download DisplayReceiver</a>
+        <a class="button-secondary" href="./DisplaySender-1.0.5.1.zip">Download DisplaySender</a>
         <a class="button-secondary" href="#setup">Setup Guide</a>
-        <a class="button-secondary" href="#release-104">What's New in 1.0.4</a>
+        <a class="button-secondary" href="#release-latest">What's New in 1.0.5.1</a>
       </div>
     </section>
 
@@ -301,7 +301,7 @@
           Install <strong>DisplayReceiver</strong> on the Mac that should receive video and audio.
         </p>
         <div class="inline-links">
-          <a class="pill" href="./DisplayReceiver-1.0.4.zip">DisplayReceiver.zip</a>
+          <a class="pill" href="./DisplayReceiver-1.0.5.1.zip">DisplayReceiver.zip</a>
           <a class="pill" href="./DisplayReceiver-appcast.xml">Receiver update feed</a>
         </div>
         <ol class="download-list">
@@ -318,7 +318,7 @@
           Install <strong>DisplaySender</strong> on the Mac that should create and stream the virtual display.
         </p>
         <div class="inline-links">
-          <a class="pill" href="./DisplaySender-1.0.4.zip">DisplaySender.zip</a>
+          <a class="pill" href="./DisplaySender-1.0.5.1.zip">DisplaySender.zip</a>
           <a class="pill" href="./appcast.xml">Sender update feed</a>
         </div>
         <ol class="download-list">
@@ -338,33 +338,32 @@
           <li>In the sender app, pick the receiver from the discovered list.</li>
           <li>Start with <strong>Connect &amp; Stream</strong>. The production video path is TCP-based and is the intended setup.</li>
           <li>Once the session starts, the receiver should open full screen automatically.</li>
-          <li>If you want the lowest-feeling pointer latency, try <strong>Use Side Cursor Overlay</strong> on the sender. That cursor path is still marked beta in 1.0.4.</li>
+          <li>To use a console or HDMI source as the input, connect a supported USB capture card to the receiver Mac and choose it from <strong>Input Source</strong>.</li>
         </ol>
       </article>
 
-      <article class="card wide" id="release-104">
-        <h2>WiredDisplay 1.0.4</h2>
+      <article class="card wide" id="release-latest">
+        <h2>WiredDisplay 1.0.5.1</h2>
         <p class="lede">
-          WiredDisplay 1.0.4 is a major polish release focused on cursor responsiveness, receiver behavior,
-          windowing, and day-to-day usability.
+          WiredDisplay 1.0.5.1 adds capture-card input for using HDMI devices with the receiver Mac, plus
+          fixes for camera permission prompts, capture resolution defaults, and safer capture-window closing.
         </p>
         <div class="inline-links">
-          <span class="pill">Version 1.0.4</span>
+          <span class="pill">Version 1.0.5.1</span>
           <span class="pill">Sender + Receiver</span>
-          <span class="pill">Stability and polish release</span>
+          <span class="pill">Capture card release</span>
         </div>
         <ul class="plain-list">
-          <li><strong>Receiver improvements:</strong> The receiver now behaves more like a normal macOS app window, with cleaner startup, stream presentation, and general fullscreen/windowing behavior.</li>
-          <li><strong>Cursor overlay path:</strong> The sender now includes a receiver-side cursor overlay mode for lower-latency pointer motion, plus cursor shape mirroring support for more natural pointer behavior.</li>
-          <li><strong>Long-session work:</strong> Sender-side cursor pipeline refresh behavior and cleaner logging were added to help diagnose and recover cursor lag during extended use.</li>
-          <li><strong>Diagnostics cleanup:</strong> "Stats for Nerds" now lives in its own separate window so the main sender UI stays focused on setup and streaming.</li>
-          <li><strong>Receiver icon:</strong> DisplayReceiver now includes a proper app icon so it shows correctly in the Dock and app switcher.</li>
-          <li><strong>Transport clarity:</strong> Video stays on the stable TCP production path, while the remaining UDP side channel is reserved for cursor motion when the overlay path is enabled.</li>
+          <li><strong>Capture-card input:</strong> DisplayReceiver can now show video from supported USB HDMI capture cards, including low-latency 1080p60 capture paths.</li>
+          <li><strong>Resolution memory:</strong> Capture-card resolution choices are remembered per device, so your preferred mode is selected automatically next time.</li>
+          <li><strong>Permission fixes:</strong> The release app now explicitly requests camera access before starting capture-card video.</li>
+          <li><strong>Safer capture controls:</strong> Capture mode includes a quick exit button, and closing the receiver window now exits capture cleanly instead of tearing down the active renderer.</li>
+          <li><strong>Receiver polish:</strong> Capture-card audio preview and mute controls are available when the device exposes audio.</li>
         </ul>
         <div class="note">
-          <strong>Known issues:</strong> <strong>Use Side Cursor Overlay</strong> is still a beta feature in 1.0.4.
-          Cursor polling and refresh behavior are much better, but some setups may still see cursor lag during very
-          long sessions even when the main video stream stays healthy.
+          <strong>Note:</strong> Capture cards cannot upscale the source signal. If a console or HDMI device is outputting
+          a resolution your capture card does not support, change the source output resolution or choose a matching
+          capture mode in DisplayReceiver.
         </div>
       </article>
 

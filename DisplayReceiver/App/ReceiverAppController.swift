@@ -39,6 +39,7 @@ final class ReceiverAppController: ObservableObject {
     let powerManagementService = ReceiverPowerManagementService()
 
     private let windowManager = ReceiverStreamWindowManager()
+    private let captureResolutionDefaultsKeyPrefix = "DisplayReceiver.captureResolution."
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
@@ -89,6 +90,12 @@ final class ReceiverAppController: ObservableObject {
             Task { @MainActor in
                 self.isReceiverWindowVisible = isVisible
                 self.isReceiverWindowFullScreen = self.windowManager.isWindowFullScreen()
+            }
+        }
+        windowManager.onCloseRequest = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.handleReceiverWindowCloseRequest()
             }
         }
 
@@ -150,23 +157,33 @@ final class ReceiverAppController: ObservableObject {
     }
 
     func preferredCaptureResolution(for device: AVCaptureDevice) -> CaptureCardResolution? {
+        let resolutions = captureResolutions(for: device)
         if let selectedCaptureResolution,
            captureDeviceName == device.localizedName,
-           captureResolutions(for: device).contains(selectedCaptureResolution) {
+           resolutions.contains(selectedCaptureResolution) {
             return selectedCaptureResolution
         }
-        return captureResolutions(for: device).first
+        if let savedResolution = savedCaptureResolution(for: device),
+           resolutions.contains(savedResolution) {
+            return savedResolution
+        }
+        return resolutions.first
     }
 
     func startCaptureCard(device: AVCaptureDevice, resolution: CaptureCardResolution? = nil) {
+        let preferredResolution = resolution ?? preferredCaptureResolution(for: device)
+        if let preferredResolution {
+            saveCaptureResolution(preferredResolution, for: device)
+        }
         coordinator.startCaptureCard(
             device: device,
-            preferredResolution: resolution ?? preferredCaptureResolution(for: device)
+            preferredResolution: preferredResolution
         )
         refreshFromCoordinator()
     }
 
     func setCaptureResolution(_ resolution: CaptureCardResolution, for device: AVCaptureDevice) {
+        saveCaptureResolution(resolution, for: device)
         coordinator.startCaptureCard(device: device, preferredResolution: resolution)
         refreshFromCoordinator()
     }
@@ -184,6 +201,34 @@ final class ReceiverAppController: ObservableObject {
     private func refreshAdvertisementState() {
         discoverableName = advertisementService.advertisedName ?? Host.current().localizedName ?? "DisplayReceiver"
         advertisementErrorText = advertisementService.lastErrorMessage
+    }
+
+    private func handleReceiverWindowCloseRequest() {
+        if isCaptureCardMode {
+            switchToNetworkStream()
+        }
+        hideReceiverWindow()
+    }
+
+    private func savedCaptureResolution(for device: AVCaptureDevice) -> CaptureCardResolution? {
+        guard let id = UserDefaults.standard.string(forKey: captureResolutionDefaultsKey(for: device)) else {
+            return nil
+        }
+        let parts = id.split(separator: "x")
+        guard parts.count == 2,
+              let width = Int(parts[0]),
+              let height = Int(parts[1]) else {
+            return nil
+        }
+        return CaptureCardResolution(width: width, height: height)
+    }
+
+    private func saveCaptureResolution(_ resolution: CaptureCardResolution, for device: AVCaptureDevice) {
+        UserDefaults.standard.set(resolution.id, forKey: captureResolutionDefaultsKey(for: device))
+    }
+
+    private func captureResolutionDefaultsKey(for device: AVCaptureDevice) -> String {
+        captureResolutionDefaultsKeyPrefix + device.uniqueID
     }
 
     private func refreshFromCoordinator() {

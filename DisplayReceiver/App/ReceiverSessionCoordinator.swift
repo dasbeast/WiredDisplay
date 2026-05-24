@@ -353,6 +353,41 @@ final class ReceiverSessionCoordinator {
     /// Switches to capture-card input mode and starts capturing from the given device.
     /// Permission is requested first; if denied, falls back to network stream mode.
     func startCaptureCard(device: AVCaptureDevice, preferredResolution: CaptureCardResolution? = nil) {
+        cameraPermissionDenied = false
+
+        captureCardService.requestAccess { [weak self] granted in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard granted else {
+                    self.cameraPermissionDenied = true
+                    self.lastErrorMessage = "Camera access is required to use capture cards."
+                    self.state = .failed("Camera access is required to use capture cards.")
+                    self.inputMode = .networkStream
+                    self.captureDeviceName = nil
+                    self.selectedCaptureResolution = nil
+                    self.captureCardHasAudio = false
+                    self.captureCardAudioMuted = false
+                    return
+                }
+
+                // Let the system permission sheet finish dismissing before
+                // mutating the receiver window and starting AVFoundation.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.startCaptureCardAfterPermission(
+                            device: device,
+                            preferredResolution: preferredResolution
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func startCaptureCardAfterPermission(
+        device: AVCaptureDevice,
+        preferredResolution: CaptureCardResolution?
+    ) {
         // Stop any active network session first.
         if case .networkStream = inputMode {
             listenerService.stopListening()
@@ -375,8 +410,6 @@ final class ReceiverSessionCoordinator {
         selectedCaptureResolution = preferredResolution
         inputMode = .captureCard(device)
 
-        // Attempt to open the device directly. On macOS 26+, UVC capture cards
-        // bypass TCC camera gating entirely — just try and surface any real error.
         do {
             renderService.prepareRenderer()
             try captureCardService.start(device: device, preferredResolution: preferredResolution)

@@ -215,17 +215,24 @@ jobs:
       - name: Release DisplayReceiver
         run: ./scripts/release_displayreceiver.sh
 
+      - name: Prepare website homepage
+        shell: bash
+        run: |
+          perl -0pi -e "s/DisplayReceiver-[0-9]+(?:\.[0-9]+)*\.zip/DisplayReceiver-${RELEASE_VERSION}.zip/g; s/DisplaySender-[0-9]+(?:\.[0-9]+)*\.zip/DisplaySender-${RELEASE_VERSION}.zip/g; s/What's New in [0-9]+(?:\.[0-9]+)*/What's New in ${RELEASE_VERSION}/g; s/WiredDisplay [0-9]+(?:\.[0-9]+)*/WiredDisplay ${RELEASE_VERSION}/g; s/Version [0-9]+(?:\.[0-9]+)*/Version ${RELEASE_VERSION}/g" website/index.html
+
       - name: Publish website homepage
         shell: bash
         run: |
           REMOTE_TARGET="$WDISPLAY_SSH_USER@$WDISPLAY_SSH_HOST"
+          WEBSITE_REMOTE_DIR="${WDISPLAY_REMOTE_DIR:-public_html/WDisplay}"
           SSH_OPTIONS=()
 
           if [[ -n "${WDISPLAY_SSH_KEY_FILE:-}" ]]; then
             SSH_OPTIONS+=(-i "$WDISPLAY_SSH_KEY_FILE")
           fi
 
-          scp "${SSH_OPTIONS[@]}" website/index.html "$REMOTE_TARGET:$WDISPLAY_REMOTE_DIR/index.html"
+          ssh "${SSH_OPTIONS[@]}" "$REMOTE_TARGET" "mkdir -p '$WEBSITE_REMOTE_DIR'"
+          scp "${SSH_OPTIONS[@]}" website/index.html "$REMOTE_TARGET:$WEBSITE_REMOTE_DIR/index.html"
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
