@@ -5,6 +5,8 @@ import CoreVideo
 enum PixelFormat: String, Codable, Sendable {
     case bgra8
     case yuv420
+    case yuv422UYVY
+    case yuv422YUYV
 }
 
 /// Declares codec intent for encoded frame payloads.

@@ -3,6 +3,7 @@ import SwiftUI
 import MetalKit
 import MetalFX
 import CoreVideo
+import QuartzCore
 
 /// Metal-backed surface that renders the most recent decoded YUV (bi-planar 420v) frame.
 /// Two-pass pipeline:
@@ -32,6 +33,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private let cursorOverlayView = ReceiverCursorOverlayHostView()
         private var renderFrameObserver: NSObjectProtocol?
         private var isFramePresentationQueued = false
+        private var configuredRefreshRate: Int = 0
 
         init(device: MTLDevice?) {
             metalView = MTKView(frame: .zero, device: device)
@@ -41,20 +43,28 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             layer?.backgroundColor = NSColor.black.cgColor
 
             metalView.enableSetNeedsDisplay = false
-            metalView.isPaused = true
-            metalView.preferredFramesPerSecond = 60
+            metalView.isPaused = false
+            metalView.preferredFramesPerSecond = 120
             metalView.clearColor = MTLClearColor(red: 0.08, green: 0.10, blue: 0.14, alpha: 1.0)
             metalView.colorPixelFormat = .bgra8Unorm
             metalView.framebufferOnly = false
             metalView.autoresizingMask = [.width, .height]
             metalView.frame = bounds
+            if let metalLayer = metalView.layer as? CAMetalLayer {
+                metalLayer.maximumDrawableCount = 2
+                metalLayer.presentsWithTransaction = false
+                metalLayer.displaySyncEnabled = true
+            }
             addSubview(metalView)
+            refreshPreferredFrameRate()
 
             cursorOverlayView.autoresizingMask = [.width, .height]
             cursorOverlayView.frame = bounds
             addSubview(cursorOverlayView)
 
-            // Video frame notifications trigger immediate Metal draws for low latency.
+            // Video frame notifications keep the latest-frame store fresh. The
+            // MTKView itself draws continuously on the display cadence so
+            // console/capture-card video feels paced instead of bursty.
             // Cursor presentation is driven solely by the CVDisplayLink inside
             // ReceiverCursorOverlayHostView — adding a second notification-driven path
             // here would double the CGWarpMouseCursorPosition call rate with no visual
@@ -91,6 +101,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             super.layout()
             metalView.frame = bounds
             cursorOverlayView.frame = bounds
+            refreshPreferredFrameRate()
             cursorOverlayView.refreshPresentationIfNeeded()
         }
 
@@ -99,16 +110,33 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         }
 
         private func requestFramePresentation() {
-            guard !isFramePresentationQueued else { return }
-            isFramePresentationQueued = true
+            guard window != nil, !isHidden else { return }
+            guard metalView.device != nil else { return }
+            // Continuous display-synced drawing samples RenderFrameStore.latestFrame
+            // every refresh; forcing extra draws here causes uneven pacing.
+        }
 
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.isFramePresentationQueued = false
-                guard self.window != nil, !self.isHidden else { return }
-                guard self.metalView.device != nil else { return }
-                self.metalView.draw()
+        private func refreshPreferredFrameRate() {
+            let refreshRate = preferredFrameRate(for: window?.screen ?? NSScreen.main)
+            guard refreshRate != configuredRefreshRate else { return }
+            configuredRefreshRate = refreshRate
+            metalView.preferredFramesPerSecond = refreshRate
+            print("[Metal] preferred display draw rate: \(refreshRate)Hz")
+        }
+
+        private func preferredFrameRate(for screen: NSScreen?) -> Int {
+            guard let screen,
+                  let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+                  let mode = CGDisplayCopyDisplayMode(CGDirectDisplayID(screenNumber.uint32Value)) else {
+                return 120
             }
+
+            let reported = mode.refreshRate
+            guard reported > 0 else { return 120 }
+            let rounded = Int(reported.rounded())
+            if rounded >= 119 { return min(rounded, 120) }
+            if rounded >= 59 { return 60 }
+            return max(30, rounded)
         }
     }
 
@@ -1133,10 +1161,50 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         ) {
             return colorTexture.sample(sourceSampler, in.textureCoordinate);
         }
+
+        fragment float4 yuv422PackedQuadFragment(
+            VertexOut in [[stage_in]],
+            texture2d<float, access::read> packedTexture [[texture(0)]],
+            constant uint &ordering [[buffer(2)]]
+        ) {
+            uint width = packedTexture.get_width();
+            uint height = packedTexture.get_height();
+            uint x = min(uint(in.textureCoordinate.x * float(width)), width - 1);
+            uint yCoord = min(uint(in.textureCoordinate.y * float(height)), height - 1);
+            uint pairX = (x / 2) * 2;
+
+            float2 t0 = packedTexture.read(uint2(pairX, yCoord)).rg;
+            float2 t1 = packedTexture.read(uint2(min(pairX + 1, width - 1), yCoord)).rg;
+
+            float yp;
+            float cb;
+            float cr;
+            if (ordering == 0) {
+                // UYVY / '2vuy': Cb Y0 Cr Y1
+                cb = t0.r;
+                yp = (x == pairX) ? t0.g : t1.g;
+                cr = t1.r;
+            } else {
+                // YUYV / 'yuvs': Y0 Cb Y1 Cr
+                yp = (x == pairX) ? t0.r : t1.r;
+                cb = t0.g;
+                cr = t1.g;
+            }
+
+            float3 yuv = float3(yp - (16.0 / 255.0), cb - 0.5, cr - 0.5);
+            const float3x3 rec709 = float3x3(
+                float3( 1.1644,  1.1644,  1.1644),
+                float3( 0.0000, -0.3917,  2.0172),
+                float3( 1.5960, -0.8129,  0.0000)
+            );
+
+            return float4(clamp(rec709 * yuv, 0.0, 1.0), 1.0);
+        }
         """
 
         private var commandQueue: MTLCommandQueue?
         private var ycbcrPipelineState: MTLRenderPipelineState?
+        private var yuv422PipelineState: MTLRenderPipelineState?
         private var bgraPipelineState: MTLRenderPipelineState?
         private var vertexBuffer: MTLBuffer?
         private var samplerState: MTLSamplerState?
@@ -1149,12 +1217,21 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var retainedYTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
         private var retainedCbCrTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
         private var retainedPixelBufferTextureSlot = 0
+        // Raw-bytes BGRA path (synthetic/diagnostic frames).
         private var retainedBGRATextures: [MTLTexture?] = Array(repeating: nil, count: 3)
         private var retainedBGRATextureSlot = 0
+        // CVPixelBuffer BGRA path (capture card frames).
+        private var retainedBGRACVTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
+        private var retainedBGRACVTextureSlot = 0
+        private var retainedYUV422CVTextures: [CVMetalTexture?] = Array(repeating: nil, count: 3)
+        private var retainedYUV422CVTextureSlot = 0
+        private var retainedYUV422CopyTextures: [MTLTexture?] = Array(repeating: nil, count: 3)
+        private var retainedYUV422CopyTextureSlot = 0
 
-        // Triple-buffering semaphore: limits CPU-ahead GPU submissions to 3 frames,
-        // preventing the render loop from starving WindowServer during high-motion content.
-        private let inFlightSemaphore = DispatchSemaphore(value: 3)
+        // Keep only one GPU submission in flight for the capture-card monitor path.
+        // If the display cannot keep up, newer frames replace older ones in
+        // RenderFrameStore instead of allowing a queue of stale presents.
+        private let inFlightSemaphore = DispatchSemaphore(value: 1)
 
         // MetalFX Spatial Scaler state
         private var spatialScaler: MTLFXSpatialScaler?
@@ -1164,6 +1241,16 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
         private var currentInputHeight: Int = 0
         private var currentOutputWidth: Int = 0
         private var currentOutputHeight: Int = 0
+        private var lastDrawTimestampNanoseconds: UInt64?
+        private var drawDiagnosticsWindowStartNanoseconds: UInt64?
+        private var drawDiagnosticsCount: UInt64 = 0
+        private var drawDiagnosticsNewFrames: UInt64 = 0
+        private var drawDiagnosticsRepeatedFrames: UInt64 = 0
+        private var drawDiagnosticsSkippedInFlight: UInt64 = 0
+        private var drawDiagnosticsIntervalSumMilliseconds: Double = 0
+        private var drawDiagnosticsIntervalMinMilliseconds = Double.greatestFiniteMagnitude
+        private var drawDiagnosticsIntervalMaxMilliseconds: Double = 0
+        private var lastDrawnFrameIndex: UInt64?
 
         func attach(to view: MTKView) {
             guard let device = view.device else { return }
@@ -1175,6 +1262,11 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 device: device,
                 colorPixelFormat: .bgra8Unorm,
                 fragmentFunctionName: "texturedQuadFragment"
+            )
+            yuv422PipelineState = makePipelineState(
+                device: device,
+                colorPixelFormat: .bgra8Unorm,
+                fragmentFunctionName: "yuv422PackedQuadFragment"
             )
             bgraPipelineState = makePipelineState(
                 device: device,
@@ -1207,14 +1299,83 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             _ = size
         }
 
+        private func recordSkippedInFlightDraw() {
+            drawDiagnosticsSkippedInFlight += 1
+        }
+
+        private func recordDrawDiagnostics(frame: DecodedFrame?) {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if drawDiagnosticsWindowStartNanoseconds == nil {
+                drawDiagnosticsWindowStartNanoseconds = now
+            }
+
+            if let lastDrawTimestampNanoseconds, now >= lastDrawTimestampNanoseconds {
+                let interval = Double(now - lastDrawTimestampNanoseconds) / 1_000_000.0
+                drawDiagnosticsIntervalSumMilliseconds += interval
+                drawDiagnosticsIntervalMinMilliseconds = min(drawDiagnosticsIntervalMinMilliseconds, interval)
+                drawDiagnosticsIntervalMaxMilliseconds = max(drawDiagnosticsIntervalMaxMilliseconds, interval)
+            }
+            lastDrawTimestampNanoseconds = now
+            drawDiagnosticsCount += 1
+
+            if let frameIndex = frame?.metadata.frameIndex {
+                if lastDrawnFrameIndex == frameIndex {
+                    drawDiagnosticsRepeatedFrames += 1
+                } else {
+                    drawDiagnosticsNewFrames += 1
+                    lastDrawnFrameIndex = frameIndex
+                }
+            }
+
+            guard let windowStart = drawDiagnosticsWindowStartNanoseconds,
+                  now >= windowStart,
+                  now - windowStart >= 2_000_000_000 else {
+                return
+            }
+
+            let elapsedSeconds = Double(now - windowStart) / 1_000_000_000.0
+            let averageInterval = drawDiagnosticsCount > 1
+                ? drawDiagnosticsIntervalSumMilliseconds / Double(drawDiagnosticsCount - 1)
+                : 0
+            let minInterval = drawDiagnosticsIntervalMinMilliseconds == Double.greatestFiniteMagnitude
+                ? 0
+                : drawDiagnosticsIntervalMinMilliseconds
+            let drawRate = Double(drawDiagnosticsCount) / elapsedSeconds
+            let newFrameRate = Double(drawDiagnosticsNewFrames) / elapsedSeconds
+
+            print(
+                String(
+                    format: "[Metal][Pacing] draw=%.1fHz new=%.1fHz repeat=%llu skipped=%llu interval avg/min/max=%.2f/%.2f/%.2fms",
+                    drawRate,
+                    newFrameRate,
+                    drawDiagnosticsRepeatedFrames,
+                    drawDiagnosticsSkippedInFlight,
+                    averageInterval,
+                    minInterval,
+                    drawDiagnosticsIntervalMaxMilliseconds
+                )
+            )
+
+            drawDiagnosticsWindowStartNanoseconds = now
+            drawDiagnosticsCount = 0
+            drawDiagnosticsNewFrames = 0
+            drawDiagnosticsRepeatedFrames = 0
+            drawDiagnosticsSkippedInFlight = 0
+            drawDiagnosticsIntervalSumMilliseconds = 0
+            drawDiagnosticsIntervalMinMilliseconds = Double.greatestFiniteMagnitude
+            drawDiagnosticsIntervalMaxMilliseconds = 0
+        }
+
         func draw(in view: MTKView) {
             guard inFlightSemaphore.wait(timeout: .now()) == .success else {
+                recordSkippedInFlightDraw()
                 return
             }
 
             guard let device = view.device,
                   let commandQueue,
                   let ycbcrPipelineState,
+                  let yuv422PipelineState,
                   let bgraPipelineState,
                   let vertexBuffer,
                   let samplerState,
@@ -1229,6 +1390,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             }
 
             let frame = RenderFrameStore.shared.snapshot()
+            recordDrawDiagnostics(frame: frame)
             let renderInput = frame.flatMap { makeRenderInput(from: $0, device: device) }
 
             guard let renderInput else {
@@ -1268,6 +1430,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     commandBuffer: commandBuffer,
                     drawable: drawable,
                     ycbcrPipelineState: ycbcrPipelineState,
+                    yuv422PipelineState: yuv422PipelineState,
                     bgraPipelineState: bgraPipelineState,
                     vertexBuffer: vertexBuffer,
                     samplerState: samplerState,
@@ -1298,6 +1461,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     commandBuffer: commandBuffer,
                     drawable: drawable,
                     ycbcrPipelineState: ycbcrPipelineState,
+                    yuv422PipelineState: yuv422PipelineState,
                     bgraPipelineState: bgraPipelineState,
                     vertexBuffer: vertexBuffer,
                     samplerState: samplerState,
@@ -1326,6 +1490,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 renderInput,
                 encoder: offscreenEncoder,
                 ycbcrPipelineState: ycbcrPipelineState,
+                yuv422PipelineState: yuv422PipelineState,
                 bgraPipelineState: bgraPipelineState,
                 vertexBuffer: vertexBuffer,
                 samplerState: samplerState,
@@ -1341,6 +1506,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                     commandBuffer: commandBuffer,
                     drawable: drawable,
                     ycbcrPipelineState: ycbcrPipelineState,
+                    yuv422PipelineState: yuv422PipelineState,
                     bgraPipelineState: bgraPipelineState,
                     vertexBuffer: vertexBuffer,
                     samplerState: samplerState,
@@ -1496,6 +1662,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             commandBuffer: MTLCommandBuffer,
             drawable: CAMetalDrawable,
             ycbcrPipelineState: MTLRenderPipelineState,
+            yuv422PipelineState: MTLRenderPipelineState,
             bgraPipelineState: MTLRenderPipelineState,
             vertexBuffer: MTLBuffer,
             samplerState: MTLSamplerState,
@@ -1526,6 +1693,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 renderInput,
                 encoder: encoder,
                 ycbcrPipelineState: ycbcrPipelineState,
+                yuv422PipelineState: yuv422PipelineState,
                 bgraPipelineState: bgraPipelineState,
                 vertexBuffer: vertexBuffer,
                 samplerState: samplerState,
@@ -1922,12 +2090,191 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             return (y: textureY, cbcr: textureCbCr)
         }
 
+        private var renderInputLogCount = 0
+
         private func makeRenderInput(from frame: DecodedFrame, device: MTLDevice) -> RenderInput? {
-            if let textures = makeYCbCrTextures(from: frame) {
-                return .ycbcr(y: textures.y, cbcr: textures.cbcr)
+            let shouldLog = renderInputLogCount < 5
+            if shouldLog { renderInputLogCount += 1 }
+
+            // Path 1: YUV bi-planar CVPixelBuffer (network stream, decoded HEVC/H.264)
+            if frame.pixelFormat == .yuv420, frame.pixelBuffer != nil {
+                if shouldLog { print("[Metal] makeRenderInput: path=yuv420 \(frame.metadata.width)×\(frame.metadata.height)") }
+                if let textures = makeYCbCrTextures(from: frame) {
+                    return .ycbcr(y: textures.y, cbcr: textures.cbcr)
+                }
             }
 
+            // Path 2: packed YUV422 CVPixelBuffer (capture card raw input)
+            if frame.pixelFormat == .yuv422UYVY || frame.pixelFormat == .yuv422YUYV,
+               frame.pixelBuffer != nil {
+                let ordering: YUV422Ordering = frame.pixelFormat == .yuv422UYVY ? .uyvy : .yuyv
+                if shouldLog { print("[Metal] makeRenderInput: path=yuv422-\(ordering) \(frame.metadata.width)×\(frame.metadata.height)") }
+                if let texture = makeYUV422PackedTexture(from: frame, device: device) {
+                    return .yuv422Packed(texture, ordering: ordering)
+                }
+                if shouldLog { print("[Metal] makeRenderInput: yuv422 texture creation failed, falling through") }
+            }
+
+            // Path 3: BGRA CVPixelBuffer (capture card raw input)
+            if frame.pixelFormat == .bgra8, frame.pixelBuffer != nil {
+                if shouldLog { print("[Metal] makeRenderInput: path=bgra-cv \(frame.metadata.width)×\(frame.metadata.height)") }
+                if let texture = makeBGRACVTexture(from: frame, device: device) {
+                    return .bgra(texture)
+                }
+                if shouldLog { print("[Metal] makeRenderInput: bgra-cv texture creation failed, falling through") }
+            }
+
+            // Path 4: BGRA raw bytes (synthetic/diagnostic frames)
+            if shouldLog { print("[Metal] makeRenderInput: path=bgra-bytes pixelData=\(frame.pixelData != nil)") }
             return makeBGRATexture(from: frame, device: device).map(RenderInput.bgra)
+        }
+
+        private func makeYUV422PackedTexture(from frame: DecodedFrame, device: MTLDevice) -> MTLTexture? {
+            guard let pixelBuffer = frame.pixelBuffer else { return nil }
+
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            guard width > 0, height > 0 else { return nil }
+
+            if let textureCache {
+                var cvTexture: CVMetalTexture?
+                let status = CVMetalTextureCacheCreateTextureFromImage(
+                    kCFAllocatorDefault,
+                    textureCache,
+                    pixelBuffer,
+                    nil,
+                    .rg8Unorm,
+                    width,
+                    height,
+                    0,
+                    &cvTexture
+                )
+
+                if status == kCVReturnSuccess, let cvTexture,
+                   let texture = CVMetalTextureGetTexture(cvTexture) {
+                    let slot = retainedYUV422CVTextureSlot
+                    retainedYUV422CVTextureSlot = (slot + 1) % retainedYUV422CVTextures.count
+                    retainedYUV422CVTextures[slot] = cvTexture
+                    return texture
+                }
+
+                if renderInputLogCount <= 5 {
+                    print("[Metal] makeYUV422PackedTexture: cache path failed (status=\(status)); using byte-copy fallback")
+                }
+            }
+
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rg8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .managed
+
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                print("[Metal] makeYUV422PackedTexture: makeTexture failed")
+                return nil
+            }
+
+            CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+            guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                print("[Metal] makeYUV422PackedTexture: CVPixelBufferGetBaseAddress returned nil")
+                return nil
+            }
+
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer)
+            )
+            let slot = retainedYUV422CopyTextureSlot
+            retainedYUV422CopyTextureSlot = (slot + 1) % retainedYUV422CopyTextures.count
+            retainedYUV422CopyTextures[slot] = texture
+            return texture
+        }
+
+        /// Creates a Metal texture from a BGRA CVPixelBuffer.
+        ///
+        /// Fast path: if the buffer is IOSurface-backed (typical for built-in cameras and
+        /// Thunderbolt devices), wraps it via CVMetalTextureCache — zero copy.
+        /// Fallback path: if the texture cache fails (non-IOSurface USB buffers), locks the
+        /// pixel buffer and copies bytes into a managed MTLTexture. Slightly more CPU work
+        /// but still only ~1 ms for 1080p and produces a correct image.
+        private func makeBGRACVTexture(from frame: DecodedFrame, device: MTLDevice) -> MTLTexture? {
+            guard let pixelBuffer = frame.pixelBuffer else {
+                print("[Metal] makeBGRACVTexture: no pixelBuffer")
+                return nil
+            }
+
+            let width  = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+
+            if width == 0 || height == 0 {
+                print("[Metal] makeBGRACVTexture: degenerate size \(width)×\(height)")
+                return nil
+            }
+
+            // ── Fast path: IOSurface-backed buffer via texture cache (zero copy) ──────────
+            if let textureCache {
+                var cvTexture: CVMetalTexture?
+                let status = CVMetalTextureCacheCreateTextureFromImage(
+                    kCFAllocatorDefault,
+                    textureCache,
+                    pixelBuffer,
+                    nil,
+                    .bgra8Unorm,
+                    width,
+                    height,
+                    0,  // plane 0 — interleaved BGRA has only one plane
+                    &cvTexture
+                )
+
+                if status == kCVReturnSuccess, let cvTexture,
+                   let texture = CVMetalTextureGetTexture(cvTexture) {
+                    let slot = retainedBGRACVTextureSlot
+                    retainedBGRACVTextureSlot = (slot + 1) % retainedBGRACVTextures.count
+                    retainedBGRACVTextures[slot] = cvTexture
+                    return texture
+                }
+
+                print("[Metal] makeBGRACVTexture: cache path failed (status=\(status)); using byte-copy fallback")
+            }
+
+            // ── Byte-copy fallback: lock buffer address and upload via replace(region:…) ──
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .managed
+
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                print("[Metal] makeBGRACVTexture: makeTexture failed")
+                return nil
+            }
+
+            CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+            guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                print("[Metal] makeBGRACVTexture: CVPixelBufferGetBaseAddress returned nil")
+                return nil
+            }
+
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: bytesPerRow
+            )
+            return texture
         }
 
         private func makeBGRATexture(from frame: DecodedFrame, device: MTLDevice) -> MTLTexture? {
@@ -1978,6 +2325,7 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             _ renderInput: RenderInput,
             encoder: MTLRenderCommandEncoder,
             ycbcrPipelineState: MTLRenderPipelineState,
+            yuv422PipelineState: MTLRenderPipelineState,
             bgraPipelineState: MTLRenderPipelineState,
             vertexBuffer: MTLBuffer,
             samplerState: MTLSamplerState,
@@ -1988,6 +2336,12 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
                 encoder.setRenderPipelineState(ycbcrPipelineState)
                 encoder.setFragmentTexture(y, index: 0)
                 encoder.setFragmentTexture(cbcr, index: 1)
+            case .yuv422Packed(let texture, let ordering):
+                var orderingValue = ordering.rawValue
+                encoder.setRenderPipelineState(yuv422PipelineState)
+                encoder.setFragmentTexture(texture, index: 0)
+                encoder.setFragmentTexture(nil, index: 1)
+                encoder.setFragmentBytes(&orderingValue, length: MemoryLayout<UInt32>.stride, index: 2)
             case .bgra(let texture):
                 encoder.setRenderPipelineState(bgraPipelineState)
                 encoder.setFragmentTexture(texture, index: 0)
@@ -2032,12 +2386,15 @@ private struct RenderUniforms {
 
 private enum RenderInput {
     case ycbcr(y: MTLTexture, cbcr: MTLTexture)
+    case yuv422Packed(MTLTexture, ordering: YUV422Ordering)
     case bgra(MTLTexture)
 
     var width: Int {
         switch self {
         case .ycbcr(let y, _):
             return y.width
+        case .yuv422Packed(let texture, _):
+            return texture.width
         case .bgra(let texture):
             return texture.width
         }
@@ -2047,6 +2404,8 @@ private enum RenderInput {
         switch self {
         case .ycbcr(let y, _):
             return y.height
+        case .yuv422Packed(let texture, _):
+            return texture.height
         case .bgra(let texture):
             return texture.height
         }
@@ -2056,8 +2415,15 @@ private enum RenderInput {
         switch self {
         case .ycbcr:
             return true
+        case .yuv422Packed:
+            return false
         case .bgra:
             return false
         }
     }
+}
+
+private enum YUV422Ordering: UInt32 {
+    case uyvy = 0
+    case yuyv = 1
 }
