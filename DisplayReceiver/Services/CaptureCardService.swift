@@ -123,7 +123,9 @@ final class CaptureCardService: NSObject {
         case .authorized:
             DispatchQueue.main.async { [weak self] in
                 self?.onDevicesChanged?(CaptureCardService.availableDevices())
-                completion(true)
+                self?.requestAudioAccessIfNeeded {
+                    completion(true)
+                }
             }
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
@@ -131,13 +133,36 @@ final class CaptureCardService: NSObject {
                     if granted {
                         self?.onDevicesChanged?(CaptureCardService.availableDevices())
                     }
-                    completion(granted)
+                    guard granted else {
+                        completion(false)
+                        return
+                    }
+                    self?.requestAudioAccessIfNeeded {
+                        completion(true)
+                    }
                 }
             }
         case .denied, .restricted:
             DispatchQueue.main.async { completion(false) }
         @unknown default:
             DispatchQueue.main.async { completion(false) }
+        }
+    }
+
+    private func requestAudioAccessIfNeeded(completion: @escaping () -> Void) {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch status {
+        case .authorized, .denied, .restricted:
+            completion()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                print("[CaptureCard] microphone access granted=\(granted)")
+                DispatchQueue.main.async {
+                    completion()
+                }
+            }
+        @unknown default:
+            completion()
         }
     }
 
@@ -819,20 +844,22 @@ final class CaptureCardService: NSObject {
             ? 0
             : captureDiagnosticsPresentationIntervalMinMilliseconds
 
-        print(
-            String(
-                format: "[CaptureCard][Pacing] capture=%.1fHz pts=%.1fHz dropped=%llu interval avg/min/max=%.2f/%.2f/%.2fms pts avg/min/max=%.2f/%.2f/%.2fms",
-                frameRate,
-                presentationFrameRate,
-                captureDiagnosticsDroppedCount,
-                averageInterval,
-                minInterval,
-                captureDiagnosticsIntervalMaxMilliseconds,
-                presentationAverageInterval,
-                presentationMinInterval,
-                captureDiagnosticsPresentationIntervalMaxMilliseconds
-            )
+        let line = String(
+            format: "[CaptureCard][Pacing] capture=%.1fHz pts=%.1fHz dropped=%llu interval avg/min/max=%.2f/%.2f/%.2fms pts avg/min/max=%.2f/%.2f/%.2fms",
+            frameRate,
+            presentationFrameRate,
+            captureDiagnosticsDroppedCount,
+            averageInterval,
+            minInterval,
+            captureDiagnosticsIntervalMaxMilliseconds,
+            presentationAverageInterval,
+            presentationMinInterval,
+            captureDiagnosticsPresentationIntervalMaxMilliseconds
         )
+        print(line)
+        Task { @MainActor in
+            ReceiverDiagnosticsStore.shared.recordCapturePacing(line)
+        }
 
         captureDiagnosticsWindowStartNanoseconds = now
         captureDiagnosticsFrameCount = 0
@@ -882,7 +909,17 @@ extension CaptureCardService: AVCaptureVideoDataOutputSampleBufferDelegate {
         let cvFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
 
         if index < 5 || index % 300 == 0 {
-            print("[CaptureCard] frame \(index): \(width)×\(height) format=\(fcc(cvFormat))")
+            let line = "[CaptureCard] frame \(index): \(width)×\(height) format=\(fcc(cvFormat))"
+            print(line)
+            Task { @MainActor in
+                ReceiverDiagnosticsStore.shared.recordCaptureFrame(
+                    index: index,
+                    width: width,
+                    height: height,
+                    format: fcc(cvFormat)
+                )
+                ReceiverDiagnosticsStore.shared.recordLog(line)
+            }
         }
 
         // Route to the correct pixel format and, if necessary, convert.

@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import SwiftUI
 
@@ -67,6 +68,10 @@ struct ReceiverMenuBarView: View {
                 appController.toggleReceiverWindow()
             }
 
+            Button(appController.isStatsWindowVisible ? "Show Stats for Nerds" : "Stats for Nerds") {
+                appController.presentStatsWindow()
+            }
+
             if appController.isStreaming {
                 Button("Bring Stream Full Screen") {
                     appController.presentReceiverWindow(fullScreen: true)
@@ -115,6 +120,127 @@ struct ReceiverMenuBarView: View {
         }
         .padding(.vertical, 4)
         .frame(minWidth: 280, alignment: .leading)
+    }
+}
+
+struct ReceiverStatsWindowView: View {
+    @ObservedObject var appController: ReceiverAppController
+    @ObservedObject private var diagnostics = ReceiverDiagnosticsStore.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Stats for Nerds")
+                        .font(.title2.weight(.semibold))
+                    Text(appController.isCaptureCardMode ? "Capture card diagnostics" : "Network stream diagnostics")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    copyStats()
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                StatTile(title: "Input", value: appController.isCaptureCardMode ? "Capture Card" : "Network")
+                StatTile(title: "State", value: appController.stateText)
+                StatTile(title: "Frames", value: "\(appController.receivedFrameCount)")
+                StatTile(title: "Rate", value: appController.receivedFramesPerSecondText)
+                StatTile(title: "Throughput", value: appController.receivedMegabitsPerSecondText)
+                StatTile(title: "Frame", value: diagnostics.latestFrameText)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Pacing")
+                    .font(.headline)
+                DiagnosticLine(title: "Capture", value: diagnostics.capturePacingText)
+                DiagnosticLine(title: "Display", value: diagnostics.drawPacingText)
+                if !appController.isCaptureCardMode {
+                    DiagnosticLine(title: "Cursor", value: appController.cursorPacketsReceivedPerSecondText)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Latency Notes")
+                    .font(.headline)
+                Text("These stats show whether our app is keeping a fresh 60 fps capture-to-display pipeline. Console button-to-photon lag still needs an external test, because macOS never sees the moment your controller input happened.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Recent Logs")
+                        .font(.headline)
+                    Spacer()
+                    Text("Last update \(diagnostics.lastUpdated.formatted(date: .omitted, time: .standard))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(diagnostics.recentLogLines, id: \.self) { line in
+                            Text(line)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .padding(10)
+                }
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 430, minHeight: 420)
+    }
+
+    private func copyStats() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnostics.exportText, forType: .string)
+    }
+}
+
+private struct StatTile: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(2)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+private struct DiagnosticLine: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(title)
+                .foregroundStyle(.secondary)
+                .frame(width: 58, alignment: .leading)
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 

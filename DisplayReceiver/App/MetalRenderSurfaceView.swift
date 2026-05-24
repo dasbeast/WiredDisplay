@@ -1343,18 +1343,20 @@ struct MetalRenderSurfaceView: NSViewRepresentable {
             let drawRate = Double(drawDiagnosticsCount) / elapsedSeconds
             let newFrameRate = Double(drawDiagnosticsNewFrames) / elapsedSeconds
 
-            print(
-                String(
-                    format: "[Metal][Pacing] draw=%.1fHz new=%.1fHz repeat=%llu skipped=%llu interval avg/min/max=%.2f/%.2f/%.2fms",
-                    drawRate,
-                    newFrameRate,
-                    drawDiagnosticsRepeatedFrames,
-                    drawDiagnosticsSkippedInFlight,
-                    averageInterval,
-                    minInterval,
-                    drawDiagnosticsIntervalMaxMilliseconds
-                )
+            let line = String(
+                format: "[Metal][Pacing] draw=%.1fHz new=%.1fHz repeat=%llu skipped=%llu interval avg/min/max=%.2f/%.2f/%.2fms",
+                drawRate,
+                newFrameRate,
+                drawDiagnosticsRepeatedFrames,
+                drawDiagnosticsSkippedInFlight,
+                averageInterval,
+                minInterval,
+                drawDiagnosticsIntervalMaxMilliseconds
             )
+            print(line)
+            Task { @MainActor in
+                ReceiverDiagnosticsStore.shared.recordDrawPacing(line)
+            }
 
             drawDiagnosticsWindowStartNanoseconds = now
             drawDiagnosticsCount = 0

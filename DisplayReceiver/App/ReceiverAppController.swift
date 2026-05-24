@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Combine
 import Foundation
+import SwiftUI
 
 @MainActor
 final class ReceiverAppController: ObservableObject {
@@ -33,12 +34,14 @@ final class ReceiverAppController: ObservableObject {
     @Published private(set) var cameraPermissionDenied = false
     @Published private(set) var captureCardHasAudio = false
     @Published private(set) var captureCardAudioMuted = false
+    @Published private(set) var isStatsWindowVisible = false
 
     let coordinator = ReceiverSessionCoordinator()
     let advertisementService = ReceiverAdvertisementService()
     let powerManagementService = ReceiverPowerManagementService()
 
     private let windowManager = ReceiverStreamWindowManager()
+    private let statsWindowManager = ReceiverStatsWindowManager()
     private let captureResolutionDefaultsKeyPrefix = "DisplayReceiver.captureResolution."
     private var cancellables: Set<AnyCancellable> = []
 
@@ -98,6 +101,12 @@ final class ReceiverAppController: ObservableObject {
                 self.handleReceiverWindowCloseRequest()
             }
         }
+        statsWindowManager.onVisibilityChange = { [weak self] isVisible in
+            guard let self else { return }
+            Task { @MainActor in
+                self.isStatsWindowVisible = isVisible
+            }
+        }
 
         NotificationCenter.default.publisher(for: .receiverReopenMainWindow)
             .receive(on: RunLoop.main)
@@ -140,6 +149,11 @@ final class ReceiverAppController: ObservableObject {
         } else {
             presentReceiverWindow(fullScreen: false)
         }
+    }
+
+    func presentStatsWindow() {
+        statsWindowManager.present(appController: self)
+        isStatsWindowVisible = true
     }
 
     func leaveReceiverFullScreen() {
@@ -299,5 +313,100 @@ final class ReceiverAppController: ObservableObject {
 
     private func handleSystemDidWake() {
         refreshFromCoordinator()
+    }
+}
+
+@MainActor
+final class ReceiverStatsWindowManager: NSObject, NSWindowDelegate {
+    var onVisibilityChange: ((Bool) -> Void)?
+
+    private weak var window: NSWindow?
+
+    func present(appController: ReceiverAppController) {
+        let window = ensureWindow(appController: appController)
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        onVisibilityChange?(true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        _ = notification
+        onVisibilityChange?(false)
+    }
+
+    private func ensureWindow(appController: ReceiverAppController) -> NSWindow {
+        if let window {
+            return window
+        }
+
+        let contentView = ReceiverStatsWindowView(appController: appController)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Stats for Nerds"
+        window.minSize = NSSize(width: 430, height: 420)
+        window.center()
+        window.delegate = self
+        window.contentView = NSHostingView(rootView: contentView)
+        self.window = window
+        return window
+    }
+}
+
+@MainActor
+final class ReceiverDiagnosticsStore: ObservableObject {
+    static let shared = ReceiverDiagnosticsStore()
+
+    @Published private(set) var capturePacingText = "Waiting for capture frames"
+    @Published private(set) var drawPacingText = "Waiting for display draws"
+    @Published private(set) var latestFrameText = "No frame yet"
+    @Published private(set) var recentLogLines: [String] = []
+    @Published private(set) var lastUpdated = Date()
+
+    private let maxLogLines = 80
+    private let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    func recordLog(_ message: String) {
+        let line = "\(timestampFormatter.string(from: Date()))  \(message)"
+        recentLogLines.append(line)
+        if recentLogLines.count > maxLogLines {
+            recentLogLines.removeFirst(recentLogLines.count - maxLogLines)
+        }
+        lastUpdated = Date()
+    }
+
+    func recordCaptureFrame(index: UInt64, width: Int, height: Int, format: String) {
+        latestFrameText = "Frame \(index)  \(width)x\(height)  \(format)"
+        lastUpdated = Date()
+    }
+
+    func recordCapturePacing(_ text: String) {
+        capturePacingText = text
+        recordLog(text)
+    }
+
+    func recordDrawPacing(_ text: String) {
+        drawPacingText = text
+        recordLog(text)
+    }
+
+    var exportText: String {
+        var lines: [String] = [
+            "DisplayReceiver Stats for Nerds",
+            "Capture: \(capturePacingText)",
+            "Display: \(drawPacingText)",
+            "Latest Frame: \(latestFrameText)",
+            "",
+            "Recent Logs:"
+        ]
+        lines.append(contentsOf: recentLogLines)
+        return lines.joined(separator: "\n")
     }
 }
