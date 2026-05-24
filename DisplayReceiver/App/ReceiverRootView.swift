@@ -185,7 +185,7 @@ private struct ConnectPageInputSourceView: View {
                         Text("Camera access denied")
                             .fontWeight(.medium)
                             .foregroundStyle(.orange)
-                        Text("DisplayReceiver needs camera access to use capture cards.")
+                        Text("Restart DisplayReceiver and choose the capture card again. If macOS does not prompt, reset Camera access for DisplayReceiver.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

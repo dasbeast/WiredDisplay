@@ -52,7 +52,7 @@ final class CaptureCardService: NSObject {
             case .noDeviceSelected:
                 return "No capture device selected."
             case .permissionDenied:
-                return "Camera access denied. Go to System Settings › Privacy & Security › Camera and enable DisplayReceiver."
+                return "Camera access denied. Restart DisplayReceiver and choose the capture card again. If macOS does not prompt, reset Camera access for DisplayReceiver and reopen the app."
             case .cannotAddInput(let name, let underlying):
                 if let underlying {
                     return "Cannot open '\(name)': \(underlying.localizedDescription)"
