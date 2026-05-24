@@ -320,7 +320,7 @@ final class ReceiverAppController: ObservableObject {
 final class ReceiverStatsWindowManager: NSObject, NSWindowDelegate {
     var onVisibilityChange: ((Bool) -> Void)?
 
-    private weak var window: NSWindow?
+    private var window: NSWindow?
 
     func present(appController: ReceiverAppController) {
         let window = ensureWindow(appController: appController)
@@ -329,9 +329,10 @@ final class ReceiverStatsWindowManager: NSObject, NSWindowDelegate {
         onVisibilityChange?(true)
     }
 
-    func windowWillClose(_ notification: Notification) {
-        _ = notification
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
         onVisibilityChange?(false)
+        return false
     }
 
     private func ensureWindow(appController: ReceiverAppController) -> NSWindow {
